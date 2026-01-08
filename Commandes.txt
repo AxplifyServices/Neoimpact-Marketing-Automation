@@ -1,0 +1,8 @@
+cd OneDrive\Bureau\Marketing_automation_V2
+
+.\.venv\Scripts\Activate
+
+streamlit run app/streamlit/Consolide_int.py
+
+serv :ssh ubuntu@51.75.252.139
+Code serveur : zitanezac
