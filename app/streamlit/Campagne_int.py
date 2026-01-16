@@ -2,99 +2,31 @@ from __future__ import annotations
 
 import os
 import sys
-import json
-from datetime import date, timedelta
+from datetime import date
 
 import streamlit as st
-import pandas as pd
 
 # --- Fix imports "app.*" pour Streamlit ---
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from app.storage.campagnes_store_sqlite import list_campagnes_active, get_campagne
-from app.storage.cibles_store_sqlite import list_cibles
-from app.storage.modele_store_sqlite import load_db as load_modeles_db
-from app.domain.campagne_service import create_campagne, annuler_campagne
+from app.streamlit._modele_graph import build_dot_from_liste_action, build_dot_from_graphe_json
 
+from app.domain.campagne_service import (
+    create_campagne,
+    annuler_campagne,
+    mettre_en_pause_campagne,
+    activer_campagne,
+)
 
-# =========================
-# Helpers JSON
-# =========================
-def _safe_json_load(s: str, default):
-    if not s:
-        return default
-    try:
-        return json.loads(s)
-    except Exception:
-        return default
-
-
-# =========================
-# Graphe EXACT du modèle (graphe_json)
-# =========================
-def build_dot_from_graphe_json(graph_json: dict) -> str:
-    """
-    graph_json attendu:
-    {
-      "nodes": [{"id":"1","label":"Appel"}, ...],
-      "edges": [{"from":"1","to":"2","label":">= 3"}, ...]
-    }
-    """
-    nodes = graph_json.get("nodes", []) or []
-    edges = graph_json.get("edges", []) or []
-
-    lines = []
-    lines.append("digraph G {")
-    lines.append("rankdir=LR;")  # comme aperçu modèles
-    lines.append('node [shape=box];')
-
-    # Nodes
-    for n in nodes:
-        nid = str(n.get("id", "")).strip()
-        lab = str(n.get("label", "")).replace('"', "'")
-        if nid:
-            lines.append(f'"{nid}" [label="{lab}"];')
-
-    # Edges
-    for e in edges:
-        a = str(e.get("from", "")).strip()
-        b = str(e.get("to", "")).strip()
-        lab = str(e.get("label", "") or "").replace('"', "'").strip()
-        if a and b:
-            if lab:
-                lines.append(f'"{a}" -> "{b}" [label="{lab}"];')
-            else:
-                lines.append(f'"{a}" -> "{b}";')
-
-    lines.append("}")
-    return "\n".join(lines)
-
-
-# =========================
-# UI Choices
-# =========================
-def _modele_choices():
-    df = load_modeles_db()
-    if df is None or df.empty:
-        return [], {}
-    labels, mapping = [], {}
-    for _, r in df.iterrows():
-        lbl = f"{r['ID_MODELE']} — {r['Nom_modele']}"
-        labels.append(lbl)
-        mapping[lbl] = r["ID_MODELE"]
-    return labels, mapping
-
-
-def _cible_choices():
-    cibles = list_cibles()
-    labels, mapping = [], {}
-    for c in cibles:
-        lbl = f"{c['id_cible']} — {c['nom_cible']}"
-        labels.append(lbl)
-        mapping[lbl] = c["id_cible"]
-    return labels, mapping
+# ✅ façade UI (plus de storage/pandas dans le front)
+from app.domain.ui_facades.campagne_ui_facade import (
+    get_campagnes_affichables_for_ui,
+    get_modele_choices_for_ui,
+    get_cible_choices_for_ui,
+    get_modele_graph_payload_for_ui,
+)
 
 
 # =========================
@@ -103,7 +35,6 @@ def _cible_choices():
 def main():
     st.set_page_config(page_title="Campagnes", layout="wide")
 
-    # Header + bouton plus (haut droite)
     h1, h2 = st.columns([0.88, 0.12], vertical_alignment="center")
     h1.title("📣 Campagnes")
 
@@ -113,51 +44,47 @@ def main():
     if h2.button("➕", help="Créer une campagne", use_container_width=True):
         st.session_state.show_create = not st.session_state.show_create
 
-    # ---- Création (toggle)
+    # ---- Création
     if st.session_state.show_create:
         st.subheader("Créer une campagne")
 
         nom = st.text_input("Nom de la campagne", value="").strip()
 
-        c1, c2, c3 = st.columns([1, 1, 1])
+        c1, c2 = st.columns([1, 1])
         today = date.today()
 
-        # --- init dates en session (une seule fois)
+        # ✅ Dates en session_state + auto-correction (si début > fin => fin = début)
         if "camp_date_debut" not in st.session_state:
             st.session_state["camp_date_debut"] = today
         if "camp_date_fin" not in st.session_state:
-            st.session_state["camp_date_fin"] = today + timedelta(days=1)
+            st.session_state["camp_date_fin"] = today
 
-        # --- callback: si début change -> fin = début + 1 jour (si besoin)
-        def _sync_date_fin():
-            d0 = st.session_state.get("camp_date_debut")
-            d1 = st.session_state.get("camp_date_fin")
-            if d0 is None:
-                return
-            if (d1 is None) or (d1 <= d0):
-                st.session_state["camp_date_fin"] = d0 + timedelta(days=1)
+        def _on_change_debut():
+            if st.session_state["camp_date_debut"] > st.session_state["camp_date_fin"]:
+                st.session_state["camp_date_fin"] = st.session_state["camp_date_debut"]
 
-        d_debut = c1.date_input(
-            "Date de début",
-            min_value=today,
-            key="camp_date_debut",
-            on_change=_sync_date_fin,
-        )
+        def _on_change_fin():
+            if st.session_state["camp_date_fin"] < st.session_state["camp_date_debut"]:
+                st.session_state["camp_date_fin"] = st.session_state["camp_date_debut"]
 
-        d_fin = c2.date_input(
-            "Date de fin",
-            min_value=st.session_state["camp_date_debut"],
-            key="camp_date_fin",
-        )
+        with c1:
+            d_debut = st.date_input(
+                "Date de début",
+                key="camp_date_debut",
+                min_value=today,
+                on_change=_on_change_debut,
+            )
 
-        # récurrence = Non pour le moment
-        c3.radio("Récurrence", ["Non"], index=0, horizontal=True)
+        with c2:
+            d_fin = st.date_input(
+                "Date de fin",
+                key="camp_date_fin",
+                min_value=st.session_state["camp_date_debut"],
+                on_change=_on_change_fin,
+            )
 
-        if d_fin < d_debut:
-            st.error("Date de fin ne peut pas être avant date de début.")
-
-        modele_labels, modele_map = _modele_choices()
-        cible_labels, cible_map = _cible_choices()
+        modele_labels, modele_map = get_modele_choices_for_ui()
+        cible_labels, cible_map = get_cible_choices_for_ui()
 
         if not modele_labels:
             st.warning("Aucun modèle disponible.")
@@ -170,15 +97,10 @@ def main():
         cbl_lbl = st.selectbox("Cible", cible_labels)
 
         col_a, col_b = st.columns([0.85, 0.15], vertical_alignment="center")
-        with col_a:
-            st.caption("")#La campagne sera Planifiée si la date de début est dans le futur, sinon En cours.")
         with col_b:
             if st.button("✅ Créer", use_container_width=True):
                 if not nom:
                     st.error("Nom campagne obligatoire.")
-                    st.stop()
-                if d_fin < d_debut:
-                    st.error("Corrige les dates.")
                     st.stop()
 
                 res = create_campagne(
@@ -195,59 +117,126 @@ def main():
                 st.session_state.show_create = False
                 st.rerun()
 
-    # ---- Liste campagnes (comme Modèles)
     st.markdown("---")
-    #st.subheader("Campagnes")
 
-    camps = list_campagnes_active()  # exclut Annulée
+    # ✅ campagnes affichables via façade (même filtre qu'avant)
+    camps = get_campagnes_affichables_for_ui()
+
     if not camps:
-        st.info("Aucune campagne En cours / Planifiée.")
+        st.info("Aucune campagne En cours / Planifiée / En pause.")
         return
 
-    dfm = load_modeles_db()  # pour récupérer graphe_json
-    if dfm is None:
-        dfm = pd.DataFrame()
-
+    # =====================================================
+    # Liste (header custom + boutons à droite + contenu toggle)
+    # =====================================================
     for c in camps:
         cid = c.get("id_campagne", "")
         nom = c.get("nom_campagne", "")
-        etat = c.get("etat_campagne", "")
+        etat = c.get("etat_campagne", "") or c.get("etat", "")
 
-        line = f"{cid} — {nom} — {etat}"
+        # état open/close par campagne
+        toggle_key = f"camp_open_{cid}"
+        if toggle_key not in st.session_state:
+            st.session_state[toggle_key] = False
+        is_open = bool(st.session_state[toggle_key])
 
-        # bouton annuler à gauche, expander à droite (même pattern que modèles)
-        col_cancel, col_exp = st.columns([0.08, 0.92], vertical_alignment="center")
+        # Header: titre à gauche + boutons à droite (Détails + actions)
+        h1c, h2c = st.columns([0.75, 0.25], vertical_alignment="center")
 
-        with col_cancel:
-            if st.button("❌", key=f"cancel_{cid}", help="Annuler", use_container_width=True):
-                annuler_campagne(cid)
-                st.rerun()
+        with h1c:
+            st.markdown(
+                f"<div style='padding-top:4px;'><b>{cid} — {nom} — {etat}</b></div>",
+                unsafe_allow_html=True,
+            )
 
-        with col_exp:
-            with st.expander(line, expanded=False):
-                # détails (uniquement quand on clique)
+        with h2c:
+            # 4 boutons alignés
+            b0, b1, b2, b3 = st.columns([1.6, 1, 1, 1])
+
+            # 🔍 Détails (toggle)
+            with b0:
+                if st.button(
+                    "🔍 Détails",
+                    key=f"details_{cid}",
+                    use_container_width=True,
+                ):
+                    st.session_state[toggle_key] = not is_open
+                    st.rerun()
+
+            # ▶️ Activer
+            with b1:
+                if st.button(
+                    "▶️",
+                    key=f"activate_{cid}",
+                    help="Activer",
+                    disabled=(etat != "En pause"),
+                    use_container_width=True,
+                ):
+                    res = activer_campagne(cid)
+                    if res.get("ok"):
+                        st.success(f"Campagne réactivée ✅ (nouvel état: {res.get('etat')})")
+                    else:
+                        st.error(res.get("error", "Erreur activation"))
+                    st.rerun()
+
+            # ⏸️ Pause
+            with b2:
+                if st.button(
+                    "⏸️",
+                    key=f"pause_{cid}",
+                    help="Mettre en pause",
+                    disabled=(etat != "En cours"),
+                    use_container_width=True,
+                ):
+                    res = mettre_en_pause_campagne(cid)
+                    if res.get("ok"):
+                        st.success("Campagne mise en pause ✅")
+                    else:
+                        st.error(res.get("error", "Erreur mise en pause"))
+                    st.rerun()
+
+            # ❌ Annuler
+            with b3:
+                if st.button("❌", key=f"cancel_{cid}", help="Annuler", use_container_width=True):
+                    annuler_campagne(cid)
+                    st.rerun()
+
+        # Contenu (affiché/masqué) - inchangé dans le fond
+        if is_open:
+            with st.container(border=True):
                 st.write(f"**Date création :** {c.get('date_creation', '')}")
                 st.write(f"**Début :** {c.get('date_debut', '')}")
                 st.write(f"**Fin :** {c.get('date_fin', '')}")
                 st.write(f"**ID modèle :** {c.get('id_modele', '')}")
                 st.write(f"**ID cible :** {c.get('id_cible', '')}")
 
-                # graphe exact du modèle (graphe_json)
                 st.markdown("**Graphe du modèle**")
 
                 id_modele = c.get("id_modele", "")
-                row = dfm[dfm["ID_MODELE"] == id_modele] if (not dfm.empty and id_modele) else pd.DataFrame()
+                payload = get_modele_graph_payload_for_ui(id_modele)
 
-                if row.empty:
+                if not payload:
                     st.info("Modèle introuvable pour afficher le graphe.")
                 else:
-                    r = row.iloc[0].to_dict()
-                    graph_json = _safe_json_load(r.get("graphe_json", ""), {"nodes": [], "edges": []})
-
-                    if not graph_json.get("nodes"):
-                        st.info("Graphe du modèle vide.")
+                    liste_action = payload.get("liste_action", []) or []
+                    if liste_action:
+                        st.graphviz_chart(
+                            build_dot_from_liste_action(
+                                liste_action,
+                                payload.get("variable_cible", "") or "",
+                                payload.get("objectif", "") or "",
+                                selected_id=None,
+                            ),
+                            use_container_width=True,
+                        )
                     else:
-                        st.graphviz_chart(build_dot_from_graphe_json(graph_json))
+                        graph_json = payload.get("graphe_json", {"nodes": [], "edges": []}) or {"nodes": [], "edges": []}
+                        if not graph_json.get("nodes"):
+                            st.info("Graphe du modèle vide.")
+                        else:
+                            st.graphviz_chart(build_dot_from_graphe_json(graph_json), use_container_width=True)
+
+        st.markdown("")  # petite séparation naturelle
 
 
 if __name__ == "__main__":

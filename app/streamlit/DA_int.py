@@ -4,17 +4,19 @@ from typing import Any, Dict
 
 import streamlit as st
 
-from app.engine.crc_engine import (
-    get_next_crc_input_row,
-    skip_current_row,
-    apply_result_and_update_client_campagnes,
-    call_current_client,
-)
 from app.domain.canaux import resultats_for_canal
+from app.engine.crc_engine import (
+    get_next_row_from_queue,
+    delete_row_from_queue,
+    apply_result_and_update_client_campagnes_from_queue,
+)
 from app.scripts.batch_manuel import run_batch_manuel
 
 # ✅ façade UI : plus de sqlite3 / DB_PATH dans le front
-from app.domain.ui_facades.crc_ui_facade import get_crc_context_from_db
+from app.domain.ui_facades.da_ui_facade import get_da_context_from_db
+
+
+QUEUE_TABLE = "vers_da"
 
 
 def _render_header(ctx: Dict[str, Any]) -> None:
@@ -40,44 +42,38 @@ def _render_header(ctx: Dict[str, Any]) -> None:
     st.divider()
 
 
-def main(embedded: bool = False, key_prefix: str = "crc") -> None:
+def main(embedded: bool = False, key_prefix: str = "da") -> None:
     if not embedded:
-        st.title("📞 CRC")
+        st.title("🏢 DA")
 
-    # Refresh = batch
     if not embedded:
         if st.button("🔄 Refresh", key=f"{key_prefix}_refresh"):
             run_batch_manuel()
             st.rerun()
 
-    row = get_next_crc_input_row()
+    row = get_next_row_from_queue(QUEUE_TABLE)
     if not row:
-        st.info("Aucune ligne à traiter dans CRC.")
+        st.info("Aucune ligne à traiter dans DA.")
         return
 
     id_campagne = str(row.get("ID_CAMPAGNE") or "").strip()
     radical = str(row.get("Radical_compte") or "").strip()
 
-    # ✅ récupère le contexte via façade (SQL hors UI)
-    ctx = get_crc_context_from_db(id_campagne, radical)
+    # ✅ contexte DB déplacé hors UI
+    ctx = get_da_context_from_db(id_campagne, radical)
     _render_header(ctx)
 
-    canal = (row.get("Canal") or "").strip() or "Appel"
+    canal = "Directeur d'agence"
     resultats = resultats_for_canal(canal)
 
-    c1, c2, c3 = st.columns([0.18, 0.18, 0.64], vertical_alignment="center")
+    c1, c2 = st.columns([0.2, 0.8], vertical_alignment="center")
 
     with c1:
         if st.button("Skip", key=f"{key_prefix}_skip", use_container_width=True):
-            skip_current_row(id_campagne, radical)
+            delete_row_from_queue(QUEUE_TABLE, id_campagne, radical)
             st.rerun()
 
     with c2:
-        if st.button("Appeler", key=f"{key_prefix}_call", use_container_width=True):
-            call_current_client(row)
-            st.rerun()
-
-    with c3:
         if not resultats:
             st.warning("Aucun résultat défini pour ce canal.")
         else:
@@ -85,5 +81,5 @@ def main(embedded: bool = False, key_prefix: str = "crc") -> None:
             for col, rlab in zip(cols, resultats):
                 with col:
                     if st.button(rlab, key=f"{key_prefix}_res_{rlab}", use_container_width=True):
-                        apply_result_and_update_client_campagnes(row, rlab)
+                        apply_result_and_update_client_campagnes_from_queue(row, rlab, QUEUE_TABLE)
                         st.rerun()

@@ -11,11 +11,14 @@ if PROJECT_ROOT not in sys.path:
 
 # ===== Import des interfaces existantes (doivent exposer main())
 from app.streamlit.Campagne_int import main as campagnes_main
-from app.streamlit.Historique_int import main as historique_main
+from app.streamlit.Data_int import main as data_main  # ✅ Historique -> Data
 from app.streamlit.CRC_int import main as crc_main
 from app.streamlit.Dashboard_int import main as dashboard_main
 from app.streamlit.Cibles_int import main as cibles_main
 from app.streamlit.Modeles_int import main as modeles_main
+
+# ✅ Nouvelle meta-interface
+from app.streamlit.Contact_Client_int import main as contact_client_main
 
 
 def creation_view():
@@ -28,8 +31,10 @@ def creation_view():
     c1, c2, _ = st.columns([0.2, 0.2, 0.6], vertical_alignment="center")
     if c1.button("🎯 Cibles", use_container_width=True):
         st.session_state.creation_tab = "Cibles"
+        st.rerun()
     if c2.button("🧠 Modèles", use_container_width=True):
         st.session_state.creation_tab = "Modèles"
+        st.rerun()
 
     st.markdown("---")
 
@@ -53,7 +58,6 @@ section[data-testid="stSidebar"] > div {
   background: #f2f3f5;              /* gris clair */
   border-right: 1px solid #d9dce1;  /* séparation clean */
 }
-
 
 /* Un peu d'air en haut */
 section[data-testid="stSidebar"] .block-container {
@@ -93,7 +97,6 @@ section[data-testid="stSidebar"] div.stButton > button:active {
   transform: scale(0.99);
 }
 
-
 /* Enlève l'outline bleu agressif (reste accessible) */
 section[data-testid="stSidebar"] div.stButton > button:focus-visible {
   outline: 2px solid rgba(99, 179, 237, 0.35);
@@ -120,7 +123,6 @@ section[data-testid="stSidebar"] div.stButton > button:focus-visible {
   border-radius: 8px;
 }
 
-
 /* Espace entre blocks (propre) */
 .nav-stack {
   display: flex;
@@ -135,9 +137,9 @@ section[data-testid="stSidebar"] div.stButton > button:focus-visible {
     PAGES = [
         ("Campagnes", "📣 Campagnes"),
         ("Création", "🧩 Création"),
-        ("CRC", "📞 CRC"),
-        ("Historique", "🕘 Historique"),
-        ("Dashboard", "📊 Dashboard"),    
+        ("Contact Client", "☎️ Contact Client"),  # ✅ ajouté
+        ("Data", "🗃️ Data"),  # ✅ Historique -> Data
+        ("Dashboard", "📊 Dashboard"),
     ]
 
     if "active_page" not in st.session_state:
@@ -148,13 +150,10 @@ section[data-testid="stSidebar"] div.stButton > button:focus-visible {
         st.markdown('<div class="nav-stack">', unsafe_allow_html=True)
 
         for key, label in PAGES:
-            is_active = (st.session_state.active_page == key)
+            is_active = st.session_state.active_page == key
 
             # Wrapper qui permet de styliser le bouton actif
-            if is_active:
-                st.markdown('<div class="nav-active">', unsafe_allow_html=True)
-            else:
-                st.markdown('<div>', unsafe_allow_html=True)
+            st.markdown('<div class="nav-active">' if is_active else "<div>", unsafe_allow_html=True)
 
             clicked = st.button(label, key=f"nav_{key}", use_container_width=True)
             st.markdown("</div>", unsafe_allow_html=True)
@@ -175,12 +174,16 @@ section[data-testid="stSidebar"] div.stButton > button:focus-visible {
 
     elif page == "Création":
         creation_view()
-    elif page == "CRC":
-        crc_main()
-    elif page == "Historique":
-        historique_main()
+
+    elif page == "Contact Client":
+        contact_client_main()  # ✅ nouveau
+
+    elif page == "Data":
+        data_main()
+
     elif page == "Dashboard":
         dashboard_main()
+
 
 if __name__ == "__main__":
     main()

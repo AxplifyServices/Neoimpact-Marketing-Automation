@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import date
@@ -8,16 +7,12 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
-
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-DB_PATH = os.path.join(PROJECT_ROOT, "clients.db")
+from app.storage.db import DB_PATH
 
 
 # =========================
 # Helpers
 # =========================
-
-
 def _connect() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH)
 
@@ -40,15 +35,12 @@ def _to_date_series(s: pd.Series) -> pd.Series:
 # =========================
 # Data access
 # =========================
-
-
 CLIENTS_TABLE = "clients_campagnes"
 
 
 @dataclass
 class DashboardFilters:
     campagne_ids: Optional[List[str]] = None
-    # optional filter on Date_last_action
     date_min: Optional[date] = None
     date_max: Optional[date] = None
 
@@ -82,11 +74,9 @@ def load_clients_campagnes_df(filters: DashboardFilters) -> pd.DataFrame:
     if df.empty:
         return df
 
-    # Normalize / computed columns
     df["_action_norm"] = df.get("Action", "").apply(_normalize_action)
     df["_is_closed"] = df["_action_norm"].eq("closed")
 
-    # contact = date_last_action non vide
     df["_has_last_action"] = df.get("Date_last_action", "").astype(str).str.strip().ne("")
     df["_date_last_action"] = _to_date_series(df.get("Date_last_action", pd.Series([None] * len(df))))
 
@@ -95,7 +85,6 @@ def load_clients_campagnes_df(filters: DashboardFilters) -> pd.DataFrame:
     if filters.date_max is not None:
         df = df[df["_date_last_action"].notna() & (df["_date_last_action"] <= filters.date_max)]
 
-    # Ensure numeric columns exist
     for c in ["NB_appel", "NB_mail", "NB_sms", "NB_message"]:
         if c not in df.columns:
             df[c] = 0
@@ -107,8 +96,6 @@ def load_clients_campagnes_df(filters: DashboardFilters) -> pd.DataFrame:
 # =========================
 # KPI computation
 # =========================
-
-
 def compute_overview_kpis(df: pd.DataFrame) -> Dict[str, object]:
     """Compute main KPI cards for the dashboard."""
     if df is None or df.empty:
@@ -130,11 +117,9 @@ def compute_overview_kpis(df: pd.DataFrame) -> Dict[str, object]:
     clients_contactes = int(df["_has_last_action"].sum())
     objectifs_atteints = int(df["_is_closed"].sum())
 
-    # "En attente" = Action == 'En Attente' (case-insensitive)
     en_attente_mask = df["_action_norm"].eq("en attente")
     clients_en_attente = int(en_attente_mask.sum())
 
-    # "en traitement cc" = parmi les en attente, ceux dont Etat_campagne == 'En cours'
     clients_en_attente_en_traitement = int(
         (en_attente_mask & df.get("Etat_campagne", "").astype(str).str.strip().eq("En cours")).sum()
     )
@@ -163,22 +148,11 @@ def compute_overview_kpis(df: pd.DataFrame) -> Dict[str, object]:
 
 
 def compute_success_by_channel(df: pd.DataFrame) -> pd.DataFrame:
-    """Success rates by channel.
-
-    Definition (pragmatic):
-    - Population per channel: clients with NB_channel > 0
-    - Success per channel: among those, Action == Closed
-    """
     if df is None or df.empty:
         return pd.DataFrame(columns=["Canal", "Clients", "Closed", "Taux_reussite"])
 
     rows = []
-    mapping = {
-        "Appel": "NB_appel",
-        "Mail": "NB_mail",
-        "SMS": "NB_sms",
-        "Message": "NB_message",
-    }
+    mapping = {"Appel": "NB_appel", "Mail": "NB_mail", "SMS": "NB_sms", "Message": "NB_message"}
     for canal, col in mapping.items():
         pop = df[df[col] > 0]
         n_clients = int(len(pop))
@@ -190,7 +164,6 @@ def compute_success_by_channel(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_daily_actions(df: pd.DataFrame) -> pd.DataFrame:
-    """Daily action volume: count(Date_last_action) grouped by day."""
     if df is None or df.empty:
         return pd.DataFrame(columns=["Date", "Actions"])
 
@@ -205,12 +178,6 @@ def compute_daily_actions(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_backlog_over_time(df: pd.DataFrame) -> pd.DataFrame:
-    """Backlog (non traité) over time.
-
-    A client is considered "non traité" for a day D if:
-    - Action != Closed
-    - AND (Date_last_action is null OR Date_last_action < D)
-    """
     if df is None or df.empty:
         return pd.DataFrame(columns=["Date", "Backlog_non_traite"])
 
@@ -218,33 +185,18 @@ def compute_backlog_over_time(df: pd.DataFrame) -> pd.DataFrame:
     if not_closed.empty:
         return pd.DataFrame(columns=["Date", "Backlog_non_traite"])
 
-    dates = df["_date_last_action"].dropna()
-    start = dates.min() if not dates.empty else date.today()
-    end = max(dates.max() if not dates.empty else date.today(), date.today())
-
-    all_days = pd.date_range(start=start, end=end, freq="D").date
-    last_dates = not_closed["_date_last_action"]
-
-    rows = []
-    for d in all_days:
-        backlog = int(((last_dates.isna()) | (last_dates < d)).sum())
-        rows.append({"Date": d, "Backlog_non_traite": backlog})
-
-    return pd.DataFrame(rows)
+    dates = pd.date_range(date.today(), date.today(), freq="D")
+    return pd.DataFrame({"Date": [d.date() for d in dates], "Backlog_non_traite": [int(len(not_closed)) for _ in dates]})
 
 
-def compute_calls_before_success(df: pd.DataFrame) -> Dict[str, float]:
-    """Average/median calls before success (Closed clients only)."""
+def compute_calls_before_success(df: pd.DataFrame) -> Dict[str, object]:
     if df is None or df.empty:
-        return {"moy_appels_closed": 0.0, "median_appels_closed": 0.0, "n_closed": 0.0}
+        return {"n_closed": 0, "moy_appels_closed": 0.0}
 
     closed = df[df["_is_closed"]].copy()
-    if closed.empty:
-        return {"moy_appels_closed": 0.0, "median_appels_closed": 0.0, "n_closed": 0.0}
+    n_closed = int(len(closed))
+    if n_closed == 0:
+        return {"n_closed": 0, "moy_appels_closed": 0.0}
 
-    calls = pd.to_numeric(closed.get("NB_appel", 0), errors="coerce").fillna(0)
-    return {
-        "moy_appels_closed": float(calls.mean()),
-        "median_appels_closed": float(calls.median()),
-        "n_closed": float(len(closed)),
-    }
+    moy = float(closed["NB_appel"].mean()) if "NB_appel" in closed.columns else 0.0
+    return {"n_closed": n_closed, "moy_appels_closed": moy}

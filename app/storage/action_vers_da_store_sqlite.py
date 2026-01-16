@@ -5,7 +5,8 @@ from typing import Any, Dict, List
 
 from app.storage.db import DB_PATH
 
-QUEUE_TABLE = "vers_cc"
+# ✅ Table queue DA (utilisée par DA_int.py via crc_engine.get_next_row_from_queue)
+QUEUE_TABLE = "vers_da"
 
 QUEUE_SCHEMA_SQL = f"""
 CREATE TABLE IF NOT EXISTS {QUEUE_TABLE} (
@@ -30,7 +31,7 @@ def _connect() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH)
 
 
-def ensure_vers_cc_table() -> None:
+def ensure_vers_da_table() -> None:
     conn = _connect()
     cur = conn.cursor()
     cur.execute(QUEUE_SCHEMA_SQL)
@@ -38,15 +39,15 @@ def ensure_vers_cc_table() -> None:
     conn.close()
 
 
-def fill_action_vers_cc_from_clients_campagnes(id_campagne: str) -> int:
+def fill_action_vers_da_from_clients_campagnes(id_campagne: str) -> int:
     """
     ✅ IMPORTANT: on garde ce NOM (appelé par campagne_service)
-    CC = clients dont:
+    DA = clients dont:
       - Etat_campagne='En cours'
-      - Action="Conseiller client"
-    => on remplit la queue 'vers_cc'
+      - Action="Directeur d'agence"
+    => on remplit la queue 'vers_da'
     """
-    ensure_vers_cc_table()
+    ensure_vers_da_table()
 
     conn = _connect()
     conn.row_factory = sqlite3.Row
@@ -78,7 +79,7 @@ def fill_action_vers_cc_from_clients_campagnes(id_campagne: str) -> int:
         LEFT JOIN campagnes c ON c.id_campagne = cc.ID_CAMPAGNE
         WHERE cc.ID_CAMPAGNE = ?
           AND COALESCE(cc.Etat_campagne,'') = 'En cours'
-          AND COALESCE(cc.Action,'') = 'Conseiller client'
+          AND COALESCE(cc.Action,'') = 'Directeur d''agence'
         """,
         (id_campagne,),
     )
