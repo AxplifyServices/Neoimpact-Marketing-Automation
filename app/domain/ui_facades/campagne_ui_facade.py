@@ -28,6 +28,10 @@ def _safe_json_load(s: Any, default):
         return default
 
 
+def _safe_str(x: Any) -> str:
+    return "" if x is None else str(x)
+
+
 # =========================
 # Campagnes (UI data)
 # =========================
@@ -42,6 +46,10 @@ def get_campagnes_affichables_for_ui() -> List[Dict[str, Any]]:
     for c in camps_all:
         etat = c.get("etat_campagne", "") or c.get("etat", "")
         if etat in ("En cours", "Planifiée", "En pause"):
+            # ✅ description remonte automatiquement si la colonne existe
+            # (on force juste une string pour éviter None côté UI)
+            if "description" in c:
+                c["description"] = _safe_str(c.get("description"))
             camps.append(c)
     return camps
 

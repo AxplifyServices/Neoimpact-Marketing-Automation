@@ -50,6 +50,14 @@ def main():
 
         nom = st.text_input("Nom de la campagne", value="").strip()
 
+        # ✅ NEW: description
+        description = st.text_area(
+            "Description (optionnel)",
+            value="",
+            height=110,
+            placeholder="Décris brièvement l'objectif, le contexte, ou les consignes internes…",
+        ).strip()
+
         c1, c2 = st.columns([1, 1])
         today = date.today()
 
@@ -109,6 +117,7 @@ def main():
                     id_cible=cible_map[cbl_lbl],
                     date_debut=d_debut.isoformat(),
                     date_fin=d_fin.isoformat(),
+                    description=description,  # ✅ NEW
                 )
                 st.success(
                     f"Campagne créée ✅ ID={res['id_campagne']} | état={res['etat_campagne']} | "
@@ -133,6 +142,7 @@ def main():
         cid = c.get("id_campagne", "")
         nom = c.get("nom_campagne", "")
         etat = c.get("etat_campagne", "") or c.get("etat", "")
+        desc = (c.get("description") or "").strip()
 
         # état open/close par campagne
         toggle_key = f"camp_open_{cid}"
@@ -209,6 +219,9 @@ def main():
                 st.write(f"**Fin :** {c.get('date_fin', '')}")
                 st.write(f"**ID modèle :** {c.get('id_modele', '')}")
                 st.write(f"**ID cible :** {c.get('id_cible', '')}")
+
+                # ✅ NEW: description affichée
+                st.write(f"**Description :** {desc if desc else '—'}")
 
                 st.markdown("**Graphe du modèle**")
 

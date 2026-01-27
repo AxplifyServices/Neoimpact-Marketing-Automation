@@ -8,3 +8,10 @@ serv :ssh ubuntu@51.75.252.139
 Code serveur : zitanezac
 
 http://vps-2fd6dcaa.vps.ovh.net/
+
+
+
+scp app/scripts/batch_manuel.py \ ubuntu@51.75.252.139:/apps/Marketing_automation_V3/app/scripts/batch_manuel.py
+
+http://51.75.252.139:8501/
+http://51.75.252.139:8000/docs

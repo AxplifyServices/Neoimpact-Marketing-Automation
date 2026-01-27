@@ -78,6 +78,31 @@ def _clients_columns(conn: sqlite3.Connection) -> List[str]:
     return [r[1] for r in cur.fetchall()]
 
 
+def _resolve_clients_col(conn: sqlite3.Connection, requested_col: str) -> Optional[str]:
+    """
+    Résout une colonne de la table clients de manière robuste:
+    - match exact
+    - sinon match insensible à la casse/accents/espaces via _norm_cmp
+    Retourne le NOM réel de la colonne dans la DB (à utiliser dans le SQL).
+    """
+    req = _norm_str(requested_col)
+    if not req:
+        return None
+
+    cols = _clients_columns(conn)
+    # 1) exact
+    if req in cols:
+        return req
+
+    # 2) normalized compare
+    req_n = _norm_cmp(req)
+    for c in cols:
+        if _norm_cmp(c) == req_n:
+            return c
+
+    return None
+
+
 def _modeles_id_col(conn: sqlite3.Connection) -> str:
     cur = conn.cursor()
     cur.execute(f"PRAGMA table_info({MODELES_TABLE})")
@@ -122,12 +147,16 @@ def _load_modele_meta(conn: sqlite3.Connection, id_modele: str) -> Tuple[str, st
 
 
 def _update_statut_actuel_from_clients(conn: sqlite3.Connection, id_campagne: str, variable_cible: str) -> int:
+    """
+    Met à jour clients_campagnes.statut_actuel depuis clients.<variable_cible>.
+    Fix: résolution de colonne clients en case-insensitive (évite les var = 'statut_client' vs 'STATUT_CLIENT').
+    """
     var = _norm_str(variable_cible)
     if not var:
         return 0
 
-    cols = set(_clients_columns(conn))
-    if var not in cols:
+    resolved_col = _resolve_clients_col(conn, var)
+    if not resolved_col:
         return 0
 
     cur = conn.cursor()
@@ -135,7 +164,7 @@ def _update_statut_actuel_from_clients(conn: sqlite3.Connection, id_campagne: st
         f"""
         UPDATE {CLIENTS_CAMPAGNES_TABLE}
         SET statut_actuel = (
-            SELECT COALESCE(cl."{var}", '')
+            SELECT COALESCE(cl."{resolved_col}", '')
             FROM {CLIENTS_TABLE} cl
             WHERE cl.radical_compte = {CLIENTS_CAMPAGNES_TABLE}.Radical_compte
         )

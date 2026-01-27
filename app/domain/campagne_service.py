@@ -174,7 +174,6 @@ def _delete_outputs_for_campagne(id_campagne: str) -> Dict[str, int]:
         "da": "vers_da",
     }
 
-
     deleted = {"crc": 0, "cc": 0, "da": 0}
 
     conn = sqlite3.connect(DB_PATH)
@@ -201,6 +200,7 @@ def create_campagne(
     date_debut: str,
     date_fin: str,
     etat_campagne: str | None = None,
+    description: str | None = None,
 ) -> Dict[str, Any]:
     """
     Crée campagne + peuple clients_campagnes.
@@ -253,6 +253,7 @@ def create_campagne(
         date_debut=date_debut,
         date_fin=date_fin,
         etat_campagne=etat_campagne,
+        description=description,
     )
 
     # 7) Préparer lignes clients_campagnes
@@ -353,6 +354,7 @@ def annuler_campagne(id_campagne: str) -> Dict[str, Any]:
         return {"id_campagne": id_campagne, "ok": False, "error": str(e), "deleted": deleted}
 
     return {"id_campagne": id_campagne, "ok": True, "deleted": deleted}
+
 
 def _campagne_has_mail_action(id_campagne: str) -> bool:
     """
@@ -470,4 +472,3 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
         "mail_meta_loop": mail_summary,
         "output_insert": output_counts,
     }
-

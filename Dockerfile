@@ -24,10 +24,8 @@ RUN pip install --no-cache-dir -U pip && \
 # Code + DB (clients.db est à la racine, on le garde pareil)
 COPY . /app
 
-EXPOSE 8501
+EXPOSE 8501 8000
 
-# ⚠️ À ajuster à ton fichier Streamlit "entrée" si besoin
-# (on met une valeur par défaut, tu pourras la changer ensuite)
 ENV STREAMLIT_APP=app/streamlit/Consolide_int.py
 
-CMD ["bash", "-lc", "streamlit run ${STREAMLIT_APP} --server.port ${STREAMLIT_SERVER_PORT} --server.address ${STREAMLIT_SERVER_ADDRESS}"]
+CMD ["bash", "-lc", "uvicorn app.api.main:app --host 0.0.0.0 --port 8000 & streamlit run ${STREAMLIT_APP} --server.port ${STREAMLIT_SERVER_PORT} --server.address ${STREAMLIT_SERVER_ADDRESS}"]

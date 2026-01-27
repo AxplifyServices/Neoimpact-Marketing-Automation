@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
     date_debut    TEXT NOT NULL,
     date_fin      TEXT NOT NULL,
     etat          TEXT NOT NULL,
-    date_creation TEXT NOT NULL
+    date_creation TEXT NOT NULL,
+    description   TEXT
 )
 """
 
@@ -86,11 +87,13 @@ def insert_campagne(
     date_debut: str,
     date_fin: str,
     etat_campagne: str,
+    description: Optional[str] = None,
 ) -> str:
     """
     Signature attendue par campagne_service.py
     Retourne id_campagne.
     Compatible avec DB existante (etat_campagne) ou nouvelle (etat).
+    Compatible avec DB existante sans colonne description (on l'ignore).
     """
     ensure_table()
     conn = _connect()
@@ -103,49 +106,51 @@ def insert_campagne(
     # colonnes réelles présentes
     cols = set(_cols(cur, TABLE_NAME))
 
-    # certains schémas anciens peuvent avoir etat_campagne au lieu de etat
-    # et aussi date_creation peut exister sous un autre nom : ici on suppose date_creation OK
-    # (si ce n'est pas le cas, on ajustera ensuite)
-    if "date_creation" not in cols:
-        # si pas de date_creation, on l'ignore plutôt que casser
-        cur.execute(
-            f"""
-            INSERT INTO {TABLE_NAME} (
-                id_campagne, nom_campagne, id_modele, id_cible,
-                date_debut, date_fin, {etat_col}
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                id_campagne,
-                (nom_campagne or "").strip(),
-                str(id_modele),
-                str(id_cible),
-                str(date_debut),
-                str(date_fin),
-                str(etat_campagne),
-            ),
-        )
-    else:
-        cur.execute(
-            f"""
-            INSERT INTO {TABLE_NAME} (
-                id_campagne, nom_campagne, id_modele, id_cible,
-                date_debut, date_fin, {etat_col}, date_creation
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                id_campagne,
-                (nom_campagne or "").strip(),
-                str(id_modele),
-                str(id_cible),
-                str(date_debut),
-                str(date_fin),
-                str(etat_campagne),
-                today,
-            ),
-        )
+    has_date_creation = "date_creation" in cols
+    has_description = "description" in cols
+
+    # Normalisation safe
+    nom_campagne_v = (nom_campagne or "").strip()
+    description_v = (description or "").strip()
+
+    # Construire INSERT dynamique sans casser sur les anciennes DB
+    insert_cols = [
+        "id_campagne",
+        "nom_campagne",
+        "id_modele",
+        "id_cible",
+        "date_debut",
+        "date_fin",
+        etat_col,
+    ]
+    insert_vals = [
+        id_campagne,
+        nom_campagne_v,
+        str(id_modele),
+        str(id_cible),
+        str(date_debut),
+        str(date_fin),
+        str(etat_campagne),
+    ]
+
+    if has_date_creation:
+        insert_cols.append("date_creation")
+        insert_vals.append(today)
+
+    if has_description:
+        insert_cols.append("description")
+        insert_vals.append(description_v)
+
+    placeholders = ", ".join(["?"] * len(insert_cols))
+    col_sql = ", ".join(insert_cols)
+
+    cur.execute(
+        f"""
+        INSERT INTO {TABLE_NAME} ({col_sql})
+        VALUES ({placeholders})
+        """,
+        tuple(insert_vals),
+    )
 
     conn.commit()
     conn.close()
