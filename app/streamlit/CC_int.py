@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List, Tuple
 
 import streamlit as st
 
 from app.domain.canaux import resultats_for_canal
 from app.engine.crc_engine import (
-    get_next_row_from_queue,
-    delete_row_from_queue,
+    get_ordered_rows_from_queue,
+    move_row_to_end_of_queue,
+    get_arrive_eche_flag,
     apply_result_and_update_client_campagnes_from_queue,
+    list_campaigns_in_queue,  # ✅ NEW
 )
 from app.scripts.batch_manuel import run_batch_manuel
 
@@ -42,6 +44,38 @@ def _render_header(ctx: Dict[str, Any]) -> None:
     st.divider()
 
 
+def _campaign_filter_ui(queue_table: str, key_prefix: str) -> str | None:
+    """
+    Retourne l'ID_CAMPAGNE sélectionné, ou None (= toutes campagnes).
+    """
+    campaigns: List[Tuple[str, str]] = list_campaigns_in_queue(queue_table)  # [(id, nom), ...]
+
+    options = [("__ALL__", "Toutes les campagnes")]
+    options += [(cid, f"{(cname or cid)}  ·  {cid}") for cid, cname in campaigns]
+
+    default_id = st.session_state.get(f"{key_prefix}_camp_filter", "__ALL__")
+
+    # trouve index par défaut
+    default_index = 0
+    for i, (cid, _) in enumerate(options):
+        if cid == default_id:
+            default_index = i
+            break
+
+    selected = st.selectbox(
+        "Filtrer par campagne",
+        options=options,
+        index=default_index,
+        format_func=lambda x: x[1],
+        key=f"{key_prefix}_camp_filter_select",
+    )
+
+    selected_id = selected[0]
+    st.session_state[f"{key_prefix}_camp_filter"] = selected_id
+
+    return None if selected_id == "__ALL__" else selected_id
+
+
 def main(embedded: bool = False, key_prefix: str = "cc") -> None:
     if not embedded:
         st.title("👤 CC")
@@ -51,29 +85,57 @@ def main(embedded: bool = False, key_prefix: str = "cc") -> None:
             run_batch_manuel()
             st.rerun()
 
-    row = get_next_row_from_queue(QUEUE_TABLE)
-    if not row:
-        st.info("Aucune ligne à traiter dans CC.")
+    # ✅ Filtre campagne (garde la queue intacte, on change juste la lecture)
+    selected_campagne = _campaign_filter_ui(QUEUE_TABLE, key_prefix=key_prefix)
+
+    rows = get_ordered_rows_from_queue(QUEUE_TABLE, id_campagne_filter=selected_campagne)
+    if not rows:
+        if selected_campagne:
+            st.info("Aucune ligne CC à traiter pour la campagne sélectionnée.")
+        else:
+            st.info("Aucune ligne à traiter dans CC.")
         return
 
-    id_campagne = str(row.get("ID_CAMPAGNE") or "").strip()
-    radical = str(row.get("Radical_compte") or "").strip()
+    # --- navigation circulaire (Skip/Reculer) ---
+    current_key = st.session_state.get(f"{key_prefix}_current_key")
+    keys = [(str(r.get('ID_CAMPAGNE') or '').strip(), str(r.get('Radical_compte') or '').strip()) for r in rows]
+
+    if current_key in keys:
+        pos = keys.index(current_key)
+    else:
+        pos = 0
+        st.session_state[f"{key_prefix}_current_key"] = keys[0]
+
+    row = rows[pos]
+    id_campagne, radical = keys[pos]
 
     # ✅ contexte DB déplacé hors UI
     ctx = get_cc_context_from_db(id_campagne, radical)
+    # ✅ Flag échéance (rouge) si arrive_ache == 'Oui'
+    if get_arrive_eche_flag(id_campagne, radical):
+        st.error("⚠️ Client arrivant à échéance")
+
     _render_header(ctx)
 
     canal = "Conseiller client"
     resultats = resultats_for_canal(canal)
 
-    c1, c2 = st.columns([0.2, 0.8], vertical_alignment="center")
+    c1, c2, c3 = st.columns([0.18, 0.18, 0.64], vertical_alignment="center")
 
     with c1:
-        if st.button("Skip", key=f"{key_prefix}_skip", use_container_width=True):
-            delete_row_from_queue(QUEUE_TABLE, id_campagne, radical)
+        if st.button("⬅️ Reculer", key=f"{key_prefix}_back", use_container_width=True):
+            new_pos = (pos - 1) % len(rows)
+            st.session_state[f"{key_prefix}_current_key"] = keys[new_pos]
             st.rerun()
 
     with c2:
+        if st.button("Skip", key=f"{key_prefix}_skip", use_container_width=True):
+            next_pos = (pos + 1) % len(rows)
+            st.session_state[f"{key_prefix}_current_key"] = keys[next_pos]
+            move_row_to_end_of_queue(QUEUE_TABLE, id_campagne, radical)
+            st.rerun()
+
+    with c3:
         if not resultats:
             st.warning("Aucun résultat défini pour ce canal.")
         else:

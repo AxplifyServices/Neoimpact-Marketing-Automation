@@ -6,5 +6,5 @@ router = APIRouter()
 
 @router.post("/batch/run")
 def run_batch():
-    run_batch_manuel()
-    return {"ok": True}
+    res = run_batch_manuel()
+    return {"ok": True, "result": res}

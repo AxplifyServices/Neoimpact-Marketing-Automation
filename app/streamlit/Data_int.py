@@ -8,6 +8,46 @@ import streamlit as st
 from app.storage import db
 
 
+
+# =========================================================
+# Helpers (sanitize for data_editor)
+# =========================================================
+
+def _safe_text_cell(x):
+    """Return x unchanged except when it's bytes-like (decode safely).
+    IMPORTANT: we do NOT cast numerics to string.
+    """
+    try:
+        # pandas NA handling
+        if x is None:
+            return x
+        # avoid importing numpy explicitly; pandas uses numpy scalars
+        if isinstance(x, float) and pd.isna(x):
+            return x
+    except Exception:
+        pass
+
+    if isinstance(x, (bytes, bytearray, memoryview)):
+        b = bytes(x)
+        try:
+            return b.decode("utf-8")
+        except UnicodeDecodeError:
+            # common Windows/Excel legacy encoding
+            return b.decode("cp1252", errors="replace")
+    return x
+
+
+def sanitize_df_for_editor(df: pd.DataFrame) -> pd.DataFrame:
+    """Sanitize only object columns so st.data_editor doesn't crash on bytes/encoding.
+    - Keeps numeric columns intact (no cast to string).
+    """
+    df2 = df.copy()
+    for col in df2.columns:
+        if df2[col].dtype == "object":
+            df2[col] = df2[col].map(_safe_text_cell)
+    return df2
+
+
 # =========================================================
 # Helpers (type / UI)
 # =========================================================
@@ -399,15 +439,18 @@ def main() -> None:
         st.info("Aucune ligne ne correspond aux filtres.")
         return
 
+    df_display = sanitize_df_for_editor(df)
+
+
     edited = st.data_editor(
-        df,
+        df_display,
         key=f"data__{table}__editor",
         disabled=["__rowid__"] if "__rowid__" in df.columns else [],
         hide_index=True,
         height=620,
     )
 
-    changes = _detect_changes(df, edited)
+    changes = _detect_changes(df_display, edited)
     if changes:
         for rid, col, val in changes:
             db.update_cell(table, rid, col, val)

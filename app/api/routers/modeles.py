@@ -13,6 +13,7 @@ from app.domain.canaux import (
 )
 
 from app.domain.ui_facades.modeles_ui_facade import (
+    get_client_condition_fields_for_ui,
     get_variable_choices_for_ui,
     is_categorical_positive_objectif_for_ui,
     build_numeric_objectif_json_for_ui,
@@ -151,6 +152,17 @@ def build_numeric_json(min_txt: str = "", max_txt: str = ""):
     {"min": ..., "max": ...} (min/max optionnels)
     """
     return {"objectif_json": build_numeric_objectif_json_for_ui(min_txt, max_txt)}
+
+
+
+@router.get("/meta/conditions/clients-fields")
+def clients_condition_fields():
+    """
+    Champs utilisables dans les conditions basées sur la table `clients`
+    (hors colonnes déjà affichées dans l'écran), avec informations de type
+    pour construire l'UI (numérique vs texte).
+    """
+    return {"fields": get_client_condition_fields_for_ui()}
 
 
 @router.get("/meta/canaux")

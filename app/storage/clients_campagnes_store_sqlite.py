@@ -7,140 +7,135 @@ from app.storage.db import DB_PATH
 
 TABLE_NAME = "clients_campagnes"
 
-# ✅ Schéma aligné avec campagne_service.py + crc_engine.py
-CREATE_SQL = f"""
-CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
-    ID_CAMPAGNE           TEXT NOT NULL,
-    Radical_compte        TEXT NOT NULL,
-
-    statut_avant_campagne TEXT,
-    statut_actuel         TEXT,
-
-    Etat_campagne         TEXT,
-
-    NB_jour_campagne      INTEGER DEFAULT 0,
-
-    ID_Action             TEXT,
-    Canal                 TEXT,
-    Action                TEXT,
-
-    Last_action           TEXT,
-    Resultat_last_action  TEXT,
-    Date_last_action      TEXT,
-
-    NB_jour_last_action   INTEGER,
-
-    NB_appel              INTEGER DEFAULT 0,
-    NB_mail               INTEGER DEFAULT 0,
-    NB_sms                INTEGER DEFAULT 0,
-    NB_message            INTEGER DEFAULT 0,
-    NB_approche_commercial INTEGER DEFAULT 0,
-
-    PRIMARY KEY (ID_CAMPAGNE, Radical_compte)
-)
-"""
-
 
 def _connect() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def ensure_table() -> None:
+    """
+    Table attendue par campagne_service.py + les queries dans campagne_service
+    (ID_CAMPAGNE, Canal, Action, Etat_campagne, etc.)
+    """
     conn = _connect()
     cur = conn.cursor()
-    cur.execute(CREATE_SQL)
+
+    cur.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+            Nom_campagne            TEXT,
+            ID_CAMPAGNE             TEXT,
+            Radical_compte          TEXT,
+            statut_avant_campagne   TEXT,
+            statut_actuel           TEXT,
+            Etat_campagne           TEXT,
+            NB_jour_campagne        INTEGER,
+            ID_Action               TEXT,
+            Canal                   TEXT,
+            Action                  TEXT,
+            Last_action             TEXT,
+            Resultat_last_action    TEXT,
+            Date_last_action        TEXT,
+            NB_jour_last_action     INTEGER,
+            NB_appel                INTEGER,
+            NB_mail                 INTEGER,
+            NB_sms                  INTEGER,
+            NB_message              INTEGER,
+            NB_approche_commercial  INTEGER,
+            arriv_eche             TEXT DEFAULT 'Non'
+        )
+        """
+    )
+
+    
+
+    # Migration douce : ajoute arriv_eche si la table existait déjà sans la colonne
+    try:
+        cur.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN arriv_eche TEXT DEFAULT 'Non'")
+    except Exception:
+        pass
+# indexes non bloquants
+    try:
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_cc_idcamp ON {TABLE_NAME}(ID_CAMPAGNE)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_cc_radical ON {TABLE_NAME}(Radical_compte)")
+    except Exception:
+        pass
+
     conn.commit()
     conn.close()
 
 
-def _table_cols(cur: sqlite3.Cursor) -> List[str]:
-    cur.execute(f"PRAGMA table_info({TABLE_NAME})")
-    return [r[1] for r in cur.fetchall()]
-
-
-def bulk_insert_clients(rows: List[Dict[str, Any]]) -> None:
+def bulk_insert_clients(rows: List[Dict[str, Any]]) -> int:
     """
-    ✅ Attendu par campagne_service.py
-    rows = liste de dicts (colonnes -> valeurs)
+    Insère en masse les lignes construites dans campagne_service.create_campagne().
+    Signature attendue: bulk_insert_clients(rows)
     """
     if not rows:
-        return
+        return 0
 
     ensure_table()
-    conn = _connect()
-    cur = conn.cursor()
 
-    cols_in_table = set(_table_cols(cur))
-
-    # normalise: ne garde que colonnes existantes
-    clean_rows: List[Dict[str, Any]] = []
-    for r in rows:
-        rr = {k: r.get(k) for k in r.keys() if k in cols_in_table}
-        clean_rows.append(rr)
-
-    cols = sorted({k for r in clean_rows for k in r.keys()})
-    if not cols:
-        conn.close()
-        return
-
-    placeholders = ",".join(["?"] * len(cols))
-    col_list = ",".join([f'"{c}"' for c in cols])
-
-    # update on conflict (sauf PK)
-    update_cols = [c for c in cols if c not in ("ID_CAMPAGNE", "Radical_compte")]
-    update_sql = ", ".join([f'"{c}"=excluded."{c}"' for c in update_cols]) if update_cols else ""
+    cols = [
+        "Nom_campagne",
+        "ID_CAMPAGNE",
+        "Radical_compte",
+        "statut_avant_campagne",
+        "statut_actuel",
+        "Etat_campagne",
+        "NB_jour_campagne",
+        "ID_Action",
+        "Canal",
+        "Action",
+        "Last_action",
+        "Resultat_last_action",
+        "Date_last_action",
+        "NB_jour_last_action",
+        "NB_appel",
+        "NB_mail",
+        "NB_sms",
+        "NB_message",
+        "NB_approche_commercial",
+        "arriv_eche",
+    ]
 
     sql = f"""
-    INSERT INTO {TABLE_NAME} ({col_list})
-    VALUES ({placeholders})
-    ON CONFLICT(ID_CAMPAGNE, Radical_compte)
-    DO UPDATE SET {update_sql}
+        INSERT INTO {TABLE_NAME} ({", ".join(cols)})
+        VALUES ({", ".join(["?"] * len(cols))})
     """
 
     values = []
-    for r in clean_rows:
-        values.append(tuple(r.get(c) for c in cols))
+    for r in rows:
+        if "arriv_eche" not in r or r.get("arriv_eche") is None:
+            r["arriv_eche"] = "Non"
+        values.append([r.get(c) for c in cols])
 
+    conn = _connect()
+    cur = conn.cursor()
     cur.executemany(sql, values)
     conn.commit()
+
+    n = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else len(values)
     conn.close()
+    return int(n)
 
 
-def set_clients_etat_for_campagne(id_campagne: str, new_etat: str) -> None:
+def set_clients_etat_for_campagne(id_campagne: str, etat: str) -> int:
     """
-    ✅ Attendu par campagne_service.py
+    Met à jour Etat_campagne pour toutes les lignes de la campagne.
+    Signature attendue: set_clients_etat_for_campagne(id_campagne, etat)
     """
     ensure_table()
     conn = _connect()
     cur = conn.cursor()
+
     cur.execute(
-        f'UPDATE {TABLE_NAME} SET Etat_campagne = ? WHERE ID_CAMPAGNE = ?',
-        (new_etat, id_campagne),
+        f"UPDATE {TABLE_NAME} SET Etat_campagne = ? WHERE ID_CAMPAGNE = ?",
+        (etat, id_campagne),
     )
     conn.commit()
+
+    n = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0
     conn.close()
-
-
-def list_by_campagne(id_campagne: str) -> List[Dict[str, Any]]:
-    ensure_table()
-    conn = _connect()
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-    cur.execute(
-        f"SELECT * FROM {TABLE_NAME} WHERE ID_CAMPAGNE = ? ORDER BY Radical_compte",
-        (id_campagne,),
-    )
-    rows = [dict(r) for r in cur.fetchall()]
-    conn.close()
-    return rows
-
-
-def list_all() -> List[Dict[str, Any]]:
-    ensure_table()
-    conn = _connect()
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-    cur.execute(f"SELECT * FROM {TABLE_NAME} ORDER BY ID_CAMPAGNE DESC, Radical_compte")
-    rows = [dict(r) for r in cur.fetchall()]
-    conn.close()
-    return rows
+    return int(n)

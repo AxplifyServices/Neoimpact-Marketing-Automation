@@ -17,7 +17,10 @@ from app.storage.clients_campagnes_store_sqlite import (
     set_clients_etat_for_campagne,
 )
 from app.storage.cibles_store_sqlite import load_clients_df_for_cible
-from app.storage.modele_store_sqlite import get_modele_by_id  # retourne dict
+from app.storage.modele_store_sqlite import get_modele_by_id
+
+# NEW: échéance (arriv_eche)
+from app.domain.workflow_nav import find_bloc_by_id, arrive_echeance  # retourne dict
 
 
 # =========================================================
@@ -230,6 +233,9 @@ def create_campagne(
     canal_init = _norm_str(root.get("Canal")) or "Appel"
     action_init = _norm_str(root.get("Action")) or "Contacter"
 
+    # Bloc courant initial (pour calcul arriv_eche)
+    current_bloc_init = find_bloc_by_id(liste_action, id_action_init) or root
+
     # 3) Charger population cible
     df = load_clients_df_for_cible(id_cible)
     nb_init = int(len(df))
@@ -270,29 +276,37 @@ def create_campagne(
 
         statut_avant = _norm_str(r.get(statut_col)) if statut_col else ""
 
-        rows.append(
-            {
-                "Nom_campagne": nom_campagne,
-                "ID_CAMPAGNE": id_campagne,
-                "Radical_compte": rc,
-                "statut_avant_campagne": statut_avant,
-                "statut_actuel": statut_avant,
-                "Etat_campagne": etat_campagne,
-                "NB_jour_campagne": 0,
-                "ID_Action": id_action_init,
-                "Canal": canal_init,
-                "Action": action_init,
-                "Last_action": "",
-                "Resultat_last_action": "",
-                "Date_last_action": today_iso,
-                "NB_jour_last_action": 0,
-                "NB_appel": 0,
-                "NB_mail": 0,
-                "NB_sms": 0,
-                "NB_message": 0,
-                "NB_approche_commercial": 0,
-            }
-        )
+        row_cc = {
+            "Nom_campagne": nom_campagne,
+            "ID_CAMPAGNE": id_campagne,
+            "Radical_compte": rc,
+            "statut_avant_campagne": statut_avant,
+            "statut_actuel": statut_avant,
+            "Etat_campagne": etat_campagne,
+            "NB_jour_campagne": 0,
+            "ID_Action": id_action_init,
+            "Canal": canal_init,
+            "Action": action_init,
+            "Last_action": "",
+            "Resultat_last_action": "",
+            "Date_last_action": today_iso,
+            "NB_jour_last_action": 0,
+            "NB_appel": 0,
+            "NB_mail": 0,
+            "NB_sms": 0,
+            "NB_message": 0,
+            "NB_approche_commercial": 0,
+        }
+
+        # arriv_eche : Oui/Non selon les conditions de type NB_jour_last_action dans les fils
+        if _norm_str(row_cc.get("Etat_campagne")) not in ("En cours", "Planifiée", "En pause"):
+            row_cc["arriv_eche"] = "Non"
+        elif _norm_str(row_cc.get("Action")) == "Closed":
+            row_cc["arriv_eche"] = "Non"
+        else:
+            row_cc["arriv_eche"] = arrive_echeance(liste_action, current_bloc_init, row_cc)
+
+        rows.append(row_cc)
 
     # 8) Insert
     bulk_insert_clients(rows)
@@ -410,6 +424,7 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
     - met à jour campagne + clients_campagnes
     - si nouvel état = En cours:
         - supprime les anciennes queues de cette campagne
+        - NEW: sync nouveaux clients depuis la cible (INSERT ONLY)
         - traite les mails si nécessaire (au moins un client a Canal=Mail)
         - remplit à nouveau les queues (crc_input / vers_cc / vers_da)
     - si Planifiée ou Terminée:
@@ -447,8 +462,49 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
 
     mail_summary = None
     output_counts = {"crc": 0, "cc": 0, "da": 0}
+    new_clients_added = 0  # NEW
 
     if new_etat == "En cours":
+        # NEW: sync nouveaux clients depuis la cible (INSERT ONLY) avant mail/rebuild
+        try:
+            id_cible = _norm_str(c.get("id_cible") or c.get("ID_CIBLE") or c.get("cible_id"))
+            if id_cible:
+                # la fonction est dans batch_manuel (tu l'as ajoutée là-bas)
+                from app.scripts.batch_manuel import sync_new_clients_from_cible_insert_only
+
+                # ouverture connexion DB (on essaie _connect si présent, sinon sqlite3/DB_PATH)
+                conn = None
+                try:
+                    try:
+                        conn = _connect()  # si ton module a déjà ce helper
+                    except Exception:
+                        import sqlite3
+                        conn = sqlite3.connect(DB_PATH)  # si DB_PATH existe dans ce module
+
+                    new_clients_added = sync_new_clients_from_cible_insert_only(
+                        conn,
+                        id_campagne=_norm_str(id_campagne),
+                        id_cible=id_cible,
+                        # ⚠️ valeurs initiales comme dans ton batch (tu peux les rendre dynamiques ensuite)
+                        id_action_initiale="2",
+                        canal_initial="Appel",
+                        action_initial="Appeler",
+                    )
+                    conn.commit()
+                finally:
+                    try:
+                        if conn is not None:
+                            conn.close()
+                    except Exception:
+                        pass
+
+                # Important: aligner l'état des nouveaux entrants aussi
+                set_clients_etat_for_campagne(id_campagne, new_etat)
+
+        except Exception:
+            # On ne bloque pas l'activation si le sync échoue
+            new_clients_added = 0
+
         # si au moins une ligne de cette campagne est en Mail -> traiter mails
         if _campagne_has_mail_action(id_campagne):
             try:
@@ -469,6 +525,7 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
         "ok": True,
         "etat": new_etat,
         "deleted_before_refill": deleted,
+        "new_clients_added_from_cibles": new_clients_added,  # NEW
         "mail_meta_loop": mail_summary,
         "output_insert": output_counts,
     }

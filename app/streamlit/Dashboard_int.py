@@ -223,13 +223,14 @@ def main():
     # ---------------------------------------------------------
     # KPI row
     # ---------------------------------------------------------
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
     k1.metric("Clients transmis", int(kpis.get("transmis", 0)))
     k2.metric("Clients contactés", int(kpis.get("contactes_total", 0)))
     k3.metric("Closing", int(kpis.get("closing_total", 0)))
     k4.metric("Total traitements", int(kpis.get("traitements_total", 0)))
     k5.metric("Taux contact", _pct(kpis.get("taux_contact_total", 0.0)))
     k6.metric("Taux closing / affectés", _pct(kpis.get("taux_closing_sur_affectes", 0.0)))
+    k7.metric("Arrivés à échéance", int(kpis.get("arriv_eche", 0)))
 
     # ---------------------------------------------------------
     # Charts row (3)

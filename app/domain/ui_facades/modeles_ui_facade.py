@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.storage.db import DB_PATH
@@ -102,6 +103,60 @@ def get_variable_choices_for_ui() -> Tuple[List[str], List[str], List[str]]:
     return variable_choices, categorical_cols_allowed, numeric_cols
 
 
+
+# =========================================================
+# Conditions (clients columns for UI)
+# =========================================================
+def _norm_colname_for_compare(name: str) -> str:
+    """Normalise pour comparer (case-insensitive + underscores)."""
+    s = (name or "").strip().lower()
+    # garder lettres/chiffres/_ uniquement
+    s = re.sub(r"[^a-z0-9_]", "", s)
+    return s
+
+
+# Colonnes à exclure (celles du screen)
+_EXCLUDED_CLIENT_COLS_NORM = {
+    "radical_compte",
+    "nom",
+    "prenom",
+    "id_client",
+    "numero_tel",
+    "mail",
+    "canal_acquisition",
+    "age",
+    "qualite",
+    "anciennete",
+    "region",
+    "agence",
+    "gestionnaire",
+}
+
+
+def get_client_condition_fields_for_ui() -> List[Dict[str, str]]:
+    """
+    Retourne les champs utilisables dans les conditions basées sur la table clients,
+    en excluant les colonnes du screen.
+    Format:
+      [{"col": "nb_transaction", "type": "INTEGER", "is_numeric": "1"}, ...]
+    """
+    cols_types = get_clients_columns_with_types_for_ui()
+    out: List[Dict[str, str]] = []
+
+    for col, t in cols_types.items():
+        if _norm_colname_for_compare(col) in _EXCLUDED_CLIENT_COLS_NORM:
+            continue
+        out.append(
+            {
+                "col": str(col),
+                "type": str(t or ""),
+                "is_numeric": "1" if _is_numeric_sqltype(t or "") else "0",
+            }
+        )
+
+    # tri stable: d'abord non-numériques, puis numériques, par nom
+    out.sort(key=lambda d: (d.get("is_numeric") != "0", d.get("col", "").lower()))
+    return out
 def is_categorical_positive_objectif_for_ui(variable_cible: str) -> bool:
     """
     True si variable_cible correspond à une variable catégorielle autorisée (positives only)

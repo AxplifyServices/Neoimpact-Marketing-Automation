@@ -7,6 +7,7 @@ import sqlite3
 from typing import Any, Dict, List, Tuple
 
 import pandas as pd
+import time
 
 from app.domain.cible import Cible
 from app.storage.db import DB_PATH
@@ -193,88 +194,134 @@ def get_cible(id_cible: str) -> Dict[str, Any] | None:
 
 
 def update_cible(cible: Cible) -> None:
-    """Met à jour une cible existante (même id_cible).
-
-    IMPORTANT:
-    - Ne change pas l'id
-    - Respecte la nomenclature existante: source = "DB" | "Fichier plat"
-    - Sérialise filtre en JSON uniquement si source == "DB"
-    - Stocke chemin uniquement si source == "Fichier plat"
-    """
+    """Met à jour une cible existante (même id_cible)."""
     ensure_cibles_table()
     conn = _connect()
     cur = conn.cursor()
 
-    if not getattr(cible, "id_cible", None) or not str(cible.id_cible).strip():
-        conn.close()
-        raise ValueError("id_cible obligatoire pour update")
-
     cible.validate()
 
     filtre_str = json.dumps(cible.filtre, ensure_ascii=False) if cible.source == "DB" else ""
-    chemin = str(cible.chemin or "").strip() if cible.source == "Fichier plat" else ""
+    chemin = cible.chemin if cible.source == "Fichier plat" else ""
 
     cur.execute(
         """
         UPDATE cibles
            SET nom_cible = ?,
-               source    = ?,
-               filtre    = ?,
-               chemin    = ?
-         WHERE id_cible  = ?
+               date_creation = ?,
+               source = ?,
+               filtre = ?,
+               chemin = ?
+         WHERE id_cible = ?
         """,
         (
-            str(cible.nom_cible).strip(),
-            str(cible.source).strip(),
+            cible.nom_cible,
+            cible.date_creation,
+            cible.source,
             filtre_str,
             chemin,
-            str(cible.id_cible).strip(),
+            cible.id_cible,
         ),
     )
+    conn.commit()
+    conn.close()
 
+
+def update_nom_cible(id_cible: str, nom_cible: str) -> None:
+    ensure_cibles_table()
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE cibles SET nom_cible = ? WHERE id_cible = ?",
+        (nom_cible, id_cible),
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_cible_chemin(id_cible: str, chemin: str) -> None:
+    ensure_cibles_table()
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE cibles SET chemin = ? WHERE id_cible = ?",
+        (chemin, id_cible),
+    )
     conn.commit()
     conn.close()
 
 
 #======================================
-# UPLOAD FILE (Streamlit)
+# UPLOAD FILE (Streamlit & FastAPI)
 # ======================================
 def save_uploaded_file(uploaded_file) -> str:
+    """
+    Save an uploaded file to disk and return the destination path.
+
+    This helper handles both Streamlit ``UploadedFile`` objects and FastAPI ``UploadFile``
+    instances. Streamlit expose ``name`` et ``getbuffer``, FastAPI expose
+    ``filename`` et ``file`` (file-like).
+    """
     os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-    name = uploaded_file.name
+    # Déterminer le nom d'origine : Streamlit -> name ; FastAPI -> filename
+    name = getattr(uploaded_file, "name", None) or getattr(uploaded_file, "filename", None)
+    if not name:
+        # Fallback si aucun nom n'est fourni
+        name = f"uploaded_file_{int(time.time())}"
+
     base, ext = os.path.splitext(name)
     dst = os.path.join(UPLOAD_DIR, name)
 
-    # éviter overwrite
+    # Éviter d'écraser un fichier existant en suffixant un compteur
     i = 1
     while os.path.exists(dst):
         dst = os.path.join(UPLOAD_DIR, f"{base}_{i}{ext}")
         i += 1
 
+    # Écriture du contenu
     with open(dst, "wb") as f:
-        f.write(uploaded_file.getbuffer())
+        # Streamlit : getbuffer()
+        if hasattr(uploaded_file, "getbuffer"):
+            f.write(uploaded_file.getbuffer())
+        # FastAPI : .file (SpooledTemporaryFile)
+        elif hasattr(uploaded_file, "file"):
+            uploaded_file.file.seek(0)
+            import shutil
+            shutil.copyfileobj(uploaded_file.file, f)
+        else:
+            data = uploaded_file.read() if hasattr(uploaded_file, "read") else None
+            if data:
+                f.write(data)
+            else:
+                raise AttributeError("Impossible de lire le fichier envoyé.")
     return dst
 
 
 # =========================================================
-# IMPORT LEADS -> CLIENTS
+# IMPORT LEADS -> CLIENTS (STRICT)
 # =========================================================
+STRICT_REQUIRED_COLS = ["ID_Client", "Numero_Tel", "Mail"]
+STRICT_KEY_COL = "ID_Client"
+RADICAL_COL = "radical_compte"
+
+
 def _read_flat_file(path: str) -> pd.DataFrame:
+    """Lecture multi-formats (CSV, XLSX, Parquet, JSON)."""
     ext = os.path.splitext(path)[1].lower().strip(".")
     if ext == "csv":
         return pd.read_csv(path)
     if ext in ("xlsx", "xls"):
-        return pd.read_excel(path, sheet_name=0)  # 1ère feuille
+        return pd.read_excel(path, sheet_name=0)
     if ext == "parquet":
         return pd.read_parquet(path)
-    raise ValueError("Type de fichier non supporté (csv/xlsx/xls/parquet)")
+    if ext == "json":
+        return pd.read_json(path)
+    raise ValueError("Type de fichier non supporté (csv/xlsx/xls/parquet/json)")
 
 
 def _detect_clients_table(conn: sqlite3.Connection) -> str:
-    """
-    Trouve automatiquement la table clients.
-    """
+    """Trouve automatiquement la table clients."""
     tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
     if "clients" in tables:
         return "clients"
@@ -284,71 +331,124 @@ def _detect_clients_table(conn: sqlite3.Connection) -> str:
     return "clients"
 
 
+def _get_table_columns(conn: sqlite3.Connection, table: str) -> List[str]:
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table})")
+    return [r[1] for r in cur.fetchall()]
+
+
+def _strict_validate_dataframe_against_clients(df: pd.DataFrame, clients_cols: List[str]) -> None:
+    """
+    STRICT :
+    - Le fichier doit contenir EXACTEMENT les mêmes colonnes que la table clients.
+    - Colonnes indispensables (ID_Client, Numero_Tel, Mail) présentes et non nulles.
+    """
+    df_cols = [str(c).strip() for c in df.columns]
+    clients_cols = [str(c).strip() for c in clients_cols]
+
+    df_set = set(df_cols)
+    db_set = set(clients_cols)
+
+    missing = sorted(list(db_set - df_set))
+    extra = sorted(list(df_set - db_set))
+
+    if missing or extra:
+        msg = ["Fichier invalide (STRICT). Le schéma doit correspondre EXACTEMENT à la table clients."]
+        if missing:
+            msg.append(f"Colonnes manquantes ({len(missing)}) : {', '.join(missing)}")
+        if extra:
+            msg.append(f"Colonnes en trop ({len(extra)}) : {', '.join(extra)}")
+        raise ValueError("\n".join(msg))
+
+    # colonnes indispensables non nulles
+    for col in STRICT_REQUIRED_COLS:
+        if col not in df_set:
+            raise ValueError(f"Fichier invalide : colonne obligatoire manquante : {col}")
+        if df[col].isna().any():
+            raise ValueError(f"Fichier invalide : la colonne '{col}' contient des valeurs vides (obligatoire).")
+
+
+def _new_radical_compte(conn: sqlite3.Connection, clients_table: str) -> str:
+    """Génère un radical_compte unique. Format : RC000001, RC000002, ..."""
+    cur = conn.cursor()
+    try:
+        cur.execute(f"SELECT {RADICAL_COL} FROM {clients_table} ORDER BY {RADICAL_COL} DESC LIMIT 1")
+        r = cur.fetchone()
+    except Exception:
+        r = None
+
+    if not r or not r[0]:
+        return "RC000001"
+
+    last = str(r[0])
+    m = re.search(r"(\d+)$", last)
+    n = int(m.group(1)) if m else 0
+    return f"RC{n+1:06d}"
+
+
 def import_leads_into_clients(file_path: str) -> Tuple[int, int]:
     """
-    Import d'un fichier plat (csv/xlsx) vers la table clients.
-    - Upsert basé sur Radical_compte (si existe)
+    STRICT IMPORT vers clients :
+    - Schéma identique à la table clients (voir _strict_validate_dataframe_against_clients).
+    - Upsert basé sur ID_Client :
+      * si ID_Client existe ⇒ UPDATE (ne touche pas radical_compte)
+      * sinon ⇒ INSERT + génération radical_compte
+    - Colonnes indispensables non nulles : ID_Client, Numero_Tel, Mail
     """
     conn = _connect()
     clients_table = _detect_clients_table(conn)
 
-    if file_path.lower().endswith(".csv"):
-        df = pd.read_csv(file_path)
-    else:
-        df = pd.read_excel(file_path)
-
+    df = _read_flat_file(file_path)
     df.columns = [str(c).strip() for c in df.columns]
 
-    key_col = "Radical_compte" if "Radical_compte" in df.columns else None
+    # Schéma strict
+    clients_cols = _get_table_columns(conn, clients_table)
+    _strict_validate_dataframe_against_clients(df, clients_cols)
+
     inserted = 0
     updated = 0
+    cur = conn.cursor()
 
     for _, row in df.iterrows():
         data = {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()}
 
-        if key_col and data.get(key_col) is not None:
-            cur = conn.cursor()
-            cur.execute(f"SELECT COUNT(*) FROM {clients_table} WHERE {key_col} = ?", (data[key_col],))
-            exists = cur.fetchone()[0] > 0
+        key_val = data.get(STRICT_KEY_COL)
+        if key_val is None or str(key_val).strip() == "":
+            raise ValueError("Fichier invalide : ID_Client vide détecté.")
 
-            if exists:
-                cols = [c for c in data.keys() if c != key_col]
-                if cols:
-                    set_clause = ", ".join([f"{c} = ?" for c in cols])
-                    vals = [data[c] for c in cols] + [data[key_col]]
-                    cur.execute(
-                        f"UPDATE {clients_table} SET {set_clause} WHERE {key_col} = ?",
-                        vals,
-                    )
-                updated += 1
-            else:
-                cols = list(data.keys())
-                ph = ", ".join(["?"] * len(cols))
-                cur.execute(
-                    f"INSERT INTO {clients_table} ({', '.join(cols)}) VALUES ({ph})",
-                    [data[c] for c in cols],
-                )
-                inserted += 1
-            conn.commit()
-        else:
-            cur = conn.cursor()
-            cols = list(data.keys())
-            ph = ", ".join(["?"] * len(cols))
+        cur.execute(f"SELECT COUNT(*) FROM {clients_table} WHERE {STRICT_KEY_COL} = ?", (key_val,))
+        exists = cur.fetchone()[0] > 0
+
+        if exists:
+            # UPDATE : toutes colonnes sauf radical_compte et clé
+            cols_to_update = [c for c in clients_cols if c not in (RADICAL_COL, STRICT_KEY_COL)]
+            set_clause = ", ".join([f"{c} = ?" for c in cols_to_update])
+            vals = [data.get(c) for c in cols_to_update] + [key_val]
             cur.execute(
-                f"INSERT INTO {clients_table} ({', '.join(cols)}) VALUES ({ph})",
-                [data[c] for c in cols],
+                f"UPDATE {clients_table} SET {set_clause} WHERE {STRICT_KEY_COL} = ?",
+                vals,
+            )
+            updated += 1
+        else:
+            # INSERT : on force radical_compte si vide ou non fourni
+            if data.get(RADICAL_COL) is None or str(data.get(RADICAL_COL)).strip() == "":
+                data[RADICAL_COL] = _new_radical_compte(conn, clients_table)
+
+            cols_insert = clients_cols[:]  # respect de l'ordre DB
+            placeholders = ", ".join(["?"] * len(cols_insert))
+            cur.execute(
+                f"INSERT INTO {clients_table} ({', '.join(cols_insert)}) VALUES ({placeholders})",
+                [data.get(c) for c in cols_insert],
             )
             inserted += 1
-            conn.commit()
 
+    conn.commit()
     conn.close()
     return inserted, updated
 
 
 def get_distinct_values_clients(column: str) -> List[str]:
-    """
-    Retourne les valeurs distinctes d'une colonne de la table clients (utile pour filtres).
-    """
+    """Retourne les valeurs distinctes d'une colonne de la table clients (utile pour filtres)."""
     conn = _connect()
     conn.row_factory = sqlite3.Row
     clients_table = _detect_clients_table(conn)
@@ -401,12 +501,11 @@ def _query_clients_by_filtre(filtre: Dict[str, Any]) -> pd.DataFrame:
 
 def load_clients_df_for_cible(id_cible: str) -> pd.DataFrame:
     """
-    Fonction attendue par campagne_service.
-    Retourne la population complète d'une cible sous forme DataFrame.
+    Fonction attendue par campagne_service : retourne la population complète d'une cible sous forme DataFrame.
     """
     cible = get_cible(id_cible)
     if not cible:
-        raise ValueError(f"Cible introuvable: {id_cible}")
+        raise ValueError(f"Cible introuvable : {id_cible}")
 
     source = (cible.get("source") or "").strip()
 
@@ -419,23 +518,19 @@ def load_clients_df_for_cible(id_cible: str) -> pd.DataFrame:
             filtre = {}
 
         df = _query_clients_by_filtre(filtre)
-
         cols = {c.lower(): c for c in df.columns}
         if "radical_compte" in cols:
             return df.rename(columns={cols["radical_compte"]: "radical_compte"})
-
-        raise ValueError("Base clients: colonne 'radical_compte' manquante")
+        raise ValueError("Base clients : colonne 'radical_compte' manquante")
 
     if source == "Fichier plat":
         path = (cible.get("chemin") or "").strip()
         if not path:
             raise ValueError("Chemin fichier plat manquant dans la cible")
         df = _read_flat_file(path)
-
         cols = {c.lower(): c for c in df.columns}
         if "radical_compte" in cols:
             return df.rename(columns={cols["radical_compte"]: "radical_compte"})
+        raise ValueError("Fichier plat cible : colonne 'radical_compte' manquante")
 
-        raise ValueError("Fichier plat cible: colonne 'radical_compte' manquante")
-
-    raise ValueError(f"Source cible invalide: {source}")
+    raise ValueError(f"Source cible invalide : {source}")

@@ -33,6 +33,7 @@ from app.domain.ui_facades.modeles_ui_facade import (
     get_modele_edit_payload_for_ui,
     save_modele_for_ui,
     get_actions_from_row_for_ui,
+    get_client_condition_fields_for_ui,
 )
 
 
@@ -123,6 +124,27 @@ def render_condition_builder(
 
     fields = ["Flag résultats", "NB jours depuis last action", compteur]
 
+    # ✅ Conditions basées sur la table clients (hors colonnes du screen)
+    client_meta = get_client_condition_fields_for_ui() or []
+    client_labels: List[str] = [f"Client: {d.get('col')}" for d in client_meta if d.get("col")]
+    client_label_to_meta = {f"Client: {d.get('col')}": d for d in client_meta if d.get("col")}
+
+    def _is_client_label(lbl: str) -> bool:
+        return isinstance(lbl, str) and lbl.startswith("Client: ")
+
+    def _label_from_stored(field_name: str) -> str:
+        """Map DB-stored field -> UI label"""
+        f = str(field_name or "")
+        if f.startswith("client."):
+            return f"Client: {f.split('.', 1)[1]}"
+        return f
+
+    def _stored_from_label(lbl: str) -> str:
+        """Map UI label -> DB-stored field"""
+        if _is_client_label(lbl):
+            return "client." + lbl.split("Client: ", 1)[1].strip()
+        return lbl
+
     st.markdown("**Conditions (liées au bloc mère sélectionné)**")
 
     # -------------------------
@@ -131,12 +153,14 @@ def render_condition_builder(
     c1, c2, c3, c4 = st.columns([3, 2, 3, 2])
 
     with c1:
-        field = st.selectbox("Champ", fields, key=f"{key_prefix}_field_new")
+        field = st.selectbox("Champ", fields + client_labels, key=f"{key_prefix}_field_new")
 
     with c2:
         if field == "Flag résultats":
             op = "="
             st.text_input("Opérateur", value="=", disabled=True, key=f"{key_prefix}_op_new_lock")
+        elif _is_client_label(field) and client_label_to_meta.get(field, {}).get("is_numeric") == "0":
+            op = st.selectbox("Opérateur", ["=", "!=", "contains", "not contains"], key=f"{key_prefix}_op_new_txt")
         else:
             op = st.selectbox("Opérateur", ["=", ">", "<", ">=", "<="], key=f"{key_prefix}_op_new")
 
@@ -147,12 +171,14 @@ def render_condition_builder(
             else:
                 value = ""
                 st.text_input("Valeur", value="", disabled=True, key=f"{key_prefix}_val_new_flag_empty")
+        elif _is_client_label(field) and client_label_to_meta.get(field, {}).get("is_numeric") == "0":
+            value = st.text_input("Valeur", value="", key=f"{key_prefix}_val_new_txt")
         else:
             value = st.number_input("Valeur", min_value=0, step=1, value=0, key=f"{key_prefix}_val_new_num")
 
     with c4:
         if st.button("➕", key=f"{key_prefix}_add"):
-            st.session_state[conds_key].append({"field": field, "op": op, "value": value})
+            st.session_state[conds_key].append({"field": _stored_from_label(field), "op": op, "value": value})
             st.rerun()
 
     # -------------------------
@@ -162,14 +188,17 @@ def render_condition_builder(
         st.markdown("**Conditions existantes**")
         ops = ["=", ">", "<", ">=", "<="]
 
+        all_fields = fields + client_labels
+
         for i, c in enumerate(list(st.session_state[conds_key])):
             l, m, r = st.columns([4, 4, 1])
 
             with l:
+                cur_field_label = _label_from_stored(c.get("field"))
                 new_field = st.selectbox(
                     "Champ",
-                    fields,
-                    index=fields.index(c.get("field")) if c.get("field") in fields else 0,
+                    all_fields,
+                    index=all_fields.index(cur_field_label) if cur_field_label in all_fields else 0,
                     key=f"{key_prefix}_field_{i}",
                     label_visibility="collapsed",
                 )
@@ -183,6 +212,15 @@ def render_condition_builder(
                         value="=",
                         disabled=True,
                         key=f"{key_prefix}_op_{i}_lock",
+                        label_visibility="collapsed",
+                    )
+                elif _is_client_label(new_field) and client_label_to_meta.get(new_field, {}).get("is_numeric") == "0":
+                    cur_op = c.get("op") if c.get("op") in ["=", "!=", "contains", "not contains"] else "="
+                    new_op = st.selectbox(
+                        "Op",
+                        ["=", "!=", "contains", "not contains"],
+                        index=["=", "!=", "contains", "not contains"].index(cur_op),
+                        key=f"{key_prefix}_op_{i}_txt",
                         label_visibility="collapsed",
                     )
                 else:
@@ -216,6 +254,14 @@ def render_condition_builder(
                             key=f"{key_prefix}_val_{i}_flag_empty",
                             label_visibility="collapsed",
                         )
+                elif _is_client_label(new_field) and client_label_to_meta.get(new_field, {}).get("is_numeric") == "0":
+                    cur_val_txt = str(c.get("value", "") or "")
+                    new_val = st.text_input(
+                        "Valeur",
+                        value=cur_val_txt,
+                        key=f"{key_prefix}_val_{i}_txt",
+                        label_visibility="collapsed",
+                    )
                 else:
                     try:
                         cur_val_num = int(float(c.get("value") or 0))
@@ -231,7 +277,7 @@ def render_condition_builder(
                     )
 
                 # sauvegarde inline dans session
-                st.session_state[conds_key][i] = {"field": new_field, "op": new_op, "value": new_val}
+                st.session_state[conds_key][i] = {"field": _stored_from_label(new_field), "op": new_op, "value": new_val}
 
             with r:
                 if st.button("🗑️", key=f"{key_prefix}_del_{i}"):

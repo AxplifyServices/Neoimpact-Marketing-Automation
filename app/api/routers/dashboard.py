@@ -34,16 +34,7 @@ def dashboard_filters(
     etats_campagne: Optional[List[str]] = Query(default=None),
     etats: Optional[List[str]] = Query(default=None),  # alias backward-compatible
 ):
-    """
-    Renvoie les options de filtres dynamiques.
-    - campagne_ids : campagnes déjà sélectionnées
-    - etats_campagne : états sélectionnés (OFFICIEL)
-    - etats : alias rétro-compatible
-    """
-
-    # priorité au nom officiel
     effective_etats = etats_campagne if etats_campagne is not None else etats
-
     return get_dynamic_filter_options(
         selected_campagne_ids=campagne_ids,
         selected_etats=effective_etats,
@@ -55,9 +46,6 @@ def dashboard_filters(
 # =========================================================
 @router.get("/dashboard/campagnes-options")
 def campaign_options():
-    """
-    Endpoint legacy conservé pour compatibilité.
-    """
     out = get_dynamic_filter_options(
         selected_campagne_ids=None,
         selected_etats=None,
@@ -67,12 +55,12 @@ def campaign_options():
 
 # =========================================================
 # Compute dashboard (POST)
+# - Retourne toujours le GLOBAL (kpis/tables/series)
+# - Et si campagne_ids fourni => payload["by_campaign"] contient tout isolé par campagne
+# - Et si len(campagne_ids)==1 => payload["graph"] (compat historique)
 # =========================================================
 @router.post("/dashboard/compute")
 def dashboard_compute(payload: DashboardIn):
-    """
-    Calcule KPIs + séries + tables + graphe (si 1 campagne).
-    """
     filters = DashboardFilters(
         campagne_ids=payload.campagne_ids,
         etats_campagne=payload.etats_campagne,
@@ -87,6 +75,38 @@ def dashboard_compute(payload: DashboardIn):
 # =========================================================
 @router.get("/dashboard/compute")
 def dashboard_compute_get(
+    campagne_ids: Optional[List[str]] = Query(default=None),
+    etats_campagne: Optional[List[str]] = Query(default=None),
+    date_min: Optional[date] = Query(default=None),
+    date_max: Optional[date] = Query(default=None),
+):
+    filters = DashboardFilters(
+        campagne_ids=campagne_ids,
+        etats_campagne=etats_campagne,
+        date_min=date_min,
+        date_max=date_max,
+    )
+    return compute_dashboard_payload(filters)
+
+
+# =========================================================
+# Alias (optionnel) - BY CAMPAIGN
+# Pour ne pas casser un front qui appelait déjà /compute-by-campagne
+# (renvoie le même payload que /dashboard/compute, incluant by_campaign)
+# =========================================================
+@router.post("/dashboard/compute-by-campagne")
+def dashboard_compute_by_campagne(payload: DashboardIn):
+    filters = DashboardFilters(
+        campagne_ids=payload.campagne_ids,
+        etats_campagne=payload.etats_campagne,
+        date_min=payload.date_min,
+        date_max=payload.date_max,
+    )
+    return compute_dashboard_payload(filters)
+
+
+@router.get("/dashboard/compute-by-campagne")
+def dashboard_compute_by_campagne_get(
     campagne_ids: Optional[List[str]] = Query(default=None),
     etats_campagne: Optional[List[str]] = Query(default=None),
     date_min: Optional[date] = Query(default=None),

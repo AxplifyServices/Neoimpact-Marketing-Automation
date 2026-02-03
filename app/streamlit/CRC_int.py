@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List, Tuple
 
 import streamlit as st
 
 from app.engine.crc_engine import (
-    get_next_crc_input_row,
-    skip_current_row,
+    get_ordered_rows_from_queue,
+    move_row_to_end_of_queue,
+    get_arrive_eche_flag,
     apply_result_and_update_client_campagnes,
     call_current_client,
+    list_campaigns_in_crc_queue,  # ✅ NEW
 )
 from app.domain.canaux import resultats_for_canal
 from app.scripts.batch_manuel import run_batch_manuel
@@ -30,7 +32,7 @@ def _render_header(ctx: Dict[str, Any]) -> None:
         var = ctx.get("variable_cible") or "—"
         val = ctx.get("valeur_cible") or ""
         st.write(f"{var}" + (f" : **{val}**" if val else ""))
-    with c3:
+    with c4:
         st.caption("Objectif")
         st.write(ctx.get("objectif") or "—")
     with c4:
@@ -38,6 +40,34 @@ def _render_header(ctx: Dict[str, Any]) -> None:
         st.write(ctx.get("statut_actuel") or "—")
 
     st.divider()
+
+
+def _campaign_filter_ui(key_prefix: str) -> str | None:
+    campaigns: List[Tuple[str, str]] = list_campaigns_in_crc_queue()  # [(id, nom), ...]
+
+    options = [("__ALL__", "Toutes les campagnes")]
+    options += [(cid, f"{(cname or cid)}  ·  {cid}") for cid, cname in campaigns]
+
+    default_id = st.session_state.get(f"{key_prefix}_camp_filter", "__ALL__")
+
+    default_index = 0
+    for i, (cid, _) in enumerate(options):
+        if cid == default_id:
+            default_index = i
+            break
+
+    selected = st.selectbox(
+        "Filtrer par campagne",
+        options=options,
+        index=default_index,
+        format_func=lambda x: x[1],
+        key=f"{key_prefix}_camp_filter_select",
+    )
+
+    selected_id = selected[0]
+    st.session_state[f"{key_prefix}_camp_filter"] = selected_id
+
+    return None if selected_id == "__ALL__" else selected_id
 
 
 def main(embedded: bool = False, key_prefix: str = "crc") -> None:
@@ -50,13 +80,38 @@ def main(embedded: bool = False, key_prefix: str = "crc") -> None:
             run_batch_manuel()
             st.rerun()
 
-    row = get_next_crc_input_row()
+    # ✅ Filtre campagne
+    selected_campagne = _campaign_filter_ui(key_prefix=key_prefix)
+
+    rows = get_ordered_rows_from_queue('crc_input', id_campagne_filter=selected_campagne)
+
+    state_key = f"{key_prefix}_current_key"
+    cur_key = st.session_state.get(state_key)
+    if cur_key:
+        for i, r in enumerate(rows):
+            if str(r.get('ID_CAMPAGNE') or '').strip() == cur_key[0] and str(r.get('Radical_compte') or '').strip() == cur_key[1]:
+                current_idx = i
+                break
+        else:
+            current_idx = 0
+    else:
+        current_idx = 0
+    row = rows[current_idx] if rows else None
     if not row:
-        st.info("Aucune ligne à traiter dans CRC.")
+        if selected_campagne:
+            st.info("Aucune ligne à traiter dans CRC pour la campagne sélectionnée.")
+        else:
+            st.info("Aucune ligne à traiter dans CRC.")
+        st.session_state.pop(state_key, None)
         return
 
     id_campagne = str(row.get("ID_CAMPAGNE") or "").strip()
     radical = str(row.get("Radical_compte") or "").strip()
+
+    st.session_state[state_key] = (id_campagne, radical)
+
+    if get_arrive_eche_flag(id_campagne, radical):
+        st.error("⚠️ Client arrivant à échéance")
 
     # ✅ récupère le contexte via façade (SQL hors UI)
     ctx = get_crc_context_from_db(id_campagne, radical)
@@ -65,19 +120,31 @@ def main(embedded: bool = False, key_prefix: str = "crc") -> None:
     canal = (row.get("Canal") or "").strip() or "Appel"
     resultats = resultats_for_canal(canal)
 
-    c1, c2, c3 = st.columns([0.18, 0.18, 0.64], vertical_alignment="center")
+    c1, c2, c3, c4 = st.columns([0.16, 0.16, 0.16, 0.52], vertical_alignment="center")
 
     with c1:
-        if st.button("Skip", key=f"{key_prefix}_skip", use_container_width=True):
-            skip_current_row(id_campagne, radical)
+        if st.button("⬅️ Reculer", key=f"{key_prefix}_back", use_container_width=True):
+            if rows:
+                prev_idx = (current_idx - 1) % len(rows)
+                prev_row = rows[prev_idx]
+                st.session_state[state_key] = (str(prev_row.get('ID_CAMPAGNE') or '').strip(), str(prev_row.get('Radical_compte') or '').strip())
             st.rerun()
 
     with c2:
+        if st.button("Skip", key=f"{key_prefix}_skip", use_container_width=True):
+            if rows:
+                next_idx = (current_idx + 1) % len(rows)
+                next_row = rows[next_idx]
+                st.session_state[state_key] = (str(next_row.get('ID_CAMPAGNE') or '').strip(), str(next_row.get('Radical_compte') or '').strip())
+            move_row_to_end_of_queue('crc_input', id_campagne, radical)
+            st.rerun()
+
+    with c4:
         if st.button("Appeler", key=f"{key_prefix}_call", use_container_width=True):
             call_current_client(row)
             st.rerun()
 
-    with c3:
+    with c4:
         if not resultats:
             st.warning("Aucun résultat défini pour ce canal.")
         else:

@@ -67,7 +67,7 @@ def fill_action_vers_da_from_clients_campagnes(id_campagne: str) -> int:
             cl.Numero_Tel,
             cl.Mail,
             COALESCE(c.date_debut,'') as date_creation_campagne,
-            COALESCE(cc.Date_last_action,'') as date_last_action,
+            CASE WHEN COALESCE(cc.arriv_eche ,'') = 'Oui' THEN '0000-01-01 00:00:00' ELSE COALESCE(cc.Date_last_action,'') END as date_last_action,
             COALESCE(cc.ID_Action,'') as ID_Action,
             COALESCE(cc.Canal,'') as Canal,
             COALESCE(cc.Action,'') as Action,
