@@ -11,6 +11,8 @@ from app.engine.crc_engine import (
     get_arrive_eche_flag,
     apply_result_and_update_client_campagnes_from_queue,
     list_campaigns_in_queue,  # ✅ NEW
+    list_gestionnaires_in_queue,
+    get_queue_counts_by_gestionnaire,
 )
 from app.scripts.batch_manuel import run_batch_manuel
 
@@ -43,6 +45,22 @@ def _render_header(ctx: Dict[str, Any]) -> None:
 
     st.divider()
 
+def _gestionnaire_filter_ui(queue_table: str, key_prefix: str, id_campagne: str | None) -> str | None:
+    gestionnaires = list_gestionnaires_in_queue(queue_table, id_campagne_filter=id_campagne)
+    options = [("__ALL__", "Tous les gestionnaires")] + [(g, g) for g in gestionnaires]
+    default_id = st.session_state.get(f"{key_prefix}_gest_filter", "__ALL__")
+    default_index = next((i for i, (gid, _) in enumerate(options) if gid == default_id), 0)
+
+    selected = st.selectbox(
+        "Filtrer par gestionnaire",
+        options=options,
+        index=default_index,
+        format_func=lambda x: x[1],
+        key=f"{key_prefix}_gest_filter_select",
+    )
+    selected_id = selected[0]
+    st.session_state[f"{key_prefix}_gest_filter"] = selected_id
+    return None if selected_id == "__ALL__" else selected_id
 
 def _campaign_filter_ui(queue_table: str, key_prefix: str) -> str | None:
     campaigns: List[Tuple[str, str]] = list_campaigns_in_queue(queue_table)
@@ -81,23 +99,40 @@ def main(embedded: bool = False, key_prefix: str = "da") -> None:
             run_batch_manuel()
             st.rerun()
 
-    # ✅ Filtre campagne
+    # ✅ Filtres (campagne -> gestionnaire)
     selected_campagne = _campaign_filter_ui(QUEUE_TABLE, key_prefix=key_prefix)
+    selected_gestionnaire = _gestionnaire_filter_ui(QUEUE_TABLE, key_prefix, selected_campagne)
 
-    rows = get_ordered_rows_from_queue(QUEUE_TABLE, id_campagne_filter=selected_campagne)
+    # ✅ Tableau counts par gestionnaire (optionnel)
+    counts = get_queue_counts_by_gestionnaire(QUEUE_TABLE, id_campagne_filter=selected_campagne)
+    if counts:
+        st.caption("📌 Queue par gestionnaire")
+        st.table(counts)
+
+    # ✅ Rows filtrées (c’est CETTE liste qui pilote toute la page)
+    rows = get_ordered_rows_from_queue(
+        QUEUE_TABLE,
+        id_campagne_filter=selected_campagne,
+        gestionnaire_filter=selected_gestionnaire,
+    )
 
     # navigation circulaire : on garde la clé courante en session
     state_key = f"{key_prefix}_current_key"
     cur_key = st.session_state.get(state_key)
+
     if cur_key:
         for i, r in enumerate(rows):
-            if str(r.get('ID_CAMPAGNE') or '').strip() == cur_key[0] and str(r.get('Radical_compte') or '').strip() == cur_key[1]:
+            if (
+                str(r.get("ID_CAMPAGNE") or "").strip() == cur_key[0]
+                and str(r.get("Radical_compte") or "").strip() == cur_key[1]
+            ):
                 current_idx = i
                 break
         else:
             current_idx = 0
     else:
         current_idx = 0
+
     row = rows[current_idx] if rows else None
     if not row:
         if selected_campagne:
@@ -131,7 +166,10 @@ def main(embedded: bool = False, key_prefix: str = "da") -> None:
             if rows:
                 prev_idx = (current_idx - 1) % len(rows)
                 prev_row = rows[prev_idx]
-                st.session_state[state_key] = (str(prev_row.get('ID_CAMPAGNE') or '').strip(), str(prev_row.get('Radical_compte') or '').strip())
+                st.session_state[state_key] = (
+                    str(prev_row.get("ID_CAMPAGNE") or "").strip(),
+                    str(prev_row.get("Radical_compte") or "").strip(),
+                )
             st.rerun()
 
     with c2:
@@ -139,7 +177,10 @@ def main(embedded: bool = False, key_prefix: str = "da") -> None:
             if rows:
                 next_idx = (current_idx + 1) % len(rows)
                 next_row = rows[next_idx]
-                st.session_state[state_key] = (str(next_row.get('ID_CAMPAGNE') or '').strip(), str(next_row.get('Radical_compte') or '').strip())
+                st.session_state[state_key] = (
+                    str(next_row.get("ID_CAMPAGNE") or "").strip(),
+                    str(next_row.get("Radical_compte") or "").strip(),
+                )
             move_row_to_end_of_queue(QUEUE_TABLE, id_campagne, radical)
             st.rerun()
 

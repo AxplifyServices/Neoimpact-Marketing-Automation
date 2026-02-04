@@ -11,6 +11,8 @@ from app.engine.crc_engine import (
     get_arrive_eche_flag,
     apply_result_and_update_client_campagnes_from_queue,
     list_campaigns_in_queue,  # ✅ NEW
+    list_gestionnaires_in_queue,
+    get_queue_counts_by_gestionnaire,
 )
 from app.scripts.batch_manuel import run_batch_manuel
 
@@ -43,6 +45,22 @@ def _render_header(ctx: Dict[str, Any]) -> None:
 
     st.divider()
 
+def _gestionnaire_filter_ui(queue_table: str, key_prefix: str, id_campagne: str | None) -> str | None:
+    gestionnaires = list_gestionnaires_in_queue(queue_table, id_campagne_filter=id_campagne)
+    options = [("__ALL__", "Tous les gestionnaires")] + [(g, g) for g in gestionnaires]
+    default_id = st.session_state.get(f"{key_prefix}_gest_filter", "__ALL__")
+    default_index = next((i for i, (gid, _) in enumerate(options) if gid == default_id), 0)
+
+    selected = st.selectbox(
+        "Filtrer par gestionnaire",
+        options=options,
+        index=default_index,
+        format_func=lambda x: x[1],
+        key=f"{key_prefix}_gest_filter_select",
+    )
+    selected_id = selected[0]
+    st.session_state[f"{key_prefix}_gest_filter"] = selected_id
+    return None if selected_id == "__ALL__" else selected_id
 
 def _campaign_filter_ui(queue_table: str, key_prefix: str) -> str | None:
     """
@@ -85,10 +103,23 @@ def main(embedded: bool = False, key_prefix: str = "cc") -> None:
             run_batch_manuel()
             st.rerun()
 
-    # ✅ Filtre campagne (garde la queue intacte, on change juste la lecture)
+    # ✅ Filtres (campagne -> gestionnaire)
     selected_campagne = _campaign_filter_ui(QUEUE_TABLE, key_prefix=key_prefix)
+    selected_gestionnaire = _gestionnaire_filter_ui(QUEUE_TABLE, key_prefix, selected_campagne)
 
-    rows = get_ordered_rows_from_queue(QUEUE_TABLE, id_campagne_filter=selected_campagne)
+    # ✅ Tableau counts par gestionnaire (optionnel)
+    counts = get_queue_counts_by_gestionnaire(QUEUE_TABLE, id_campagne_filter=selected_campagne)
+    if counts:
+        st.caption("📌 Queue par gestionnaire")
+        st.table(counts)
+
+    # ✅ Rows filtrées (c’est CETTE liste qui pilote toute la page)
+    rows = get_ordered_rows_from_queue(
+        QUEUE_TABLE,
+        id_campagne_filter=selected_campagne,
+        gestionnaire_filter=selected_gestionnaire,
+    )
+
     if not rows:
         if selected_campagne:
             st.info("Aucune ligne CC à traiter pour la campagne sélectionnée.")
@@ -98,7 +129,10 @@ def main(embedded: bool = False, key_prefix: str = "cc") -> None:
 
     # --- navigation circulaire (Skip/Reculer) ---
     current_key = st.session_state.get(f"{key_prefix}_current_key")
-    keys = [(str(r.get('ID_CAMPAGNE') or '').strip(), str(r.get('Radical_compte') or '').strip()) for r in rows]
+    keys = [
+        (str(r.get("ID_CAMPAGNE") or "").strip(), str(r.get("Radical_compte") or "").strip())
+        for r in rows
+    ]
 
     if current_key in keys:
         pos = keys.index(current_key)
@@ -111,6 +145,7 @@ def main(embedded: bool = False, key_prefix: str = "cc") -> None:
 
     # ✅ contexte DB déplacé hors UI
     ctx = get_cc_context_from_db(id_campagne, radical)
+
     # ✅ Flag échéance (rouge) si arrive_ache == 'Oui'
     if get_arrive_eche_flag(id_campagne, radical):
         st.error("⚠️ Client arrivant à échéance")

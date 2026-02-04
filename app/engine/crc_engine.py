@@ -316,3 +316,125 @@ def prioritize_echeance_in_queue(queue_table: str, id_campagne_filter: Optional[
     n = cur.rowcount if cur.rowcount is not None else 0
     conn.close()
     return int(n)
+
+# app/engine/crc_engine.py
+
+def list_gestionnaires_in_queue(queue_table: str, id_campagne_filter: Optional[str] = None) -> List[str]:
+    conn = _connect()
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+
+    if not _table_exists(cur, queue_table):
+        conn.close()
+        return []
+
+    where = []
+    params: List[Any] = []
+    if id_campagne_filter:
+        where.append("TRIM(q.ID_CAMPAGNE) = ?")
+        params.append(str(id_campagne_filter).strip())
+
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+    cur.execute(
+        f"""
+        SELECT DISTINCT COALESCE(cl.Gestionnaire, '') AS gestionnaire
+        FROM {queue_table} q
+        LEFT JOIN clients cl ON cl.radical_compte = q.Radical_compte
+        {where_sql}
+        ORDER BY gestionnaire ASC
+        """,
+        params,
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return [str(r["gestionnaire"]).strip() for r in rows if str(r["gestionnaire"]).strip()]
+
+
+def get_queue_counts_by_gestionnaire(queue_table: str, id_campagne_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+    conn = _connect()
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+
+    if not _table_exists(cur, queue_table):
+        conn.close()
+        return []
+
+    where = []
+    params: List[Any] = []
+    if id_campagne_filter:
+        where.append("TRIM(q.ID_CAMPAGNE) = ?")
+        params.append(str(id_campagne_filter).strip())
+
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+    cur.execute(
+        f"""
+        SELECT COALESCE(cl.Gestionnaire, '') AS gestionnaire, COUNT(*) AS nb
+        FROM {queue_table} q
+        LEFT JOIN clients cl ON cl.radical_compte = q.Radical_compte
+        {where_sql}
+        GROUP BY gestionnaire
+        ORDER BY nb DESC, gestionnaire ASC
+        """,
+        params,
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return [{"gestionnaire": r["gestionnaire"], "nb": int(r["nb"])} for r in rows]
+
+
+def get_ordered_rows_from_queue(
+    table: str,
+    id_campagne_filter: Optional[str] = None,
+    gestionnaire_filter: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    conn = _connect()
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+
+    if not _table_exists(cur, table):
+        conn.close()
+        return []
+
+    if gestionnaire_filter:
+        where = ["TRIM(COALESCE(cl.Gestionnaire,'')) = ?"]
+        params: List[Any] = [str(gestionnaire_filter).strip()]
+        if id_campagne_filter:
+            where.append("TRIM(q.ID_CAMPAGNE) = ?")
+            params.append(str(id_campagne_filter).strip())
+
+        where_sql = " AND ".join(where)
+        cur.execute(
+            f"""
+            SELECT q.*
+            FROM {table} q
+            LEFT JOIN clients cl ON cl.radical_compte = q.Radical_compte
+            WHERE {where_sql}
+            ORDER BY q.date_creation_campagne ASC, COALESCE(q.date_last_action, '9999-12-31') ASC
+            """,
+            params,
+        )
+    else:
+        # fallback identique à l'existant
+        if id_campagne_filter:
+            cur.execute(
+                f"""
+                SELECT * FROM {table}
+                WHERE TRIM(ID_CAMPAGNE) = ?
+                ORDER BY date_creation_campagne ASC, COALESCE(date_last_action, '9999-12-31') ASC
+                """,
+                (str(id_campagne_filter).strip(),),
+            )
+        else:
+            cur.execute(
+                f"""
+                SELECT * FROM {table}
+                ORDER BY date_creation_campagne ASC, COALESCE(date_last_action, '9999-12-31') ASC
+                """
+            )
+
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows
+

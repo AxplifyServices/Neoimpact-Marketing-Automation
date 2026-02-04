@@ -15,3 +15,16 @@ scp app/scripts/batch_manuel.py \ ubuntu@51.75.252.139:/apps/Marketing_automatio
 
 http://51.75.252.139:8501/
 http://51.75.252.139:8000/docs
+
+
+
+
+
+
+
+
+Pour Git :
+
+git add .
+git commit -m "message clair"
+git push origin main

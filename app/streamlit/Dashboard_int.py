@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import sys
+import sqlite3
+from typing import List
 
 import pandas as pd
 import streamlit as st
@@ -19,6 +21,9 @@ from app.domain.dashboard_kpis import (
     compute_dashboard_payload,
     get_dynamic_filter_options,
 )
+
+from app.storage.db import DB_PATH
+
 
 # =========================================================
 # UI helpers
@@ -41,6 +46,26 @@ def _compact_css():
         """,
         unsafe_allow_html=True,
     )
+
+
+def _list_gestionnaires_ui() -> list[str]:
+    """
+    Récupère la liste unique des gestionnaires depuis la table clients (dimension).
+    Aucun effet de bord : pas d'écriture DB.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT COALESCE(Gestionnaire,'') AS g
+            FROM clients
+            WHERE COALESCE(Gestionnaire,'') <> ''
+            ORDER BY g
+            """
+        ).fetchall()
+        return [str(r[0]).strip() for r in rows if r and str(r[0]).strip()]
+    finally:
+        conn.close()
 
 
 def _plot_graph_network(graph_payload: dict, height: int = 290):
@@ -105,7 +130,7 @@ def _plot_graph_network(graph_payload: dict, height: int = 290):
         # hover détaillé
         label = G.nodes[nid].get("label") or str(nid)
         hovertext.append(label)
-        sizes.append(max(12, min(45, 12 + cnt ** 0.5)))
+        sizes.append(max(12, min(45, 12 + cnt**0.5)))
 
     node_trace = go.Scatter(
         x=node_x,
@@ -145,9 +170,11 @@ def main():
         st.session_state["dash_selected_etats"] = ["En cours", "Terminée"]
     if "dash_selected_campaigns" not in st.session_state:
         st.session_state["dash_selected_campaigns"] = []
+    if "dash_selected_gestionnaires" not in st.session_state:
+        st.session_state["dash_selected_gestionnaires"] = []
 
     # ---------------------------------------------------------
-    # Bidirectional dynamic filters
+    # Bidirectional dynamic filters (états <-> campagnes)
     # ---------------------------------------------------------
     # campaigns depend on selected etats
     opts_for_camps = get_dynamic_filter_options(
@@ -174,9 +201,18 @@ def main():
     camp_label_by_id = {c["id"]: c["label"] for c in camp_options}
 
     # ---------------------------------------------------------
+    # Gestionnaires options (global) + prune des sélections
+    # ---------------------------------------------------------
+    gest_options = _list_gestionnaires_ui()
+    gest_set = set(gest_options or [])
+    st.session_state["dash_selected_gestionnaires"] = [
+        g for g in st.session_state["dash_selected_gestionnaires"] if g in gest_set
+    ]
+
+    # ---------------------------------------------------------
     # Filter bar
     # ---------------------------------------------------------
-    c1, c2, c3 = st.columns([2.2, 5.0, 1.2], vertical_alignment="bottom")
+    c1, c2, c3, c4 = st.columns([2.2, 5.0, 3.0, 1.2], vertical_alignment="bottom")
 
     with c1:
         st.session_state["dash_selected_etats"] = st.multiselect(
@@ -200,9 +236,18 @@ def main():
         ]
 
     with c3:
+        st.session_state["dash_selected_gestionnaires"] = st.multiselect(
+            "Gestionnaire",
+            options=gest_options,
+            default=st.session_state["dash_selected_gestionnaires"],
+            key="dash_gest_ui",
+        )
+
+    with c4:
         if st.button("Reset", key="dash_reset"):
             st.session_state["dash_selected_etats"] = ["En cours", "Terminée"]
             st.session_state["dash_selected_campaigns"] = []
+            st.session_state["dash_selected_gestionnaires"] = []
             st.rerun()
 
     # ---------------------------------------------------------
@@ -211,6 +256,7 @@ def main():
     filters = DashboardFilters(
         campagne_ids=st.session_state["dash_selected_campaigns"] or None,
         etats_campagne=st.session_state["dash_selected_etats"] or None,
+        gestionnaires=st.session_state["dash_selected_gestionnaires"] or None,
     )
     payload = compute_dashboard_payload(filters)
 

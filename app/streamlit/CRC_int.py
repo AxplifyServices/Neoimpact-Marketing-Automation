@@ -11,6 +11,8 @@ from app.engine.crc_engine import (
     apply_result_and_update_client_campagnes,
     call_current_client,
     list_campaigns_in_crc_queue,  # ✅ NEW
+    list_gestionnaires_in_queue,
+    get_queue_counts_by_gestionnaire,
 )
 from app.domain.canaux import resultats_for_canal
 from app.scripts.batch_manuel import run_batch_manuel
@@ -41,6 +43,22 @@ def _render_header(ctx: Dict[str, Any]) -> None:
 
     st.divider()
 
+def _gestionnaire_filter_ui(queue_table: str, key_prefix: str, id_campagne: str | None) -> str | None:
+    gestionnaires = list_gestionnaires_in_queue(queue_table, id_campagne_filter=id_campagne)
+    options = [("__ALL__", "Tous les gestionnaires")] + [(g, g) for g in gestionnaires]
+    default_id = st.session_state.get(f"{key_prefix}_gest_filter", "__ALL__")
+    default_index = next((i for i, (gid, _) in enumerate(options) if gid == default_id), 0)
+
+    selected = st.selectbox(
+        "Filtrer par gestionnaire",
+        options=options,
+        index=default_index,
+        format_func=lambda x: x[1],
+        key=f"{key_prefix}_gest_filter_select",
+    )
+    selected_id = selected[0]
+    st.session_state[f"{key_prefix}_gest_filter"] = selected_id
+    return None if selected_id == "__ALL__" else selected_id
 
 def _campaign_filter_ui(key_prefix: str) -> str | None:
     campaigns: List[Tuple[str, str]] = list_campaigns_in_crc_queue()  # [(id, nom), ...]
@@ -80,22 +98,39 @@ def main(embedded: bool = False, key_prefix: str = "crc") -> None:
             run_batch_manuel()
             st.rerun()
 
-    # ✅ Filtre campagne
+    # ✅ Filtres (campagne -> gestionnaire)
     selected_campagne = _campaign_filter_ui(key_prefix=key_prefix)
+    selected_gestionnaire = _gestionnaire_filter_ui("crc_input", key_prefix, selected_campagne)
 
-    rows = get_ordered_rows_from_queue('crc_input', id_campagne_filter=selected_campagne)
+    # ✅ Tableau counts par gestionnaire (optionnel)
+    counts = get_queue_counts_by_gestionnaire("crc_input", id_campagne_filter=selected_campagne)
+    if counts:
+        st.caption("📌 Queue par gestionnaire")
+        st.table(counts)
+
+    # ✅ Rows filtrées (c’est CETTE liste qui pilote toute la page)
+    rows = get_ordered_rows_from_queue(
+        "crc_input",
+        id_campagne_filter=selected_campagne,
+        gestionnaire_filter=selected_gestionnaire,
+    )
 
     state_key = f"{key_prefix}_current_key"
     cur_key = st.session_state.get(state_key)
+
     if cur_key:
         for i, r in enumerate(rows):
-            if str(r.get('ID_CAMPAGNE') or '').strip() == cur_key[0] and str(r.get('Radical_compte') or '').strip() == cur_key[1]:
+            if (
+                str(r.get("ID_CAMPAGNE") or "").strip() == cur_key[0]
+                and str(r.get("Radical_compte") or "").strip() == cur_key[1]
+            ):
                 current_idx = i
                 break
         else:
             current_idx = 0
     else:
         current_idx = 0
+
     row = rows[current_idx] if rows else None
     if not row:
         if selected_campagne:
@@ -107,13 +142,11 @@ def main(embedded: bool = False, key_prefix: str = "crc") -> None:
 
     id_campagne = str(row.get("ID_CAMPAGNE") or "").strip()
     radical = str(row.get("Radical_compte") or "").strip()
-
     st.session_state[state_key] = (id_campagne, radical)
 
     if get_arrive_eche_flag(id_campagne, radical):
         st.error("⚠️ Client arrivant à échéance")
 
-    # ✅ récupère le contexte via façade (SQL hors UI)
     ctx = get_crc_context_from_db(id_campagne, radical)
     _render_header(ctx)
 
@@ -127,7 +160,10 @@ def main(embedded: bool = False, key_prefix: str = "crc") -> None:
             if rows:
                 prev_idx = (current_idx - 1) % len(rows)
                 prev_row = rows[prev_idx]
-                st.session_state[state_key] = (str(prev_row.get('ID_CAMPAGNE') or '').strip(), str(prev_row.get('Radical_compte') or '').strip())
+                st.session_state[state_key] = (
+                    str(prev_row.get("ID_CAMPAGNE") or "").strip(),
+                    str(prev_row.get("Radical_compte") or "").strip(),
+                )
             st.rerun()
 
     with c2:
@@ -135,8 +171,11 @@ def main(embedded: bool = False, key_prefix: str = "crc") -> None:
             if rows:
                 next_idx = (current_idx + 1) % len(rows)
                 next_row = rows[next_idx]
-                st.session_state[state_key] = (str(next_row.get('ID_CAMPAGNE') or '').strip(), str(next_row.get('Radical_compte') or '').strip())
-            move_row_to_end_of_queue('crc_input', id_campagne, radical)
+                st.session_state[state_key] = (
+                    str(next_row.get("ID_CAMPAGNE") or "").strip(),
+                    str(next_row.get("Radical_compte") or "").strip(),
+                )
+            move_row_to_end_of_queue("crc_input", id_campagne, radical)
             st.rerun()
 
     with c4:

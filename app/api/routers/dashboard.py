@@ -23,6 +23,7 @@ class DashboardIn(BaseModel):
     etats_campagne: Optional[List[str]] = None
     date_min: Optional[date] = None
     date_max: Optional[date] = None
+    gestionnaires: Optional[List[str]] = None  # ✅ NEW
 
 
 # =========================================================
@@ -66,6 +67,7 @@ def dashboard_compute(payload: DashboardIn):
         etats_campagne=payload.etats_campagne,
         date_min=payload.date_min,
         date_max=payload.date_max,
+        gestionnaires=payload.gestionnaires,  # ✅ NEW
     )
     return compute_dashboard_payload(filters)
 
@@ -79,12 +81,15 @@ def dashboard_compute_get(
     etats_campagne: Optional[List[str]] = Query(default=None),
     date_min: Optional[date] = Query(default=None),
     date_max: Optional[date] = Query(default=None),
+    gestionnaires: Optional[List[str]] = Query(default=None),  # ✅ NEW
 ):
     filters = DashboardFilters(
         campagne_ids=campagne_ids,
         etats_campagne=etats_campagne,
         date_min=date_min,
         date_max=date_max,
+        gestionnaires=gestionnaires,
+
     )
     return compute_dashboard_payload(filters)
 

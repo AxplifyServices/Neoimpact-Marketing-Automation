@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 import pandas as pd
 import os
 import sqlite3
-
+import re
 # =========================================================
 # Source unique de vérité pour la base de données
 # =========================================================
@@ -197,4 +197,68 @@ def update_cell(table: str, rowid: int, col: str, value: Any) -> None:
     with get_connection() as conn:
         conn.execute(f"UPDATE {t} SET {c} = ? WHERE rowid = ?", (v, int(rowid)))
         conn.commit()
+
+
+import re
+
+import re
+import sqlite3
+from typing import Any, Dict, Tuple
+
+def insert_client_if_new(data: Dict[str, Any]) -> Tuple[bool, str]:
+    required_id = str(data.get("ID_Client") or "").strip()
+    if not required_id:
+        return False, "ID_Client obligatoire."
+
+    with get_connection() as conn:
+        cur = conn.cursor()
+
+        # 🔒 Lock d’écriture pour éviter les collisions
+        cur.execute("BEGIN IMMEDIATE")
+
+        # Unicité ID_Client
+        cur.execute("SELECT 1 FROM clients WHERE ID_Client = ? LIMIT 1", (required_id,))
+        if cur.fetchone():
+            conn.rollback()
+            return False, f"ID_Client '{required_id}' existe déjà."
+
+        # ✅ MAX numérique fiable sur RCxxxxxxxx
+        cur.execute(
+            """
+            SELECT MAX(CAST(SUBSTR(radical_compte, 3) AS INTEGER))
+            FROM clients
+            WHERE radical_compte GLOB 'RC[0-9]*'
+            """
+        )
+        max_num = cur.fetchone()[0]
+        next_num = int(max_num or 0) + 1
+
+        # 🔁 Retry en cas de collision UNIQUE
+        for _ in range(20):
+            radical = f"RC{next_num:08d}"
+            data["radical_compte"] = radical
+
+            cols = list(data.keys())
+            placeholders = ", ".join(["?"] * len(cols))
+
+            try:
+                cur.execute(
+                    f"INSERT INTO clients ({', '.join(cols)}) VALUES ({placeholders})",
+                    [data.get(c) for c in cols],
+                )
+                conn.commit()
+                return True, f"Client créé: {radical}"
+
+            except sqlite3.IntegrityError as e:
+                msg = str(e).lower()
+                if "unique constraint failed" in msg and "clients.radical_compte" in msg:
+                    next_num += 1
+                    continue  # on retente
+                conn.rollback()
+                return False, f"Erreur insertion: {e}"
+
+        conn.rollback()
+        return False, "Impossible de générer un radical_compte unique."
+
+
 

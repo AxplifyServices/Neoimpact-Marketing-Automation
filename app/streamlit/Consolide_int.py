@@ -19,6 +19,7 @@ from app.streamlit.Modeles_int import main as modeles_main
 
 # ✅ Nouvelle meta-interface
 from app.streamlit.Contact_Client_int import main as contact_client_main
+from app.streamlit.Formulaire_nouveau_client_int import main as new_client_main
 
 
 def creation_view():
@@ -138,6 +139,7 @@ section[data-testid="stSidebar"] div.stButton > button:focus-visible {
         ("Campagnes", "📣 Campagnes"),
         ("Création", "🧩 Création"),
         ("Contact Client", "☎️ Contact Client"),  # ✅ ajouté
+        ("Nouveau Client", "🆕 Nouveau client"),
         ("Data", "🗃️ Data"),  # ✅ Historique -> Data
         ("Dashboard", "📊 Dashboard"),
     ]
@@ -183,6 +185,9 @@ section[data-testid="stSidebar"] div.stButton > button:focus-visible {
 
     elif page == "Dashboard":
         dashboard_main()
+    
+    elif page == "Nouveau Client":        # ✅ NEW
+        new_client_main()
 
 
 if __name__ == "__main__":

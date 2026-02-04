@@ -11,6 +11,7 @@ from app.api.routers.cibles import router as cibles_router
 from app.api.routers.queues import router as queues_router
 from app.api.routers.data_admin import router as data_admin_router
 from app.api.routers.dashboard import router as dashboard_router
+from app.api.routers.clients import router as clients_router
 
 app = FastAPI(
     title="Marketing Automation API",
@@ -54,3 +55,5 @@ app.include_router(cibles_router, prefix=API_PREFIX, tags=["Cibles"])
 app.include_router(queues_router, prefix=API_PREFIX, tags=["Queues"])
 app.include_router(data_admin_router, prefix=API_PREFIX, tags=["Data"])
 app.include_router(dashboard_router, prefix=API_PREFIX, tags=["Dashboard"])
+app.include_router(clients_router, prefix=API_PREFIX, tags=["Clients"])
+

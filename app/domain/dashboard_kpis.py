@@ -81,6 +81,7 @@ class DashboardFilters:
     etats_campagne: Optional[List[str]] = None  # "Terminée", "En cours", "En pause"
     date_min: Optional[date] = None
     date_max: Optional[date] = None
+    gestionnaires: Optional[List[str]] = None  # ✅ NEW
 
 
 # =========================================================
@@ -147,12 +148,6 @@ def get_dynamic_filter_options(
 # Data access
 # =========================================================
 def load_clients_campagnes_df(filters: DashboardFilters) -> pd.DataFrame:
-    """
-    - Exclut Annulée
-    - Restrict Etat_campagne à Terminée/En cours/En pause
-    - Filtre campagne_ids / etats_campagne si fournis
-    - Date_min/max filtrent sur Date_last_action
-    """
     where = ["COALESCE(Etat_campagne,'') <> 'Annulée'"]
     params: List[object] = []
 
@@ -163,13 +158,24 @@ def load_clients_campagnes_df(filters: DashboardFilters) -> pd.DataFrame:
         where.append(f"ID_CAMPAGNE IN ({placeholders})")
         params.extend([_clean_campagne_id(x) for x in filters.campagne_ids])
 
-
     if filters.etats_campagne:
         placeholders = ",".join(["?"] * len(filters.etats_campagne))
         where.append(f"Etat_campagne IN ({placeholders})")
         params.extend([str(x).strip() for x in filters.etats_campagne])
 
-    sql = f"SELECT * FROM {CLIENTS_TABLE}"
+    # ✅ NEW: filtre gestionnaires doit être ajouté AVANT de construire le WHERE SQL
+    if filters.gestionnaires:
+        placeholders = ",".join(["?"] * len(filters.gestionnaires))
+        where.append(f"COALESCE(cl.Gestionnaire,'') IN ({placeholders})")
+        params.extend([str(x).strip() for x in filters.gestionnaires])
+
+    # ✅ SELECT explicite pour garantir la colonne Gestionnaire
+    sql = f"""
+    SELECT cc.*, cl.Gestionnaire AS Gestionnaire
+    FROM {CLIENTS_TABLE} cc
+    LEFT JOIN {CLIENTS_DIM_TABLE} cl ON cl.radical_compte = cc.Radical_compte
+    """
+
     if where:
         sql += " WHERE " + " AND ".join(where)
 
@@ -182,7 +188,7 @@ def load_clients_campagnes_df(filters: DashboardFilters) -> pd.DataFrame:
     if df.empty:
         return df
 
-    # normalisations
+    # --- le reste inchangé ---
     df["_action_norm"] = df.get("Action", "").apply(_normalize_action)
     df["_is_closed"] = df["_action_norm"].eq("closed")
 
@@ -193,10 +199,8 @@ def load_clients_campagnes_df(filters: DashboardFilters) -> pd.DataFrame:
     df["_has_last_action"] = df.get("Date_last_action", "").astype(str).str.strip().ne("")
     df["_date_last_action"] = _to_date_series(df.get("Date_last_action", pd.Series([None] * len(df))))
 
-    # Règle: ID_Action == 1 => aucun traitement (même si date existe)
     df["_is_treated"] = df["_has_last_action"] & df["ID_Action"].ne("1")
 
-    # dates filter
     if filters.date_min is not None:
         df = df[df["_date_last_action"].notna() & (df["_date_last_action"] >= filters.date_min)]
     if filters.date_max is not None:
@@ -209,6 +213,7 @@ def load_clients_campagnes_df(filters: DashboardFilters) -> pd.DataFrame:
 
     return df
 
+##################################################################################################
 
 def load_clients_dim_regions() -> pd.DataFrame:
     """

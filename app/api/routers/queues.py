@@ -14,6 +14,8 @@ from app.engine.crc_engine import (
     call_current_client,
     get_arrive_eche_flag,  # ✅ NEW: expose flag échéance
     get_ordered_rows_from_queue,
+    list_gestionnaires_in_queue,
+    get_queue_counts_by_gestionnaire,
 )
 from app.domain.canaux import resultats_for_canal
 from app.domain.ui_facades.crc_ui_facade import get_crc_context_from_db
@@ -118,12 +120,17 @@ def call_current(id_campagne: Optional[str] = Query(default=None)):
     return call_current_client(row)
 
 @router.get("/queues/{queue}/ordered")
-def queue_ordered(queue: str, id_campagne: Optional[str] = Query(default=None)):
-    """
-    Retourne toutes les entrées de la file triées.
-    queue doit être 'crc', 'cc' ou 'da'.
-    id_campagne filtre éventuellement la queue sur une campagne donnée.
-    """
+def queue_ordered(
+    queue: str,
+    id_campagne: Optional[str] = Query(default=None),
+    gestionnaire: Optional[str] = Query(default=None),  # ✅ NEW
+):
     table = _get_table(queue)
-    rows = get_ordered_rows_from_queue(table, id_campagne_filter=id_campagne)
+    rows = get_ordered_rows_from_queue(
+        table,
+        id_campagne_filter=id_campagne,
+        gestionnaire_filter=gestionnaire,  # ✅ NEW
+    )
     return rows
+
+
