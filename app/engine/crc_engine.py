@@ -79,10 +79,15 @@ def list_campaigns_in_crc_queue() -> List[Tuple[str, str]]:
 # =========================================================
 # Queue helpers (utilisés par DA/CC)
 # =========================================================
-def get_next_row_from_queue(table: str, id_campagne_filter: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def get_next_row_from_queue(
+    table: str,
+    id_campagne_filter: Optional[str] = None,
+    gestionnaire_filter: Optional[str] = None,  # ✅ NEW
+) -> Optional[Dict[str, Any]]:
     """
-    Ancien comportement si id_campagne_filter est None.
-    Sinon: retourne la prochaine ligne de la queue pour cette campagne.
+    Ancien comportement si id_campagne_filter est None ET gestionnaire_filter est None.
+    Si id_campagne_filter est fourni => prochaine ligne de la campagne.
+    Si gestionnaire_filter est fourni => prochaine ligne du gestionnaire (optionnellement dans la campagne).
     """
     conn = _connect()
     conn.row_factory = sqlite3.Row
@@ -92,7 +97,31 @@ def get_next_row_from_queue(table: str, id_campagne_filter: Optional[str] = None
         conn.close()
         return None
 
-    if id_campagne_filter:
+    # ✅ 1) PRIORITÉ: filtre gestionnaire (et campagne optionnelle)
+    if gestionnaire_filter:
+        where = ["TRIM(COALESCE(cl.Gestionnaire,'')) = ?"]
+        params: List[Any] = [str(gestionnaire_filter).strip()]
+
+        if id_campagne_filter:
+            where.append("TRIM(q.ID_CAMPAGNE) = ?")
+            params.append(str(id_campagne_filter).strip())
+
+        where_sql = " AND ".join(where)
+
+        cur.execute(
+            f"""
+            SELECT q.*
+            FROM {table} q
+            LEFT JOIN clients cl ON cl.radical_compte = q.Radical_compte
+            WHERE {where_sql}
+            ORDER BY q.date_creation_campagne ASC, COALESCE(q.date_last_action, '9999-12-31') ASC
+            LIMIT 1
+            """,
+            params,
+        )
+
+    # ✅ 2) SINON: filtre campagne (comportement existant)
+    elif id_campagne_filter:
         cur.execute(
             f"""
             SELECT * FROM {table}
@@ -102,6 +131,8 @@ def get_next_row_from_queue(table: str, id_campagne_filter: Optional[str] = None
             """,
             (str(id_campagne_filter).strip(),),
         )
+
+    # ✅ 3) SINON: global (comportement existant)
     else:
         cur.execute(
             f"""
@@ -114,6 +145,7 @@ def get_next_row_from_queue(table: str, id_campagne_filter: Optional[str] = None
     row = cur.fetchone()
     conn.close()
     return dict(row) if row else None
+
 
 
 def delete_row_from_queue(table: str, id_campagne: str, radical_compte: str) -> None:
@@ -132,36 +164,6 @@ def delete_row_from_queue(table: str, id_campagne: str, radical_compte: str) -> 
 # =========================================================
 # ✅ NEW: navigation circulaire (Skip/Reculer) + flag échéance
 # =========================================================
-def get_ordered_rows_from_queue(table: str, id_campagne_filter: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Retourne la liste ordonnée des lignes d'une queue (utilisé par l'UI pour Skip/Reculer circulaire)."""
-    conn = _connect()
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-
-    if not _table_exists(cur, table):
-        conn.close()
-        return []
-
-    if id_campagne_filter:
-        cur.execute(
-            f"""
-            SELECT * FROM {table}
-            WHERE TRIM(ID_CAMPAGNE) = ?
-            ORDER BY date_creation_campagne ASC, COALESCE(date_last_action, '9999-12-31') ASC
-            """,
-            (str(id_campagne_filter).strip(),),
-        )
-    else:
-        cur.execute(
-            f"""
-            SELECT * FROM {table}
-            ORDER BY date_creation_campagne ASC, COALESCE(date_last_action, '9999-12-31') ASC
-            """
-        )
-
-    rows = [dict(r) for r in cur.fetchall()]
-    conn.close()
-    return rows
 
 
 def move_row_to_end_of_queue(table: str, id_campagne: str, radical_compte: str) -> None:
@@ -209,8 +211,8 @@ def get_arrive_eche_flag(id_campagne: str, radical_compte: str) -> bool:
 # =========================================================
 # CRC-specific wrappers (utilisés par CRC_int.py)
 # =========================================================
-def get_next_crc_input_row(id_campagne_filter: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    return get_next_row_from_queue(CRC_INPUT_TABLE, id_campagne_filter=id_campagne_filter)
+def get_next_crc_input_row(id_campagne_filter: Optional[str] = None, gestionnaire_filter: Optional[str] = None,) -> Optional[Dict[str, Any]]:
+    return get_next_row_from_queue(CRC_INPUT_TABLE, id_campagne_filter=id_campagne_filter, gestionnaire_filter=gestionnaire_filter,)
 
 
 def skip_current_row(id_campagne: str, radical_compte: str) -> None:

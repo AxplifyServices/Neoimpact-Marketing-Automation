@@ -47,13 +47,14 @@ def _get_table(queue: str) -> str:
 
 
 @router.get("/queues/{queue}/next")
-def queue_next(queue: str, id_campagne: Optional[str] = Query(default=None)):
+def queue_next(queue: str, id_campagne: Optional[str] = Query(default=None), gestionnaire: Optional[str] = Query(default=None),):
     table = _get_table(queue)
 
     if queue == "crc":
-        row = get_next_crc_input_row(id_campagne_filter=id_campagne)
+        row = get_next_crc_input_row(id_campagne_filter=id_campagne, gestionnaire_filter=gestionnaire,)
+        
     else:
-        row = get_next_row_from_queue(table, id_campagne_filter=id_campagne)
+        row = get_next_row_from_queue(table, id_campagne_filter=id_campagne, gestionnaire_filter=gestionnaire,)
 
     if not row:
         return {"row": None, "context": None, "resultats": [], "flags": {"arriv_eche": False}}
@@ -93,7 +94,7 @@ def queue_skip(queue: str, payload: QueueKeyIn):
 
 
 @router.post("/queues/{queue}/apply-result")
-def queue_apply_result(queue: str, payload: ApplyResultIn, id_campagne: Optional[str] = Query(default=None)):
+def queue_apply_result(queue: str, payload: ApplyResultIn, id_campagne: Optional[str] = Query(default=None), gestionnaire: Optional[str] = Query(default=None),):
     """
     id_campagne (query param) permet d'appliquer le résultat sur la prochaine ligne de la campagne filtrée,
     cohérent avec l'UI Streamlit.
@@ -101,23 +102,48 @@ def queue_apply_result(queue: str, payload: ApplyResultIn, id_campagne: Optional
     table = _get_table(queue)
 
     if queue == "crc":
-        row = get_next_crc_input_row(id_campagne_filter=id_campagne)
+        row = get_next_crc_input_row(id_campagne_filter=id_campagne,  gestionnaire_filter=gestionnaire,)
         if not row:
             return {"ok": False, "error": "Queue vide"}
         return apply_result_and_update_client_campagnes(row, payload.resultat)
 
-    row = get_next_row_from_queue(table, id_campagne_filter=id_campagne)
+    row = get_next_row_from_queue(table, id_campagne_filter=id_campagne,  gestionnaire_filter=gestionnaire,)
     if not row:
         return {"ok": False, "error": "Queue vide"}
     return apply_result_and_update_client_campagnes_from_queue(row, payload.resultat, table)
 
 
 @router.post("/queues/crc/call")
-def call_current(id_campagne: Optional[str] = Query(default=None)):
-    row = get_next_crc_input_row(id_campagne_filter=id_campagne)
+def call_current(id_campagne: Optional[str] = Query(default=None), gestionnaire: Optional[str] = Query(default=None),):
+    row = get_next_crc_input_row(id_campagne_filter=id_campagne, gestionnaire_filter=gestionnaire,)
     if not row:
         return {"ok": False, "error": "Queue CRC vide"}
     return call_current_client(row)
+
+@router.get("/queues/{queue}/counts-by-gestionnaire")
+def queue_counts_by_gestionnaire(
+    queue: str,
+    id_campagne: Optional[str] = Query(default=None),
+):
+    """
+    Retourne le nombre d'entrées dans la queue, groupées par gestionnaire.
+    queue: 'crc' | 'da' | 'cc'
+    id_campagne: filtre optionnel sur une campagne
+    """
+    table = _get_table(queue)
+    return get_queue_counts_by_gestionnaire(table, id_campagne_filter=id_campagne)
+
+@router.get("/queues/{queue}/gestionnaires")
+def queue_gestionnaires(
+    queue: str,
+    id_campagne: Optional[str] = Query(default=None),
+):
+    """
+    Liste des gestionnaires présents dans la queue (distinct).
+    """
+    table = _get_table(queue)
+    return {"gestionnaires": list_gestionnaires_in_queue(table, id_campagne_filter=id_campagne)}
+
 
 @router.get("/queues/{queue}/ordered")
 def queue_ordered(

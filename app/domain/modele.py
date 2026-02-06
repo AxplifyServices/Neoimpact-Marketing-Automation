@@ -17,8 +17,24 @@ MODALITES_BY_VARIABLE: Dict[str, List[str]] = {
     "Activation_du_compte": ["OUI"],
     "Activation_carte": ["OUI"],
     "Epargne": ["OUI"],
-    "Carte_Actuelle": ["Silver", "Gold", "Standard", "Black"],
+    "Carte_Actuelle": ["Silver", "Gold", "Standard", "Black", 'Code 30', 'Code 212'],
     "Assurance_Actuelle": ["Immobilier", "Vie"],
+
+    # --- Adoption / activation ---
+    "App_instaled": ["Oui"],
+    "Premiere_connex": ["Oui"],
+
+    # --- Produits & services ---
+    "Carte_virtuelle": ["Oui"],
+    "Dotation_touristique": ["Oui"],
+    "Dotation_ecom": ["Oui"],
+    "Epargne": ["Oui"],
+    "Compte_CIH_Mobile": ["Oui"],
+    "Compte_MAD_convertible": ["Oui"],
+
+    # --- Chéquier ---
+    "chequier_retire": ["Oui"],
+    "chequier_active": ["Oui"],
 }
 
 # Compat rétro : anciens noms “friendly” -> colonnes DB

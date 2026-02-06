@@ -57,6 +57,8 @@ NUM_FIELDS = [
     "encours_conso",
     "encours_immo",
     "montant_revenu",
+    "Nombre_transaction_inter",
+    "Volume_transaction_inter",
 ]
 
 CAT_FIELDS = [
@@ -77,6 +79,24 @@ CAT_FIELDS = [
     "Carte_Actuelle",
     "Assurance_Actuelle",
     "revenu_domicilie",
+    "App_instaled",
+    "Premiere_connex",
+    "carte_dispo_agence",
+    "carte_retiree",
+    "Carte_virtuelle",
+    "Etudiant",
+    "Dotation_touristique",
+    "Dotation_ecom",
+    "Compte_CIH_Mobile",
+    "Compte_MAD_convertible",
+    "MDM",
+    "Presence_maroc",
+    "BP",
+    "chequier_dispo_agence",
+    "chequier_retire",
+    "chequier_active",
+    "Nature_carte",
+    "Categorie",
 ]
 
 FIELD_LABELS = {
@@ -113,6 +133,24 @@ FIELD_LABELS = {
     "encours_immo": "Encours Immo",
     "revenu_domicilie": "Revenu domicilié",
     "montant_revenu": "Montant revenu",
+    "App_instaled": "App installée",
+    "Premiere_connex": "Première connexion",
+    "carte_dispo_agence": "Carte dispo agence",
+    "carte_retiree": "Carte retirée",
+    "Carte_virtuelle": "Carte virtuelle",
+    "Etudiant": "Étudiant",
+    "Dotation_touristique": "Dotation touristique",
+    "Dotation_ecom": "Dotation e-commerce",
+    "Compte_CIH_Mobile": "Compte CIH Mobile",
+    "Compte_MAD_convertible": "Compte MAD convertible",
+    "MDM": "MDM",
+    "Presence_maroc": "Présence Maroc",
+    "BP": "BP",
+    "chequier_dispo_agence": "Chéquier dispo agence",
+    "chequier_retire": "Chéquier retiré",
+    "chequier_active": "Chéquier actif",
+    "Nature_carte": "Nature de carte",
+    "Categorie": "Catégorie client",
 }
 
 LABEL_TO_FIELD = {v: k for k, v in FIELD_LABELS.items()}
@@ -152,6 +190,24 @@ FIELD_TO_DB = {
     "encours_immo": "encours_immo",
     "revenu_domicilie": "revenu_domicilie",
     "montant_revenu": "montant_revenu",
+    "App_instaled": "App_instaled",
+    "Premiere_connex": "Premiere_connex",
+    "carte_dispo_agence": "carte_dispo_agence",
+    "carte_retiree": "carte_retiree",
+    "Carte_virtuelle": "Carte_virtuelle",
+    "Etudiant": "Etudiant",
+    "Dotation_touristique": "Dotation_touristique",
+    "Dotation_ecom": "Dotation_ecom",
+    "Compte_CIH_Mobile": "Compte_CIH_Mobile",
+    "Compte_MAD_convertible": "Compte_MAD_convertible",
+    "MDM": "MDM",
+    "Presence_maroc": "Presence_maroc",
+    "BP": "BP",
+    "chequier_dispo_agence": "chequier_dispo_agence",
+    "chequier_retire": "chequier_retire",
+    "chequier_active": "chequier_active",
+    "Nature_carte": "Nature_carte",
+    "Categorie": "Categorie",
 }
 
 # =========================================================

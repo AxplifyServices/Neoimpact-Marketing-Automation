@@ -18,13 +18,25 @@ http://51.75.252.139:8000/docs
 
 
 
-
-
-
-
-
 Pour Git :
 
 git add .
 git commit -m "message clair"
 git push origin main
+
+
+Pour Docker :
+
+cd ~/apps/Marketing_automation_V3
+
+docker stop marketing_app
+docker rm marketing_app
+docker build -t marketing_app:latest .
+docker run -d \
+  --name marketing_app \
+  --restart unless-stopped \
+  -p 8000:8000 \
+  -p 8501:8501 \
+  -e MA_DB_PATH=/app/database.db \
+  -v "$PWD/database.db:/app/database.db" \
+  marketing_app:latest
