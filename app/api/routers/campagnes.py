@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Optional, Dict, Any
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from app.storage.campagnes_store_sqlite import list_all_campagnes
@@ -97,12 +97,25 @@ def _enrich_campaign_with_kpis(c: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @router.get("/campagnes")
-def list_campagnes(etat: Optional[str] = "affichables"):
+def list_campagnes(
+    etat: Optional[str] = "affichables",
+    limit: int = Query(default=500, ge=1, le=5000),   # taille page
+    offset: int = Query(default=0, ge=0),             # page_start
+    pages: int = Query(default=1, ge=1, le=50),       # nb pages à charger
+):
     """
     - etat=affichables : campagnes UI + ajoute Annulées/Terminées
     - sinon : renvoie toutes les campagnes
     - toujours enrichi avec KPI dashboard filtrés par campagne
+
+    Pagination:
+      - limit = nb éléments par page
+      - offset = page_start (0,1,2,...)
+      - pages = nb pages consécutives
+      - total max renvoyé = limit * pages
     """
+
+    # ---------- 1) Construire la liste complète (comportement actuel) ----------
     if etat == "affichables":
         base = get_campagnes_affichables_for_ui() or []
         base_by_id = {
@@ -119,10 +132,32 @@ def list_campagnes(etat: Optional[str] = "affichables"):
                 if cid and cid not in base_by_id:
                     base_by_id[cid] = c
 
-        return [_enrich_campaign_with_kpis(c) for c in base_by_id.values()]
+        all_items = [_enrich_campaign_with_kpis(c) for c in base_by_id.values()]
+    else:
+        all_c = list_all_campagnes() or []
+        all_items = [_enrich_campaign_with_kpis(c) for c in all_c]
 
-    all_c = list_all_campagnes() or []
-    return [_enrich_campaign_with_kpis(c) for c in all_c]
+    # ---------- 2) Pagination "pages" ----------
+    page_start = int(offset or 0)
+    per_page = int(limit or 500)
+    nb_pages = int(pages or 1)
+
+    start = page_start * per_page
+    end = start + (per_page * nb_pages)
+
+    page_items = all_items[start:end]
+
+    return {
+        "etat": etat,
+        "items": page_items,
+        "count": int(len(page_items)),
+        "total": int(len(all_items)),
+        "limit": per_page,
+        "pages": nb_pages,
+        "page_start": page_start,
+        "next_page_start": page_start + nb_pages if end < len(all_items) else None,
+    }
+
 
 
 @router.post("/campagnes")

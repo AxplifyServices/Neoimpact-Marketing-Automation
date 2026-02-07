@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from app.domain.canaux import (
@@ -45,15 +45,25 @@ class ModeleSaveIn(BaseModel):
 # CRUD Modeles (aligné avec Streamlit via facades)
 # =========================================================
 @router.get("/modeles")
-def list_modeles():
+def list_modeles(
+    limit: int = Query(default=200, ge=1, le=5000),  # taille page
+    offset: int = Query(default=0, ge=0),            # page_start
+    pages: int = Query(default=1, ge=1, le=50),      # nb pages à charger
+):
     """
     Retourne la liste des modèles + champ `locked` (True/False)
-    pour permettre à l'UI d'afficher directement l'état verrouillé.
-    """
-    modeles = list_modeles_for_ui()
-    locked_ids = set(get_locked_modele_ids_for_ui())
+    + pagination "pages" pour éviter de surcharger l'UI.
 
-    # On enrichit sans casser la structure existante
+    Pagination:
+      - limit = nb éléments par page
+      - offset = page_start (0,1,2,...)
+      - pages = nb pages consécutives
+      - total max renvoyé = limit * pages
+    """
+    modeles = list_modeles_for_ui() or []
+    locked_ids = set(get_locked_modele_ids_for_ui() or [])
+
+    # enrichissement locked (inchangé)
     for m in modeles:
         if isinstance(m, dict):
             mid = m.get("id_modele") or m.get("id") or m.get("ID")
@@ -65,7 +75,26 @@ def list_modeles():
             except Exception:
                 pass
 
-    return modeles
+    # pagination "pages"
+    page_start = int(offset or 0)
+    per_page = int(limit or 200)
+    nb_pages = int(pages or 1)
+
+    start = page_start * per_page
+    end = start + (per_page * nb_pages)
+
+    items = modeles[start:end]
+
+    return {
+        "items": items,
+        "count": int(len(items)),
+        "total": int(len(modeles)),
+        "limit": per_page,
+        "pages": nb_pages,
+        "page_start": page_start,
+        "next_page_start": page_start + nb_pages if end < len(modeles) else None,
+    }
+
 
 
 @router.get("/modeles/{id_modele}")

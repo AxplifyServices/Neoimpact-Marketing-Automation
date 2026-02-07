@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, List
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query
 from pydantic import BaseModel
 
 from app.domain.ui_facades.cibles_ui_facade import (
@@ -105,11 +105,19 @@ class CibleUpdateIn(BaseModel):
 # Routes
 # =========================================================
 @router.get("/cibles")
-def list_cibles():
+def list_cibles(
+    limit: int = Query(default=200, ge=1, le=5000),  # taille page
+    offset: int = Query(default=0, ge=0),            # page_start
+    pages: Optional[int] = Query(default=None, ge=1, le=50),  # opt-in pagination
+):
     """
     Ajoute locked + lock_reason pour l'UI.
+
+    Pagination (opt-in):
+      - si `pages` est fourni => renvoie un objet {items,total,...}
+      - sinon => renvoie la LISTE comme avant (compat front)
     """
-    cibles = list_cibles_for_ui()
+    cibles = list_cibles_for_ui() or []
 
     locked_ids, reasons = get_locked_cibles_for_ui()
     locked_ids = set(locked_ids or [])
@@ -130,7 +138,30 @@ def list_cibles():
             except Exception:
                 pass
 
-    return cibles
+    # --- compat: si pages n'est pas fourni, on renvoie EXACTEMENT comme avant ---
+    if pages is None:
+        return cibles
+
+    # --- pagination "pages" ---
+    page_start = int(offset or 0)
+    per_page = int(limit or 200)
+    nb_pages = int(pages or 1)
+
+    start = page_start * per_page
+    end = start + (per_page * nb_pages)
+
+    items = cibles[start:end]
+
+    return {
+        "items": items,
+        "count": int(len(items)),
+        "total": int(len(cibles)),
+        "limit": per_page,
+        "pages": nb_pages,
+        "page_start": page_start,
+        "next_page_start": page_start + nb_pages if end < len(cibles) else None,
+    }
+
 
 
 @router.get("/cibles/{id_cible}")
