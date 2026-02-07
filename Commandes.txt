@@ -15,7 +15,6 @@ http://51.75.252.139:8501/
 http://51.75.252.139:8000/docs
 
 
-
 Pour Git :
 
 git add .
@@ -32,7 +31,7 @@ scp app.zip ubuntu@51.75.252.139:~/apps/Marketing_automation_V3/
 cd ~/apps/Marketing_automation_V3
 rm -rf app
 unzip app.zip
-
+rm -rf app.zip
 
 Pour Docker :
 
