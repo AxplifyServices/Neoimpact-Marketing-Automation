@@ -77,14 +77,34 @@ def get_locked_cibles_for_ui() -> Tuple[set[str], Dict[str, str]]:
 # =========================================================
 def list_cibles_for_ui() -> List[Dict[str, Any]]:
     ensure_cibles_table()
-    return list_cibles() or []
+    items = list_cibles() or []
+    for r in items:
+        if isinstance(r, dict) and _safe_str(r.get("source")) == "DB":
+            r["filtre"] = _safe_json_load(r.get("filtre") or "{}", {})
+        elif isinstance(r, dict):
+            r["filtre"] = {}
+    return items
+
 
 
 def get_cible_for_ui(id_cible: str) -> Dict[str, Any] | None:
     if not id_cible:
         return None
     ensure_cibles_table()
-    return get_cible(id_cible)
+    row = get_cible(id_cible)
+    if not isinstance(row, dict):
+        return row
+
+    # Toujours renvoyer filtre sous forme dict pour le front
+    source = _safe_str(row.get("source"))
+    if source == "DB":
+        row["filtre"] = get_cible_filtre_dict_for_ui(row)  # parse JSON str -> dict
+    else:
+        # fichier plat => filtre vide
+        row["filtre"] = {}
+
+    return row
+
 
 
 def get_cible_filtre_dict_for_ui(cible_row: Dict[str, Any]) -> Dict[str, Any]:
