@@ -49,6 +49,13 @@ def _safe_str(x: Any) -> str:
 # =========================================================
 # Verrouillage cibles (campagnes actives)
 # =========================================================
+
+from app.storage.cibles_store_sqlite import count_clients_for_cible
+
+def get_cible_volume_for_ui(id_cible: str) -> int:
+    return int(count_clients_for_cible(id_cible) or 0)
+
+
 def get_locked_cibles_for_ui() -> Tuple[set[str], Dict[str, str]]:
     """
     Reproduit la logique UI actuelle:
@@ -95,15 +102,20 @@ def get_cible_for_ui(id_cible: str) -> Dict[str, Any] | None:
     if not isinstance(row, dict):
         return row
 
-    # Toujours renvoyer filtre sous forme dict pour le front
-    source = _safe_str(row.get("source"))
-    if source == "DB":
-        row["filtre"] = get_cible_filtre_dict_for_ui(row)  # parse JSON str -> dict
+    # filtre parsé pour le front
+    if _safe_str(row.get("source")) == "DB":
+        row["filtre"] = get_cible_filtre_dict_for_ui(row)
     else:
-        # fichier plat => filtre vide
         row["filtre"] = {}
 
+    # ✅ volume
+    try:
+        row["volume"] = get_cible_volume_for_ui(id_cible)
+    except Exception:
+        row["volume"] = 0
+
     return row
+
 
 
 

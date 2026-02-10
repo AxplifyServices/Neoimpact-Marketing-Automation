@@ -51,6 +51,64 @@ def ensure_cibles_table() -> None:
     conn.commit()
     conn.close()
 
+def count_clients_for_cible(id_cible: str) -> int:
+    cible = get_cible(id_cible)
+    if not cible:
+        return 0
+
+    source = (cible.get("source") or "").strip()
+
+    # --- DB: COUNT via SQL ---
+    if source == "DB":
+        filtre = {}
+        try:
+            filtre_str = cible.get("filtre") or "{}"
+            filtre = json.loads(filtre_str) if isinstance(filtre_str, str) else (filtre_str or {})
+        except Exception:
+            filtre = {}
+
+        conn = _connect()
+        table = _detect_clients_table(conn)
+
+        where = []
+        params = []
+        for field, payload in (filtre or {}).items():
+            if not isinstance(payload, dict):
+                continue
+
+            if "values" in payload:
+                vals = payload.get("values") or []
+                vals = [str(v) for v in vals if str(v).strip() != ""]
+                if vals:
+                    where.append(f"{field} IN ({', '.join(['?'] * len(vals))})")
+                    params.extend(vals)
+            else:
+                if payload.get("min") is not None:
+                    where.append(f"{field} >= ?")
+                    params.append(payload["min"])
+                if payload.get("max") is not None:
+                    where.append(f"{field} <= ?")
+                    params.append(payload["max"])
+
+        sql = f"SELECT COUNT(*) as n FROM {table}"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+
+        try:
+            r = conn.execute(sql, params).fetchone()
+            return int(r[0] if r else 0)
+        finally:
+            conn.close()
+
+    # --- Fichier plat: fallback simple ---
+    if source == "Fichier plat":
+        path = (cible.get("chemin") or "").strip()
+        if not path:
+            return 0
+        df = _read_flat_file(path)
+        return int(len(df))
+
+    return 0
 
 # =========================================================
 # IDS
