@@ -157,6 +157,46 @@ def get_client_condition_fields_for_ui() -> List[Dict[str, str]]:
     # tri stable: d'abord non-numériques, puis numériques, par nom
     out.sort(key=lambda d: (d.get("is_numeric") != "0", d.get("col", "").lower()))
     return out
+
+def get_clients_campagnes_condition_fields_for_ui() -> List[Dict[str, str]]:
+    """
+    Champs utilisables dans les conditions basées sur la table clients_campagnes.
+    Format identique à get_client_condition_fields_for_ui():
+      [{"col": "...", "type": "...", "is_numeric": "1"}, ...]
+    """
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute("PRAGMA table_info(clients_campagnes)").fetchall()
+        cols_types: Dict[str, str] = {}
+        for r in rows:
+            cols_types[str(r["name"])] = str(r["type"] or "")
+
+        wanted = [
+            "nb_jour_debut_campagne",
+            "NB_jour_last_action",
+            "Resultat_last_action",
+        ]
+
+        out: List[Dict[str, str]] = []
+        for col in wanted:
+            if col not in cols_types:
+                continue
+            t = cols_types[col]
+            out.append(
+                {
+                    "col": col,
+                    "type": t,
+                    "is_numeric": "1" if _is_numeric_sqltype(t or "") else "0",
+                }
+            )
+
+        # (optionnel) tri stable
+        out.sort(key=lambda d: (d.get("is_numeric") != "0", d.get("col", "").lower()))
+        return out
+    finally:
+        conn.close()
+
 def is_categorical_positive_objectif_for_ui(variable_cible: str) -> bool:
     """
     True si variable_cible correspond à une variable catégorielle autorisée (positives only)
@@ -196,6 +236,22 @@ def build_numeric_objectif_json_for_ui(min_txt: str, max_txt: str) -> str:
     if mx is not None:
         payload["max"] = mx
 
+    return json.dumps(payload, ensure_ascii=False)
+
+def build_multi_objectif_json_for_ui(op: str, items: List[Dict[str, Any]]) -> str:
+    """
+    Construit un objectif multi au format JSON string:
+      {"op":"AND|OR","items":[...]}
+    La validation métier finale est faite par Modele.new() (modele.py).
+    """
+    op2 = _safe_str(op).upper()
+    if op2 not in ("AND", "OR"):
+        raise ValueError("op doit être AND ou OR")
+
+    if not isinstance(items, list) or len(items) == 0:
+        raise ValueError("items doit être une liste non vide")
+
+    payload = {"op": op2, "items": items}
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -273,6 +329,14 @@ def save_modele_for_ui(
     Centralise INSERT/UPDATE hors UI, en conservant exactement tes champs et ton store.
     """
     ensure_modeles_table()
+
+    # ✅ Valider l'objectif via Modele.new (sans insérer)
+    _ = Modele.new(
+        nom_modele=nom_modele,
+        variable_cible=variable_cible,
+        objectif=objectif_value_for_store,
+        liste_action=blocks,
+    )
 
     if is_editing:
         mid = _safe_str(id_modele)

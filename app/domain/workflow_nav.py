@@ -5,6 +5,8 @@ import re
 import unicodedata
 from typing import Any, Dict, List, Optional
 
+import json
+
 
 def _norm_str(x: Any) -> str:
     if x is None:
@@ -90,6 +92,7 @@ def conds_ok(conds: List[Dict[str, Any]], row_cc: Dict[str, Any], resultat_label
     Mapping UI :
       - "Flag résultats" -> compare à resultat_label (= row_cc["Resultat_last_action"])
       - "NB jours depuis last action" -> row_cc["NB_jour_last_action"]
+      - ✅ "NB jours depuis début de la campagne" -> row_cc["nb_jour_debut_campagne"]
       - sinon -> row_cc[colonne]
     """
     for c in (conds or []):
@@ -101,10 +104,29 @@ def conds_ok(conds: List[Dict[str, Any]], row_cc: Dict[str, Any], resultat_label
             continue
 
         fcmp = _norm_cmp(field)
+
         if fcmp in (_norm_cmp("Flag résultats"), _norm_cmp("Resultat"), _norm_cmp("Resultat_last_action")):
             left = resultat_label
+
         elif fcmp in (_norm_cmp("NB jours depuis last action"), _norm_cmp("NB_jour_last_action")):
             left = row_cc.get("NB_jour_last_action")
+
+        # ✅ NEW : jours depuis début campagne
+        elif fcmp in (
+            _norm_cmp("NB jours depuis début de la campagne"),
+            _norm_cmp("NB jours depuis debut de la campagne"),
+            _norm_cmp("NB jours depuis debut campagne"),
+            _norm_cmp("NB_jour_debut_campagne"),
+            _norm_cmp("nb_jour_debut_campagne"),
+            _norm_cmp("Jours depuis début campagne"),
+            _norm_cmp("Jours depuis debut campagne"),
+        ):
+            # colonne en DB: nb_jour_debut_campagne (nouveau)
+            # on accepte aussi une éventuelle variante camel/ancienne si jamais
+            left = row_cc.get("nb_jour_debut_campagne")
+            if left is None:
+                left = row_cc.get("NB_jour_debut_campagne")
+
         else:
             left = row_cc.get(field)
 
@@ -112,6 +134,7 @@ def conds_ok(conds: List[Dict[str, Any]], row_cc: Dict[str, Any], resultat_label
             return False
 
     return True
+
 
 
 def pick_next_child(liste_action: List[Dict[str, Any]], current_bloc: Dict[str, Any], row_cc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -146,10 +169,112 @@ def pick_next_child(liste_action: List[Dict[str, Any]], current_bloc: Dict[str, 
 
 
 def objective_reached(statut_actuel: Any, objectif: Any) -> bool:
-    """Règle métier: Closed si statut_actuel == objectif (comparaison normalisée)."""
-    if not _norm_str(objectif):
+    """
+    Compat legacy:
+      - objective_reached("Oui", "Oui") -> True
+
+    NEW:
+      - objective_reached(row_cc_dict, objectif_json) -> évalue AND/OR sur plusieurs variables
+        objectif_json format:
+        {"op":"AND|OR","items":[
+            {"variable":"Epargne","type":"cat","value":"Oui"},
+            {"variable":"NB_appel","type":"num","min":2,"max":5}
+        ]}
+    """
+    obj = _norm_str(objectif).strip()
+    if not obj:
         return False
-    return _norm_cmp(statut_actuel) == _norm_cmp(objectif)
+
+    # =========================
+    # ✅ Si on reçoit row_cc (dict)
+    # =========================
+    if isinstance(statut_actuel, dict):
+        row_cc = statut_actuel
+
+        # try parse JSON
+        expr = None
+        if obj.startswith("{") or obj.startswith("["):
+            try:
+                expr = json.loads(obj)
+            except Exception:
+                expr = None
+
+        # multi-objectifs
+        if isinstance(expr, dict) and "op" in expr and "items" in expr:
+            op = _norm_str(expr.get("op")).upper()
+            items = expr.get("items")
+
+            if op not in ("AND", "OR") or not isinstance(items, list) or len(items) == 0:
+                return False
+
+            results: List[bool] = []
+
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+
+                var = _norm_str(it.get("variable"))
+                typ = _norm_str(it.get("type")).lower()
+
+                if not var:
+                    continue
+
+                # lecture valeur : d'abord row_cc[var], sinon row_cc["client."+var]
+                val = row_cc.get(var)
+                if val is None:
+                    val = row_cc.get(f"client.{var}")
+
+                # cat
+                if typ == "cat":
+                    target = _norm_str(it.get("value"))
+                    if not target:
+                        results.append(False)
+                        continue
+                    results.append(_norm_cmp(val) == _norm_cmp(target))
+                    continue
+
+                # num
+                if typ == "num":
+                    mn = it.get("min", None)
+                    mx = it.get("max", None)
+
+                    try:
+                        v = float(str(val).replace(",", "."))
+                    except Exception:
+                        results.append(False)
+                        continue
+
+                    ok = True
+                    if mn is not None and str(mn).strip() != "":
+                        try:
+                            ok = ok and (v >= float(mn))
+                        except Exception:
+                            ok = False
+                    if mx is not None and str(mx).strip() != "":
+                        try:
+                            ok = ok and (v <= float(mx))
+                        except Exception:
+                            ok = False
+
+                    results.append(bool(ok))
+                    continue
+
+                # type inconnu
+                results.append(False)
+
+            if not results:
+                return False
+
+            return all(results) if op == "AND" else any(results)
+
+        # fallback legacy sur row_cc["statut_actuel"]
+        return _norm_cmp(row_cc.get("statut_actuel")) == _norm_cmp(obj)
+
+    # =========================
+    # ✅ Legacy (inchangé)
+    # =========================
+    return _norm_cmp(statut_actuel) == _norm_cmp(obj)
+
 
 def arrive_echeance(
     liste_action: List[Dict[str, Any]],

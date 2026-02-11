@@ -100,8 +100,102 @@ def _remove_rupture_relation_strict(df: pd.DataFrame) -> Tuple[pd.DataFrame, int
 def _filter_objectif_deja_atteint(df: pd.DataFrame, variable_cible: str, objectif: str) -> Tuple[pd.DataFrame, int]:
     """
     A la création de campagne, ne pas rajouter les lignes qui ont déjà atteint l'objectif.
-    Règle: on exclut les lignes où df[variable_cible] == objectif (normalisé).
+
+    Compat:
+    - objectif "simple" (legacy): exclure df[variable_cible] == objectif (normalisé)
+    - objectif "multi" JSON: {"op":"AND|OR","items":[{...},...]} => exclure si l'expression est déjà vraie
     """
+    obj_raw = _norm_str(objectif).strip()
+    if not obj_raw:
+        return df, 0
+
+    # --- helper: try parse JSON objectif
+    expr = None
+    if obj_raw.startswith("{") or obj_raw.startswith("["):
+        try:
+            expr = json.loads(obj_raw)
+        except Exception:
+            expr = None
+
+    # =========================
+    # ✅ Multi-objectif JSON
+    # =========================
+    if isinstance(expr, dict) and "op" in expr and "items" in expr:
+        op = _norm_str(expr.get("op")).upper()
+        items = expr.get("items")
+
+        if op not in ("AND", "OR") or not isinstance(items, list) or len(items) == 0:
+            return df, 0
+
+        masks: List[pd.Series] = []
+
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+
+            var = _norm_str(it.get("variable"))
+            typ = _norm_str(it.get("type")).lower()
+
+            if not var or var not in df.columns:
+                # si variable absente => item non évaluable => AND => bloque, OR => ignore
+                if op == "AND":
+                    masks.append(pd.Series([False] * len(df), index=df.index))
+                continue
+
+            # item catégoriel
+            if typ == "cat":
+                val = _norm_str(it.get("value"))
+                if not val:
+                    if op == "AND":
+                        masks.append(pd.Series([False] * len(df), index=df.index))
+                    continue
+                s = df[var].apply(_norm_cmp)
+                masks.append(s.eq(_norm_cmp(val)))
+                continue
+
+            # item numérique
+            if typ == "num":
+                mn = it.get("min", None)
+                mx = it.get("max", None)
+                s_num = pd.to_numeric(df[var], errors="coerce")
+
+                m = pd.Series([True] * len(df), index=df.index)
+                if mn is not None and str(mn).strip() != "":
+                    try:
+                        m = m & (s_num >= float(mn))
+                    except Exception:
+                        m = m & False
+                if mx is not None and str(mx).strip() != "":
+                    try:
+                        m = m & (s_num <= float(mx))
+                    except Exception:
+                        m = m & False
+
+                masks.append(m.fillna(False))
+                continue
+
+            # type inconnu
+            if op == "AND":
+                masks.append(pd.Series([False] * len(df), index=df.index))
+
+        if not masks:
+            return df, 0
+
+        if op == "AND":
+            final_mask = masks[0]
+            for m in masks[1:]:
+                final_mask = final_mask & m
+        else:  # OR
+            final_mask = masks[0]
+            for m in masks[1:]:
+                final_mask = final_mask | m
+
+        removed = int(final_mask.sum())
+        return df.loc[~final_mask].copy(), removed
+
+    # =========================
+    # ✅ Legacy (objectif simple)
+    # =========================
     var = _norm_str(variable_cible)
     obj = _norm_str(objectif)
     if not var or not obj:
@@ -113,6 +207,7 @@ def _filter_objectif_deja_atteint(df: pd.DataFrame, variable_cible: str, objecti
     mask = s.eq(_norm_cmp(obj))
     removed = int(mask.sum())
     return df.loc[~mask].copy(), removed
+
 
 
 def _safe_json_loads(s: str, default):
@@ -296,6 +391,8 @@ def create_campagne(
             "NB_sms": 0,
             "NB_message": 0,
             "NB_approche_commercial": 0,
+            "date_debut_campagne": _norm_str(date_debut)[:10],  # début "logique" de la campagne
+            "nb_jour_debut_campagne": 0,
         }
 
         # arriv_eche : Oui/Non selon les conditions de type NB_jour_last_action dans les fils

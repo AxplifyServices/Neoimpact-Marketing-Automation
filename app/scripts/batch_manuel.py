@@ -77,6 +77,38 @@ def _clients_columns(conn: sqlite3.Connection) -> List[str]:
     cur.execute(f"PRAGMA table_info({CLIENTS_TABLE})")
     return [r[1] for r in cur.fetchall()]
 
+def _cc_columns(conn: sqlite3.Connection) -> List[str]:
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({CLIENTS_CAMPAGNES_TABLE})")
+    return [r[1] for r in cur.fetchall()]
+
+def _cc_has_col(conn: sqlite3.Connection, col: str) -> bool:
+    return col in set(_cc_columns(conn))
+
+def _recompute_nb_jour_debut_campagne(conn: sqlite3.Connection) -> int:
+    """
+    Met à jour nb_jour_debut_campagne = today - date_debut_campagne (en jours).
+    - Ne casse pas si colonnes absentes.
+    - Pour les anciennes campagnes où date_debut_campagne est vide => on ne touche pas (on conserve la valeur existante).
+    """
+    if not _cc_has_col(conn, "date_debut_campagne") or not _cc_has_col(conn, "nb_jour_debut_campagne"):
+        return 0
+
+    today_iso = date.today().isoformat()
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        UPDATE {CLIENTS_CAMPAGNES_TABLE}
+        SET nb_jour_debut_campagne = CASE
+            WHEN COALESCE(date_debut_campagne,'') = '' THEN nb_jour_debut_campagne
+            ELSE CAST((julianday(?) - julianday(substr(date_debut_campagne,1,10))) AS INTEGER)
+        END
+        WHERE COALESCE(Etat_campagne,'') IN ('En cours','Planifiée','En pause')
+        """,
+        (today_iso,),
+    )
+    return int(cur.rowcount or 0)
+
 
 def _resolve_clients_col(conn: sqlite3.Connection, requested_col: str) -> Optional[str]:
     """
@@ -259,24 +291,36 @@ def _close_if_objective_reached(conn: sqlite3.Connection, id_campagne: str, obje
     cur = conn.cursor()
     cur.execute(
         f"""
-        SELECT rowid as __rid, statut_actuel, Action
+        SELECT rowid as __rid, *
         FROM {CLIENTS_CAMPAGNES_TABLE}
         WHERE ID_CAMPAGNE=?
-          AND COALESCE(Etat_campagne,'') IN ('En cours','Planifiée', 'En pause')
-          AND COALESCE(Action,'') <> 'Closed'
+        AND COALESCE(Etat_campagne,'') IN ('En cours','Planifiée', 'En pause')
+        AND COALESCE(Action,'') <> 'Closed'
         """,
         (id_campagne,),
     )
+
     rows = [dict(r) for r in cur.fetchall()]
     n = 0
+    _client_cache: Dict[str, Dict[str, Any]] = {}
+
     for r in rows:
         rid = int(r["__rid"])
-        if objective_reached(r.get("statut_actuel"), objectif):
+
+        # ✅ NEW: enrichir avec clients.*
+        rc = _norm_str(r.get("Radical_compte") or r.get("radical_compte"))
+        if rc:
+            if rc not in _client_cache:
+                _client_cache[rc] = _load_client_row_by_radical(conn, rc)
+            _inject_client_fields(r, _client_cache.get(rc, {}))
+
+        if objective_reached(r, objectif):
             cur.execute(
                 f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET Action='Closed', Canal='Closed' WHERE rowid=?",
                 (rid,),
             )
             n += int(cur.rowcount or 0)
+
     return n
 
 
@@ -688,6 +732,12 @@ def sync_new_clients_from_cible_insert_only(
             row["arriv_eche"] = "Non"
         if "statut_actuel" in cols_cc:
             row["statut_actuel"] = ""
+        # ✅ NEW: début campagne / nb jours depuis début
+        if "date_debut_campagne" in cols_cc:
+            row["date_debut_campagne"] = today_iso
+        if "nb_jour_debut_campagne" in cols_cc:
+            row["nb_jour_debut_campagne"] = 0
+
 
         # si tu as un champ timestamp générique
         if "updated_at" in cols_cc:
@@ -730,6 +780,7 @@ def run_batch_manuel() -> Dict[str, Any]:
         "rupture_canceled": 0,
         "campagnes_status": {"to_en_cours": 0, "to_terminee": 0},
         "nb_jour_last_action_updated": 0,
+        "nb_jour_debut_campagne_updated": 0, 
         "arriv_eche_updated": 0,
         "en_attente_advanced": 0,
         "closed_objectif": 0,
@@ -766,7 +817,12 @@ def run_batch_manuel() -> Dict[str, Any]:
 
         # 4) recompute NB_jour_last_action
         out["nb_jour_last_action_updated"] = _recompute_nb_jour_last_action(conn)
+
+        # ✅ NEW: recompute nb_jour_debut_campagne (jours depuis début campagne)
+        out["nb_jour_debut_campagne_updated"] = _recompute_nb_jour_debut_campagne(conn)
+
         conn.commit()
+
 
         # 5) advance En attente
         for c in actives:

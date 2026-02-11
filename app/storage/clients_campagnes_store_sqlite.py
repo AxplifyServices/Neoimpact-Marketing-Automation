@@ -44,19 +44,34 @@ def ensure_table() -> None:
             NB_sms                  INTEGER,
             NB_message              INTEGER,
             NB_approche_commercial  INTEGER,
-            arriv_eche             TEXT DEFAULT 'Non'
+            arriv_eche              TEXT DEFAULT 'Non',
+
+            -- ✅ NEW (ne casse pas l'existant)
+            date_debut_campagne     TEXT,
+            nb_jour_debut_campagne  INTEGER
         )
         """
     )
-
-    
 
     # Migration douce : ajoute arriv_eche si la table existait déjà sans la colonne
     try:
         cur.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN arriv_eche TEXT DEFAULT 'Non'")
     except Exception:
         pass
-# indexes non bloquants
+
+    # ✅ Migration douce : ajoute date_debut_campagne si absent
+    try:
+        cur.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN date_debut_campagne TEXT")
+    except Exception:
+        pass
+
+    # ✅ Migration douce : ajoute nb_jour_debut_campagne si absent
+    try:
+        cur.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN nb_jour_debut_campagne INTEGER")
+    except Exception:
+        pass
+
+    # indexes non bloquants
     try:
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_cc_idcamp ON {TABLE_NAME}(ID_CAMPAGNE)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_cc_radical ON {TABLE_NAME}(Radical_compte)")
@@ -98,6 +113,10 @@ def bulk_insert_clients(rows: List[Dict[str, Any]]) -> int:
         "NB_message",
         "NB_approche_commercial",
         "arriv_eche",
+
+        # ✅ NEW
+        "date_debut_campagne",
+        "nb_jour_debut_campagne",
     ]
 
     sql = f"""
@@ -109,6 +128,17 @@ def bulk_insert_clients(rows: List[Dict[str, Any]]) -> int:
     for r in rows:
         if "arriv_eche" not in r or r.get("arriv_eche") is None:
             r["arriv_eche"] = "Non"
+
+        # ✅ NEW defaults (au moment de création campagne)
+        # - Pour anciennes campagnes: on ne fait rien (elles ne passent pas ici)
+        # - Pour nouvelles campagnes: on veut nb_jour_debut_campagne=0
+        if "nb_jour_debut_campagne" not in r or r.get("nb_jour_debut_campagne") is None:
+            r["nb_jour_debut_campagne"] = 0
+
+        # date_debut_campagne peut être ""/None si tu veux; mais idéalement campaign_service la mettra
+        if "date_debut_campagne" not in r:
+            r["date_debut_campagne"] = None
+
         values.append([r.get(c) for c in cols])
 
     conn = _connect()

@@ -204,6 +204,17 @@ def canaux_meta():
         "compteur_by_canal": {c: compteur_for_canal(c) for c in canaux},
     }
 
+@router.post("/meta/objectif/build-multi")
+def build_multi_objectif(payload: Dict[str, Any]):
+    op = payload.get("op", "")
+    items = payload.get("items", [])
+    return {"objectif_json": build_multi_objectif_json_for_ui(op, items)}
+
+
+@router.get("/meta/conditions/clients-campagnes-fields")
+def clients_campagnes_condition_fields():
+    return {"fields": get_clients_campagnes_condition_fields_for_ui()}
+
 
 # NOTE:
 # On SUPPRIME volontairement /meta/modalites ici.
