@@ -23,7 +23,7 @@ git push origin main
 
 
 Envoi Zip vers serveur : 
-
+docker ps$
 scp app.zip ubuntu@51.75.252.139:~/apps/Marketing_automation_V3/
 
 	Sur serveur :
@@ -48,5 +48,16 @@ docker run -d \
   -e MA_DB_PATH=/app/database.db \
   -v "$PWD/database.db:/app/database.db" \
   marketing_app:latest
+
+
+Exécution d'un script sur serveur avec contenair jetable :
+
+docker run --rm \
+  -e MA_DB_PATH=/app/database.db \
+  -v "$PWD/database.db:/app/database.db" \
+  marketing_app:latest \
+  python -c "from app.storage.clients_campagnes_store_sqlite import ensure_table; ensure_table(); print('✅ Migration clients_campagnes OK')"
+
+
 
 

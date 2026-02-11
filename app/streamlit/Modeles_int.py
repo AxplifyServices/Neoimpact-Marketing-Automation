@@ -13,20 +13,12 @@ if PROJECT_ROOT not in sys.path:
 
 from app.streamlit._modele_graph import build_dot_from_liste_action
 
-from app.domain.modele import (
-    modalites_for,
-    normalize_variable_cible,
-    objectif_label,
-)
-
+from app.domain.modele import modalites_for, objectif_label
 from app.domain.canaux import list_canaux, action_for_canal, resultats_for_canal, compteur_for_canal
 
 # ✅ Façade (plus de DB/store direct dans l'UI)
 from app.domain.ui_facades.modeles_ui_facade import (
     get_variable_choices_for_ui,
-    is_categorical_positive_objectif_for_ui,
-    build_numeric_objectif_json_for_ui,
-    numeric_objectif_prefill_for_ui,
     list_modeles_for_ui,
     get_locked_modele_ids_for_ui,
     delete_modele_for_ui,
@@ -34,14 +26,16 @@ from app.domain.ui_facades.modeles_ui_facade import (
     save_modele_for_ui,
     get_actions_from_row_for_ui,
     get_client_condition_fields_for_ui,
+    # ✅ NEW
+    get_clients_campagnes_condition_fields_for_ui,
+    build_multi_objectif_json_for_ui,
 )
 
 
 # =========================================================
-# Helpers UI (inchangés)
+# Helpers UI
 # =========================================================
 def _pick(d: dict, *keys, default=""):
-    """Récupère la première clé existante et non vide."""
     for k in keys:
         v = d.get(k, None)
         if v is None:
@@ -53,7 +47,7 @@ def _pick(d: dict, *keys, default=""):
 
 
 # =========================================================
-# Suppression cascade bloc + descendants (inchangé)
+# Suppression cascade bloc + descendants
 # =========================================================
 def _descendants_ids(blocks: List[Dict[str, Any]], root_id: int) -> List[int]:
     children_map: Dict[int, List[int]] = {}
@@ -87,7 +81,9 @@ def _parent_id_of(blocks: List[Dict[str, Any]], node_id: int) -> Optional[int]:
 
 
 # =========================================================
-# Conditions dépendantes du bloc mère (inchangé)
+# Conditions dépendantes du bloc mère (UPDATED)
+# - Ajoute uniquement "NB jours depuis début de la campagne"
+# - Retire Resultat_last_action / NB_jour_last_action (doublons)
 # =========================================================
 def render_condition_builder(
     bloc_mere: Dict[str, Any],
@@ -95,20 +91,12 @@ def render_condition_builder(
     initial_conds: Optional[List[Dict[str, Any]]] = None,
     show_existing: bool = True,
 ) -> List[Dict[str, Any]]:
-    """
-    Builder conditions:
-    - Ajout
-    - Suppression
-    - Modification inline (si show_existing=True)
-    - initial_conds sert uniquement à INITIALISER une fois (pas à chaque rerun)
-    """
     conds_key = f"{key_prefix}_conds"
     init_key = f"{key_prefix}_conds__init"
 
     if conds_key not in st.session_state:
         st.session_state[conds_key] = []
 
-    # ✅ IMPORTANT: ne pas réinitialiser à chaque rerun
     if initial_conds is not None and not st.session_state.get(init_key, False):
         st.session_state[conds_key] = list(initial_conds or [])
         st.session_state[init_key] = True
@@ -122,44 +110,63 @@ def render_condition_builder(
         compteur = "NB_message"
         flag_values = []
 
+    # Champs "système" historiques
     fields = ["Flag résultats", "NB jours depuis last action", compteur]
 
-    # ✅ Conditions basées sur la table clients (hors colonnes du screen)
+    # Champs clients.*
     client_meta = get_client_condition_fields_for_ui() or []
     client_labels: List[str] = [f"Client: {d.get('col')}" for d in client_meta if d.get("col")]
     client_label_to_meta = {f"Client: {d.get('col')}": d for d in client_meta if d.get("col")}
 
+    # Champs clients_campagnes (on ne garde QUE nb_jour_debut_campagne)
+    cc_meta = get_clients_campagnes_condition_fields_for_ui() or []
+    cc_labels: List[str] = []
+    cc_label_to_meta: Dict[str, Dict[str, str]] = {}
+    for d in cc_meta:
+        col = (d.get("col") or "").strip()
+        if col != "nb_jour_debut_campagne":
+            continue
+        lbl = "NB jours depuis début de la campagne"
+        cc_labels.append(lbl)
+        cc_label_to_meta[lbl] = d
+
     def _is_client_label(lbl: str) -> bool:
         return isinstance(lbl, str) and lbl.startswith("Client: ")
 
+    def _is_cc_label(lbl: str) -> bool:
+        return lbl in cc_label_to_meta
+
     def _label_from_stored(field_name: str) -> str:
-        """Map DB-stored field -> UI label"""
         f = str(field_name or "")
         if f.startswith("client."):
             return f"Client: {f.split('.', 1)[1]}"
+        if f == "nb_jour_debut_campagne":
+            return "NB jours depuis début de la campagne"
         return f
 
     def _stored_from_label(lbl: str) -> str:
-        """Map UI label -> DB-stored field"""
         if _is_client_label(lbl):
             return "client." + lbl.split("Client: ", 1)[1].strip()
+        if _is_cc_label(lbl):
+            return "nb_jour_debut_campagne"
         return lbl
 
     st.markdown("**Conditions (liées au bloc mère sélectionné)**")
 
-    # -------------------------
-    # Ajout nouvelle condition
-    # -------------------------
     c1, c2, c3, c4 = st.columns([3, 2, 3, 2])
+    all_fields_new = fields + cc_labels + client_labels
 
     with c1:
-        field = st.selectbox("Champ", fields + client_labels, key=f"{key_prefix}_field_new")
+        field = st.selectbox("Champ", all_fields_new, key=f"{key_prefix}_field_new")
 
     with c2:
         if field == "Flag résultats":
             op = "="
             st.text_input("Opérateur", value="=", disabled=True, key=f"{key_prefix}_op_new_lock")
-        elif _is_client_label(field) and client_label_to_meta.get(field, {}).get("is_numeric") == "0":
+        elif (
+            (_is_client_label(field) and client_label_to_meta.get(field, {}).get("is_numeric") == "0")
+            or (_is_cc_label(field) and cc_label_to_meta.get(field, {}).get("is_numeric") == "0")
+        ):
             op = st.selectbox("Opérateur", ["=", "!=", "contains", "not contains"], key=f"{key_prefix}_op_new_txt")
         else:
             op = st.selectbox("Opérateur", ["=", ">", "<", ">=", "<="], key=f"{key_prefix}_op_new")
@@ -171,7 +178,10 @@ def render_condition_builder(
             else:
                 value = ""
                 st.text_input("Valeur", value="", disabled=True, key=f"{key_prefix}_val_new_flag_empty")
-        elif _is_client_label(field) and client_label_to_meta.get(field, {}).get("is_numeric") == "0":
+        elif (
+            (_is_client_label(field) and client_label_to_meta.get(field, {}).get("is_numeric") == "0")
+            or (_is_cc_label(field) and cc_label_to_meta.get(field, {}).get("is_numeric") == "0")
+        ):
             value = st.text_input("Valeur", value="", key=f"{key_prefix}_val_new_txt")
         else:
             value = st.number_input("Valeur", min_value=0, step=1, value=0, key=f"{key_prefix}_val_new_num")
@@ -181,14 +191,10 @@ def render_condition_builder(
             st.session_state[conds_key].append({"field": _stored_from_label(field), "op": op, "value": value})
             st.rerun()
 
-    # -------------------------
-    # Liste des conditions
-    # -------------------------
     if show_existing and st.session_state[conds_key]:
         st.markdown("**Conditions existantes**")
         ops = ["=", ">", "<", ">=", "<="]
-
-        all_fields = fields + client_labels
+        all_fields = fields + cc_labels + client_labels
 
         for i, c in enumerate(list(st.session_state[conds_key])):
             l, m, r = st.columns([4, 4, 1])
@@ -207,14 +213,11 @@ def render_condition_builder(
                 # Op
                 if new_field == "Flag résultats":
                     new_op = "="
-                    st.text_input(
-                        "Op",
-                        value="=",
-                        disabled=True,
-                        key=f"{key_prefix}_op_{i}_lock",
-                        label_visibility="collapsed",
-                    )
-                elif _is_client_label(new_field) and client_label_to_meta.get(new_field, {}).get("is_numeric") == "0":
+                    st.text_input("Op", value="=", disabled=True, key=f"{key_prefix}_op_{i}_lock", label_visibility="collapsed")
+                elif (
+                    (_is_client_label(new_field) and client_label_to_meta.get(new_field, {}).get("is_numeric") == "0")
+                    or (_is_cc_label(new_field) and cc_label_to_meta.get(new_field, {}).get("is_numeric") == "0")
+                ):
                     cur_op = c.get("op") if c.get("op") in ["=", "!=", "contains", "not contains"] else "="
                     new_op = st.selectbox(
                         "Op",
@@ -247,21 +250,13 @@ def render_condition_builder(
                         )
                     else:
                         new_val = ""
-                        st.text_input(
-                            "Valeur",
-                            value="",
-                            disabled=True,
-                            key=f"{key_prefix}_val_{i}_flag_empty",
-                            label_visibility="collapsed",
-                        )
-                elif _is_client_label(new_field) and client_label_to_meta.get(new_field, {}).get("is_numeric") == "0":
+                        st.text_input("Valeur", value="", disabled=True, key=f"{key_prefix}_val_{i}_flag_empty", label_visibility="collapsed")
+                elif (
+                    (_is_client_label(new_field) and client_label_to_meta.get(new_field, {}).get("is_numeric") == "0")
+                    or (_is_cc_label(new_field) and cc_label_to_meta.get(new_field, {}).get("is_numeric") == "0")
+                ):
                     cur_val_txt = str(c.get("value", "") or "")
-                    new_val = st.text_input(
-                        "Valeur",
-                        value=cur_val_txt,
-                        key=f"{key_prefix}_val_{i}_txt",
-                        label_visibility="collapsed",
-                    )
+                    new_val = st.text_input("Valeur", value=cur_val_txt, key=f"{key_prefix}_val_{i}_txt", label_visibility="collapsed")
                 else:
                     try:
                         cur_val_num = int(float(c.get("value") or 0))
@@ -276,7 +271,6 @@ def render_condition_builder(
                         label_visibility="collapsed",
                     )
 
-                # sauvegarde inline dans session
                 st.session_state[conds_key][i] = {"field": _stored_from_label(new_field), "op": new_op, "value": new_val}
 
             with r:
@@ -288,7 +282,7 @@ def render_condition_builder(
 
 
 # =========================================================
-# ✅ Mode édition (inchangé côté UX, mais data via façade)
+# Mode édition
 # =========================================================
 def _enter_edit_modele(id_modele: str) -> None:
     payload = get_modele_edit_payload_for_ui(id_modele) or {}
@@ -307,6 +301,7 @@ def _enter_edit_modele(id_modele: str) -> None:
     st.session_state.pop("cond_builder_conds", None)
     st.session_state.pop("cond_builder_conds__init", None)
 
+    st.session_state.pop("multi_obj_items", None)
     st.session_state["create_mode"] = True
 
 
@@ -325,7 +320,6 @@ def main():
     st.session_state.setdefault("new_blocks", [])
     st.session_state.setdefault("selected_bm", None)
 
-    # ✅ état édition
     st.session_state.setdefault("edit_modele_id", None)
     st.session_state.setdefault("edit_nom_modele", "")
     st.session_state.setdefault("edit_variable_cible", "")
@@ -335,10 +329,11 @@ def main():
     top[0].title("🧠 Modèles")
     if top[1].button("➕", use_container_width=True):
         _exit_edit_modele()
+        st.session_state.pop("multi_obj_items", None)
         st.session_state.create_mode = True
 
     # =====================================================
-    # CREATE + pré-remplissage si édition (UI identique)
+    # CREATE / EDIT
     # =====================================================
     if st.session_state.create_mode:
         st.subheader("Créer un modèle")
@@ -350,8 +345,7 @@ def main():
         default_nom = st.session_state.get("edit_nom_modele", "") if is_editing else ""
         nom_modele = st.text_input("Nom du modèle", value=default_nom).strip()
 
-        # ✅ choix variables via façade (plus de PRAGMA dans l'UI)
-        variable_choices, categorical_cols_allowed, _numeric_cols = get_variable_choices_for_ui()
+        variable_choices, categorical_cols_allowed, numeric_cols = get_variable_choices_for_ui()
         if not variable_choices:
             st.error("Aucune colonne cible disponible.")
             st.stop()
@@ -360,47 +354,94 @@ def main():
         var_index = variable_choices.index(default_var) if (default_var in variable_choices) else 0
         variable_cible = st.selectbox("Colonne cible", variable_choices, index=var_index)
 
-        # ✅ Objectif dépend du type de colonne (même logique)
-        is_categorical_positive = is_categorical_positive_objectif_for_ui(variable_cible)
+        # =====================================================
+        # ✅ Objectif MULTI (toujours)
+        # - Critère principal = variable_cible
+        # - Critères additionnels via ➕ (optionnels)
+        # - Type déduit : num => min/max ; cat => modalités
+        # =====================================================
+        st.markdown("### Objectif (multi AND/OR)")
+        op = st.selectbox("Opérateur", ["AND", "OR"], index=0)
+
+        numeric_set = set(numeric_cols or [])
+        st.session_state.setdefault("multi_obj_items", [])
+
+        def _var_type(v: str) -> str:
+            return "num" if v in numeric_set else "cat"
 
         objectif_value_for_store = ""
         objectif_label_for_ui = ""
 
-        default_obj = st.session_state.get("edit_objectif") if is_editing else None
+        # --- Critère principal (colonne cible) ---
+        st.markdown("**Critère principal (colonne cible)**")
+        main_type = _var_type(variable_cible)
 
-        if is_categorical_positive:
-            objectifs = modalites_for(variable_cible)  # positives only
-            if not objectifs:
-                st.error(f"Aucune modalité positive définie pour: {variable_cible}")
-                st.stop()
-
-            if default_obj in objectifs:
-                obj_index = objectifs.index(default_obj)
-            else:
-                obj_index = 0
-
-            objectif_choice = st.selectbox("Objectif", objectifs, index=obj_index)
-            objectif_value_for_store = objectif_choice
-            objectif_label_for_ui = objectif_choice
+        if main_type == "cat":
+            mods = modalites_for(variable_cible) or []
+            main_value = st.selectbox("Valeur (colonne cible)", mods, index=0, key="main_obj_cat") if mods else ""
+            main_item = {"variable": variable_cible, "type": "cat", "value": main_value}
         else:
-            st.markdown("**Objectif (numérique)**")
-
-            pre_min, pre_max = numeric_objectif_prefill_for_ui(default_obj) if is_editing else ("", "")
-
             c1, c2 = st.columns(2)
             with c1:
-                mn_txt = st.text_input("Min", value=pre_min, placeholder="(vide = pas de borne)", key="obj_min")
+                mn_txt = st.text_input("Min (colonne cible)", value="", placeholder="vide = pas de borne", key="main_obj_min")
             with c2:
-                mx_txt = st.text_input("Max", value=pre_max, placeholder="(vide = pas de borne)", key="obj_max")
+                mx_txt = st.text_input("Max (colonne cible)", value="", placeholder="vide = pas de borne", key="main_obj_max")
 
-            try:
-                objectif_value_for_store = build_numeric_objectif_json_for_ui(mn_txt, mx_txt)
-                objectif_label_for_ui = objectif_label(variable_cible, objectif_value_for_store)
-            except Exception as e:
-                st.warning(str(e))
-                objectif_value_for_store = ""
-                objectif_label_for_ui = ""
+            main_item = {"variable": variable_cible, "type": "num"}
+            if str(mn_txt).strip() != "":
+                main_item["min"] = float(mn_txt)
+            if str(mx_txt).strip() != "":
+                main_item["max"] = float(mx_txt)
 
+        # --- Critères additionnels ---
+        st.markdown("**Critères additionnels (optionnels)**")
+        addA, addB, addC = st.columns([5, 4, 1])
+        with addA:
+            extra_var = st.selectbox("Variable", variable_choices, key="extra_var")
+
+        extra_type = _var_type(extra_var)
+        with addB:
+            if extra_type == "cat":
+                mods2 = modalites_for(extra_var) or []
+                extra_val = st.selectbox("Valeur", mods2, key="extra_val_cat") if mods2 else st.text_input("Valeur", value="", key="extra_val_cat_txt")
+                extra_payload = {"variable": extra_var, "type": "cat", "value": extra_val}
+            else:
+                cmin, cmax = st.columns(2)
+                with cmin:
+                    extra_min = st.text_input("Min", value="", key="extra_min")
+                with cmax:
+                    extra_max = st.text_input("Max", value="", key="extra_max")
+                extra_payload = {"variable": extra_var, "type": "num"}
+                if str(extra_min).strip() != "":
+                    extra_payload["min"] = float(extra_min)
+                if str(extra_max).strip() != "":
+                    extra_payload["max"] = float(extra_max)
+
+        with addC:
+            if st.button("➕", key="extra_add"):
+                st.session_state["multi_obj_items"].append(extra_payload)
+                st.rerun()
+
+        if st.session_state["multi_obj_items"]:
+            for i, it in enumerate(list(st.session_state["multi_obj_items"])):
+                d1, d2 = st.columns([10, 1])
+                d1.code(it, language="json")
+                if d2.button("🗑️", key=f"extra_del_{i}"):
+                    st.session_state["multi_obj_items"].pop(i)
+                    st.rerun()
+
+        items_final = [main_item] + list(st.session_state["multi_obj_items"])
+        try:
+            objectif_value_for_store = build_multi_objectif_json_for_ui(op, items_final)
+            objectif_label_for_ui = objectif_value_for_store
+        except Exception as e:
+            st.warning(str(e))
+            objectif_value_for_store = ""
+            objectif_label_for_ui = ""
+
+        # =====================================================
+        # Blocs / Graphe
+        # =====================================================
         blocks: List[Dict[str, Any]] = st.session_state["new_blocks"]
         visible = [b for b in blocks if b.get("Action") != "Closed"]
 
@@ -422,7 +463,7 @@ def main():
         else:
             st.info("Aucun bloc pour le moment.")
 
-        # ✅ Choix du bloc mère (inchangé)
+        # Sélection du bloc mère
         if visible:
             st.markdown("**Sélection du bloc mère**")
             per_row = 6
@@ -444,9 +485,6 @@ def main():
         if selected_id is not None:
             bloc_mere_dict = next((b for b in visible if b.get("ID") == selected_id), None)
 
-        # =====================================================
-        # Modifier conditions du bloc sélectionné (inchangé)
-        # =====================================================
         def _get_block_by_id(blocks_list: List[Dict[str, Any]], bid: int) -> Optional[Dict[str, Any]]:
             for bb in blocks_list:
                 if bb.get("Action") == "Closed":
@@ -461,6 +499,7 @@ def main():
                 return None
             return _get_block_by_id(blocks_list, int(parent))
 
+        # Modifier conditions / contenu bloc sélectionné
         if selected_id is not None and blocks:
             selected_block = _get_block_by_id(blocks, int(selected_id))
             if selected_block is not None:
@@ -497,9 +536,6 @@ def main():
                                 st.session_state.pop(f"{edit_prefix}_conds__init", None)
                                 st.rerun()
 
-                    # =====================================================
-                    # Modifier contenu + objet (si Mail) (inchangé)
-                    # =====================================================
                     with st.expander("✉️ Modifier le contenu du bloc sélectionné", expanded=False):
                         edit_txt_key = f"edit_txt_{int(selected_id)}"
                         edit_obj_key = f"edit_obj_{int(selected_id)}"
@@ -511,7 +547,6 @@ def main():
                             st.session_state[edit_init_key] = True
 
                         canal_sel = str(selected_block.get("Canal", "") or "").strip()
-
                         new_obj = st.session_state.get(edit_obj_key, "")
                         if canal_sel == "Mail":
                             new_obj = st.text_input("Objet du mail", key=edit_obj_key)
@@ -520,11 +555,7 @@ def main():
 
                         cX, cY = st.columns([2, 2])
                         with cX:
-                            if st.button(
-                                "✅ Appliquer (contenu/objet)",
-                                key=f"apply_txt_{int(selected_id)}",
-                                use_container_width=True,
-                            ):
+                            if st.button("✅ Appliquer (contenu/objet)", key=f"apply_txt_{int(selected_id)}", use_container_width=True):
                                 for bb in st.session_state["new_blocks"]:
                                     if bb.get("Action") == "Closed":
                                         continue
@@ -536,17 +567,13 @@ def main():
                                 st.rerun()
 
                         with cY:
-                            if st.button(
-                                "↩️ Annuler (contenu/objet)",
-                                key=f"cancel_txt_{int(selected_id)}",
-                                use_container_width=True,
-                            ):
+                            if st.button("↩️ Annuler (contenu/objet)", key=f"cancel_txt_{int(selected_id)}", use_container_width=True):
                                 st.session_state.pop(edit_txt_key, None)
                                 st.session_state.pop(edit_obj_key, None)
                                 st.session_state.pop(edit_init_key, None)
                                 st.rerun()
 
-        # delete bloc + descendants (inchangé)
+        # Supprimer bloc sélectionné + descendants
         if bloc_mere_dict:
             if st.button("🗑️ Supprimer le bloc sélectionné (avec ses fils)"):
                 target_id = int(bloc_mere_dict["ID"])
@@ -570,6 +597,7 @@ def main():
 
         st.markdown("---")
 
+        # Ajout nouveau bloc
         canal = st.selectbox("Canal du nouveau bloc", list_canaux())
         action = action_for_canal(canal)
 
@@ -579,14 +607,9 @@ def main():
 
         contenu = st.text_area("Contenu", height=120, value="")
 
-        # ✅ Ajout de conditions uniquement à partir du 2e bloc (inchangé)
         conditions = []
         if blocks and bloc_mere_dict is not None:
-            conditions = render_condition_builder(
-                bloc_mere_dict,
-                key_prefix="cond_builder",
-                show_existing=False,
-            )
+            conditions = render_condition_builder(bloc_mere_dict, key_prefix="cond_builder", show_existing=False)
 
         c1, c2, c3 = st.columns([2, 2, 2])
 
@@ -639,6 +662,7 @@ def main():
                 st.session_state["selected_bm"] = None
                 st.session_state.pop("cond_builder_conds", None)
                 st.session_state.pop("cond_builder_conds__init", None)
+                st.session_state.pop("multi_obj_items", None)
                 _exit_edit_modele()
                 st.session_state.create_mode = False
                 st.rerun()
@@ -649,6 +673,7 @@ def main():
                 st.session_state["selected_bm"] = None
                 st.session_state.pop("cond_builder_conds", None)
                 st.session_state.pop("cond_builder_conds__init", None)
+                st.session_state.pop("multi_obj_items", None)
                 _exit_edit_modele()
                 st.session_state.create_mode = False
                 st.rerun()
@@ -656,7 +681,7 @@ def main():
         st.divider()
 
     # =====================================================
-    # LIST (bouton ✏️)
+    # LIST
     # =====================================================
     rows = list_modeles_for_ui()
     st.subheader(f"Liste des modèles ({len(rows)})")
@@ -702,12 +727,7 @@ def main():
                 if actions:
                     st.markdown("**Aperçu graphe (sans Closed)**")
                     st.graphviz_chart(
-                        build_dot_from_liste_action(
-                            actions,
-                            varc,
-                            objectif_label(varc, obj),
-                            selected_id=None,
-                        ),
+                        build_dot_from_liste_action(actions, varc, objectif_label(varc, obj), selected_id=None),
                         use_container_width=True,
                     )
                 else:

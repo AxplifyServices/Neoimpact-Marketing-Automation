@@ -174,8 +174,6 @@ def get_clients_campagnes_condition_fields_for_ui() -> List[Dict[str, str]]:
 
         wanted = [
             "nb_jour_debut_campagne",
-            "NB_jour_last_action",
-            "Resultat_last_action",
         ]
 
         out: List[Dict[str, str]] = []
