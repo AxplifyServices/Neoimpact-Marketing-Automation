@@ -15,15 +15,22 @@ from app.domain.canaux import (
 from app.domain.ui_facades.modeles_ui_facade import (
     get_client_condition_fields_for_ui,
     get_variable_choices_for_ui,
-    is_categorical_positive_objectif_for_ui,
-    build_numeric_objectif_json_for_ui,
-    numeric_objectif_prefill_for_ui,
     list_modeles_for_ui,
     get_locked_modele_ids_for_ui,
     delete_modele_for_ui,
     get_modele_edit_payload_for_ui,
     save_modele_for_ui,
     get_modele_by_id_for_ui,
+    # Objectif multi uniquement
+    build_multi_objectif_json_for_ui,
+    # NOTE: on retire volontairement toute façade liée à l’objectif simple
+)
+
+# NOTE: ce façade est appelée plus bas dans le fichier.
+# Si elle n'existe pas dans ton projet, il faut la rajouter dans le module de façade
+# (app/domain/ui_facades/modeles_ui_facade.py) ou supprimer l'endpoint associé.
+from app.domain.ui_facades.modeles_ui_facade import (
+    get_clients_campagnes_condition_fields_for_ui,
 )
 
 router = APIRouter()
@@ -37,7 +44,12 @@ class ModeleSaveIn(BaseModel):
     id_modele: Optional[str] = ""
     nom_modele: str
     variable_cible: str
-    objectif_value_for_store: str
+
+    # IMPORTANT:
+    # - objectif NON obligatoire (peut être None ou "")
+    # - plus de notion d’objectif simple dans l’API
+    objectif_value_for_store: Optional[str] = None
+
     blocks: List[Dict[str, Any]]
 
 
@@ -96,11 +108,8 @@ def list_modeles(
     }
 
 
-
 @router.get("/modeles/{id_modele}")
 def get_modele(id_modele: str):
-    # Optionnel: on pourrait aussi enrichir ici avec locked,
-    # mais la demande principale était sur la liste.
     return get_modele_by_id_for_ui(id_modele)
 
 
@@ -114,9 +123,6 @@ def locked_modeles():
     locked = sorted(list(get_locked_modele_ids_for_ui()))
     return {"locked_ids": locked}
 
-
-
-from fastapi import HTTPException
 
 @router.delete("/modeles/{id_modele}")
 def delete_modele(id_modele: str):
@@ -133,15 +139,19 @@ def delete_modele(id_modele: str):
     return {"ok": True}
 
 
-
 @router.post("/modeles/save")
 def save_modele(payload: ModeleSaveIn):
+    # objectif optionnel : on normalise en "" pour le store si besoin
+    objectif_store = payload.objectif_value_for_store
+    if objectif_store is None:
+        objectif_store = ""
+
     save_modele_for_ui(
         is_editing=payload.is_editing,
         id_modele=payload.id_modele or "",
         nom_modele=payload.nom_modele,
         variable_cible=payload.variable_cible,
-        objectif_value_for_store=payload.objectif_value_for_store,
+        objectif_value_for_store=objectif_store,  # peut être ""
         blocks=payload.blocks,
     )
     return {"ok": True}
@@ -160,28 +170,17 @@ def variables_meta():
     }
 
 
-@router.get("/meta/objectif/is-categorical-positive")
-def is_cat_positive(variable_cible: str):
-    return {
-        "ok": True,
-        "is_categorical_positive": is_categorical_positive_objectif_for_ui(variable_cible),
-    }
-
-
-@router.get("/meta/objectif/numeric-prefill")
-def numeric_prefill(objectif: str):
-    pre_min, pre_max = numeric_objectif_prefill_for_ui(objectif)
-    return {"pre_min": pre_min, "pre_max": pre_max}
-
-
-@router.post("/meta/objectif/build-numeric-json")
-def build_numeric_json(min_txt: str = "", max_txt: str = ""):
+@router.post("/meta/objectif/build-multi")
+def build_multi_objectif(payload: Dict[str, Any]):
     """
-    Retourne un objectif JSON string comme en Streamlit:
-    {"min": ..., "max": ...} (min/max optionnels)
+    Objectif MULTI uniquement.
+    payload:
+      - op: "AND" / "OR" (ou autre selon ton UI)
+      - items: liste d'items objectifs (numériques min/max, catégorielles liste modalités)
     """
-    return {"objectif_json": build_numeric_objectif_json_for_ui(min_txt, max_txt)}
-
+    op = payload.get("op", "")
+    items = payload.get("items", [])
+    return {"objectif_json": build_multi_objectif_json_for_ui(op, items)}
 
 
 @router.get("/meta/conditions/clients-fields")
@@ -194,6 +193,11 @@ def clients_condition_fields():
     return {"fields": get_client_condition_fields_for_ui()}
 
 
+@router.get("/meta/conditions/clients-campagnes-fields")
+def clients_campagnes_condition_fields():
+    return {"fields": get_clients_campagnes_condition_fields_for_ui()}
+
+
 @router.get("/meta/canaux")
 def canaux_meta():
     canaux = list_canaux()
@@ -204,20 +208,9 @@ def canaux_meta():
         "compteur_by_canal": {c: compteur_for_canal(c) for c in canaux},
     }
 
-@router.post("/meta/objectif/build-multi")
-def build_multi_objectif(payload: Dict[str, Any]):
-    op = payload.get("op", "")
-    items = payload.get("items", [])
-    return {"objectif_json": build_multi_objectif_json_for_ui(op, items)}
-
-
-@router.get("/meta/conditions/clients-campagnes-fields")
-def clients_campagnes_condition_fields():
-    return {"fields": get_clients_campagnes_condition_fields_for_ui()}
-
 
 # NOTE:
-# On SUPPRIME volontairement /meta/modalites ici.
+# On SUPPRIME volontairement tous les endpoints "objectif simple".
 # Les modalités (valeurs distinctes) se gèrent déjà via:
 # - /api/clients/distinct?column=... (dans cibles.py)
 # et/ou via la logique UI existante.
