@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routers.health import router as health_router
 from app.api.routers.batch import router as batch_router
@@ -18,34 +17,15 @@ app = FastAPI(
     version="1.0.0",
 )
 
-from fastapi.middleware.cors import CORSMiddleware
+API_PREFIX = "/api"
 
 ALLOWED_ORIGINS = [
+    "https://campain.dev.swiftnova.ma",
     "https://campain.swiftnova.ma",
-    "https://axplify-services.com",
     "http://localhost:3000",
     "http://localhost:5173",
 ]
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# CORS: tant que tu ne connais pas les origins => wildcard
-# Quand le front est fixé: remplace ["*"] par ["https://front.tld", "http://localhost:5173", ...]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-API_PREFIX = "/api"
 
 app.include_router(health_router, prefix=API_PREFIX, tags=["Health"])
 app.include_router(batch_router, prefix=API_PREFIX, tags=["Batch"])
@@ -56,4 +36,3 @@ app.include_router(queues_router, prefix=API_PREFIX, tags=["Queues"])
 app.include_router(data_admin_router, prefix=API_PREFIX, tags=["Data"])
 app.include_router(dashboard_router, prefix=API_PREFIX, tags=["Dashboard"])
 app.include_router(clients_router, prefix=API_PREFIX, tags=["Clients"])
-

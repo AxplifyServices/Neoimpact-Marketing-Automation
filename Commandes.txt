@@ -14,8 +14,13 @@ Liens :
 http://51.75.252.139:8501/
 http://51.75.252.139:8000/docs
 
+Lancer un script : 
+
+python -m app.scripts.purge_db_except_clients
 
 Pour Git :
+
+git status
 
 git add .
 git commit -m "message clair"
@@ -23,7 +28,7 @@ git push origin main
 
 
 Envoi Zip vers serveur : 
-docker ps$
+
 scp app.zip ubuntu@51.75.252.139:~/apps/Marketing_automation_V3/
 
 	Sur serveur :
@@ -49,6 +54,7 @@ docker run -d \
   -v "$PWD/database.db:/app/database.db" \
   marketing_app:latest
 
+docker ps
 
 Exécution d'un script sur serveur avec contenair jetable :
 
@@ -56,7 +62,7 @@ docker run --rm \
   -e MA_DB_PATH=/app/database.db \
   -v "$PWD/database.db:/app/database.db" \
   marketing_app:latest \
-  python -c "from app.storage.clients_campagnes_store_sqlite import ensure_table; ensure_table(); print('✅ Migration clients_campagnes OK')"
+  python -m app.scripts.migrate_add_conversion_column
 
 
 

@@ -1,11 +1,18 @@
+# app/api/routers/campagnes.py
 from __future__ import annotations
 
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
+
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.storage.campagnes_store_sqlite import list_all_campagnes
-from app.domain.ui_facades.campagne_ui_facade import get_campagnes_affichables_for_ui
+from app.domain.ui_facades.campagne_ui_facade import (
+    get_campagnes_affichables_for_ui,
+    get_modele_choices_for_ui,
+    get_cible_choices_for_ui,
+    get_modele_graph_payload_for_ui,
+)
 
 # KPI dashboard (réutilisation existant)
 import app.domain.dashboard_kpis as dashboard_kpis
@@ -21,22 +28,35 @@ from app.domain.campagne_service import (
 router = APIRouter()
 
 
+# =========================================================
+# Payloads
+# =========================================================
 class CampagneCreateIn(BaseModel):
     nom_campagne: str
     id_modele: str
     id_cible: str
     date_debut: str
     date_fin: str
-    description: Optional[str] = ""
+    description: Optional[str] = Field(default="")
 
 
+# =========================================================
+# Helpers
+# =========================================================
 def _norm_str(x: Any) -> str:
     return "" if x is None else str(x).strip()
 
 
 def _campaign_etat(c: Dict[str, Any]) -> str:
-    # DB = etat_campagne ; fallback compat
-    return _norm_str(c.get("etat_campagne") or c.get("Etat_campagne") or c.get("etat"))
+    # DB = Etat_campagne ; fallback compat
+    return _norm_str(c.get("Etat_campagne") or c.get("etat_campagne") or c.get("etat"))
+
+
+def _to_int(v: Any) -> int:
+    try:
+        return int(v or 0)
+    except Exception:
+        return 0
 
 
 def _get_dashboard_kpis_for_campaign(id_campagne: str) -> Dict[str, Any]:
@@ -48,7 +68,9 @@ def _get_dashboard_kpis_for_campaign(id_campagne: str) -> Dict[str, Any]:
     Mapping:
       nb_attribues      <- transmis
       nb_contactes      <- contactes_total
-      nb_conversions    <- closing_total
+      nb_conversions    <- closing_total   (⚠️ si tu as déjà migré dashboard_kpis vers conversion,
+                                            laisse la clé de sortie "nb_conversions" identique
+                                            pour ne pas casser le front)
       nb_en_traitement  <- traitements_total
       nb_arriv_eche     <- arriv_eche
     """
@@ -69,12 +91,6 @@ def _get_dashboard_kpis_for_campaign(id_campagne: str) -> Dict[str, Any]:
         # ne jamais casser l'API si le dashboard a un souci
         k = {}
 
-    def _to_int(v: Any) -> int:
-        try:
-            return int(v or 0)
-        except Exception:
-            return 0
-
     return {
         "nb_attribues": _to_int(k.get("transmis", 0)),
         "nb_conversions": _to_int(k.get("closing_total", 0)),
@@ -90,12 +106,18 @@ def _enrich_campaign_with_kpis(c: Dict[str, Any]) -> Dict[str, Any]:
     out.update(_get_dashboard_kpis_for_campaign(id_campagne))
 
     # alias safe "etat" si front l'utilise
-    if "etat" not in out and "etat_campagne" in out:
-        out["etat"] = out.get("etat_campagne")
+    if "etat" not in out:
+        if "etat_campagne" in out:
+            out["etat"] = out.get("etat_campagne")
+        elif "Etat_campagne" in out:
+            out["etat"] = out.get("Etat_campagne")
 
     return out
 
 
+# =========================================================
+# Endpoints Campagnes
+# =========================================================
 @router.get("/campagnes")
 def list_campagnes(
     etat: Optional[str] = "affichables",
@@ -159,11 +181,15 @@ def list_campagnes(
     }
 
 
-
 @router.post("/campagnes")
 def create_campagne_endpoint(payload: CampagneCreateIn):
     """
     Crée une campagne.
+
+    IMPORTANT:
+    - la logique "variable_cible / objectif modèle" n'existe plus
+    - on s'appuie sur campagne_service.create_campagne (root bloc + mail init + routage)
+    - on ne change pas le shape de réponse (front safe)
     """
     try:
         return _create_campagne(
@@ -210,3 +236,35 @@ def activer_campagne(id_campagne: str):
     if not res.get("ok", True):
         raise HTTPException(status_code=400, detail=res.get("error", "Activation impossible"))
     return res
+
+
+# =========================================================
+# Endpoints META (additifs -> ne cassent rien)
+# =========================================================
+@router.get("/campagnes/meta/modele-choices")
+def modele_choices():
+    """
+    Permet au front d'afficher la liste des modèles (labels + mapping label->id).
+    """
+    labels, mapping = get_modele_choices_for_ui()
+    return {"labels": labels, "mapping": mapping}
+
+
+@router.get("/campagnes/meta/cible-choices")
+def cible_choices():
+    """
+    Permet au front d'afficher la liste des cibles (labels + mapping label->id).
+    """
+    labels, mapping = get_cible_choices_for_ui()
+    return {"labels": labels, "mapping": mapping}
+
+
+@router.get("/campagnes/meta/modele-graph")
+def modele_graph(id_modele: str = Query(..., min_length=1)):
+    """
+    Payload UI pour afficher le graphe du modèle (liste_action + graphe_json).
+    """
+    payload = get_modele_graph_payload_for_ui(id_modele)
+    if not payload:
+        raise HTTPException(status_code=404, detail="Modèle introuvable")
+    return payload

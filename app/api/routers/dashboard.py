@@ -23,11 +23,12 @@ class DashboardIn(BaseModel):
     etats_campagne: Optional[List[str]] = None
     date_min: Optional[date] = None
     date_max: Optional[date] = None
-    gestionnaires: Optional[List[str]] = None  # ✅ NEW
+    gestionnaires: Optional[List[str]] = None  # ✅ déjà présent
 
 
 # =========================================================
 # Dynamic filters (bidirectionnels)
+# (On conserve exactement la même structure de sortie pour ne pas casser le front)
 # =========================================================
 @router.get("/dashboard/filters")
 def dashboard_filters(
@@ -67,7 +68,7 @@ def dashboard_compute(payload: DashboardIn):
         etats_campagne=payload.etats_campagne,
         date_min=payload.date_min,
         date_max=payload.date_max,
-        gestionnaires=payload.gestionnaires,  # ✅ NEW
+        gestionnaires=payload.gestionnaires,  # ✅ IMPORTANT : on le passe partout
     )
     return compute_dashboard_payload(filters)
 
@@ -89,7 +90,6 @@ def dashboard_compute_get(
         date_min=date_min,
         date_max=date_max,
         gestionnaires=gestionnaires,
-
     )
     return compute_dashboard_payload(filters)
 
@@ -101,11 +101,13 @@ def dashboard_compute_get(
 # =========================================================
 @router.post("/dashboard/compute-by-campagne")
 def dashboard_compute_by_campagne(payload: DashboardIn):
+    # ✅ BUG FIX : tu avais oublié gestionnaires ici (ça cassait le filtre par gestionnaire)
     filters = DashboardFilters(
         campagne_ids=payload.campagne_ids,
         etats_campagne=payload.etats_campagne,
         date_min=payload.date_min,
         date_max=payload.date_max,
+        gestionnaires=payload.gestionnaires,
     )
     return compute_dashboard_payload(filters)
 
@@ -116,11 +118,13 @@ def dashboard_compute_by_campagne_get(
     etats_campagne: Optional[List[str]] = Query(default=None),
     date_min: Optional[date] = Query(default=None),
     date_max: Optional[date] = Query(default=None),
+    gestionnaires: Optional[List[str]] = Query(default=None),  # ✅ NEW
 ):
     filters = DashboardFilters(
         campagne_ids=campagne_ids,
         etats_campagne=etats_campagne,
         date_min=date_min,
         date_max=date_max,
+        gestionnaires=gestionnaires,
     )
     return compute_dashboard_payload(filters)

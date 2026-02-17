@@ -39,13 +39,6 @@ def ensure_vers_cc_table() -> None:
 
 
 def fill_action_vers_cc_from_clients_campagnes(id_campagne: str) -> int:
-    """
-    ✅ IMPORTANT: on garde ce NOM (appelé par campagne_service)
-    CC = clients dont:
-      - Etat_campagne='En cours'
-      - Action="Conseiller client"
-    => on remplit la queue 'vers_cc'
-    """
     ensure_vers_cc_table()
 
     conn = _connect()
@@ -71,8 +64,8 @@ def fill_action_vers_cc_from_clients_campagnes(id_campagne: str) -> int:
             COALESCE(cc.Canal,'') as Canal,
             COALESCE(cc.Action,'') as Action,
             COALESCE(cc.Etat_campagne,'') as Etat_campagne,
-            COALESCE(cc.statut_avant_campagne,'') as statut_avant_campagne,
-            COALESCE(cc.statut_actuel,'') as statut_actuel
+            '' as statut_avant_campagne,
+            '' as statut_actuel
         FROM clients_campagnes cc
         LEFT JOIN clients cl ON cl.radical_compte = cc.Radical_compte
         LEFT JOIN campagnes c ON c.id_campagne = cc.ID_CAMPAGNE

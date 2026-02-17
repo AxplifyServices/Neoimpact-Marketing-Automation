@@ -5,9 +5,10 @@ import re
 import unicodedata
 from typing import Any, Dict, List, Optional
 
-import json
 
-
+# =========================================================
+# Normalisation
+# =========================================================
 def _norm_str(x: Any) -> str:
     if x is None:
         return ""
@@ -16,12 +17,16 @@ def _norm_str(x: Any) -> str:
 
 
 def _norm_cmp(x: Any) -> str:
+    """Lower + strip + remove accents + collapse spaces."""
     s = _norm_str(x).lower()
     s = "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
 
+# =========================================================
+# Bloc utils
+# =========================================================
 def find_bloc_by_id(liste_action: List[Dict[str, Any]], bloc_id: str) -> Optional[Dict[str, Any]]:
     bid = _norm_str(bloc_id)
     for b in liste_action or []:
@@ -30,20 +35,55 @@ def find_bloc_by_id(liste_action: List[Dict[str, Any]], bloc_id: str) -> Optiona
     return None
 
 
+def is_objective_bloc(bloc: Dict[str, Any]) -> bool:
+    return bool(isinstance(bloc, dict) and bloc.get("objectif") is True)
+
+
 def infer_children(liste_action: List[Dict[str, Any]], parent_id: str) -> List[Dict[str, Any]]:
-    """Supporte Bloc_mere et Bloc_mère (accent)."""
+    """
+    Retourne les fils d'un bloc.
+
+    ✅ NEW:
+      - utilise Parents: [<parent_id>, ...]
+    ✅ Legacy fallback:
+      - Bloc_mere / Bloc_mère (accent)
+    """
     pid = _norm_str(parent_id)
     out: List[Dict[str, Any]] = []
+
+    # NEW: Parents[]
+    for b in liste_action or []:
+        if not isinstance(b, dict):
+            continue
+        parents = b.get("Parents")
+        if isinstance(parents, list):
+            pset = {_norm_str(x) for x in parents}
+            if pid in pset:
+                out.append(b)
+
+    if out:
+        return out
+
+    # Legacy: Bloc_mere / Bloc_mère
     for b in liste_action or []:
         if not isinstance(b, dict):
             continue
         bm = b.get("Bloc_mere") if b.get("Bloc_mere") is not None else b.get("Bloc_mère")
         if _norm_str(bm) == pid:
             out.append(b)
+
     return out
 
 
+# =========================================================
+# Comparaisons & Conditions
+# =========================================================
 def _compare(op: str, left: Any, right: Any) -> bool:
+    """
+    Compare left <op> right.
+    Supporte:
+      =, ==, !=, <>, >, <, >=, <=, contains, in
+    """
     op = _norm_str(op) or "="
     try:
         if op in ("=", "=="):
@@ -72,6 +112,7 @@ def _compare(op: str, left: Any, right: Any) -> bool:
             return _norm_cmp(right) in _norm_cmp(left)
 
         if op == "in":
+            # right peut être list ou string
             if isinstance(right, list):
                 return any(_norm_cmp(left) == _norm_cmp(x) for x in right)
             return _norm_cmp(left) in _norm_cmp(right)
@@ -82,20 +123,54 @@ def _compare(op: str, left: Any, right: Any) -> bool:
     return False
 
 
+def _resolve_field_value(field_label: str, row_cc: Dict[str, Any], resultat_label: str) -> Any:
+    """
+    Résout la valeur à comparer pour un label de champ venant de l'UI.
+
+    Mapping conservateur (ne casse pas):
+      - "Flag résultats" -> resultat_label (= row_cc["Resultat_last_action"])
+      - "NB jours depuis last action" -> row_cc["NB_jour_last_action"]
+      - "NB jours depuis début de la campagne" -> row_cc["nb_jour_debut_campagne"] (ou NB_jour_debut_campagne)
+      - sinon -> row_cc[field_label] (y compris client.X si enrichi par le batch)
+    """
+    fcmp = _norm_cmp(field_label)
+
+    if fcmp in (_norm_cmp("Flag résultats"), _norm_cmp("Resultat"), _norm_cmp("Resultat_last_action")):
+        return resultat_label
+
+    if fcmp in (_norm_cmp("NB jours depuis last action"), _norm_cmp("NB_jour_last_action")):
+        return row_cc.get("NB_jour_last_action")
+
+    if fcmp in (
+        _norm_cmp("NB jours depuis début de la campagne"),
+        _norm_cmp("NB jours depuis debut de la campagne"),
+        _norm_cmp("NB jours depuis debut campagne"),
+        _norm_cmp("NB_jour_debut_campagne"),
+        _norm_cmp("nb_jour_debut_campagne"),
+        _norm_cmp("Jours depuis début campagne"),
+        _norm_cmp("Jours depuis debut campagne"),
+    ):
+        v = row_cc.get("nb_jour_debut_campagne")
+        if v is None:
+            v = row_cc.get("NB_jour_debut_campagne")
+        return v
+
+    # Sinon lecture brute (row_cc est enrichi par le batch: client.X, etc.)
+    return row_cc.get(field_label)
+
+
 def conds_ok(conds: List[Dict[str, Any]], row_cc: Dict[str, Any], resultat_label: str) -> bool:
     """
     Multi-conditions = AND
-    Supporte 2 formats :
+
+    Supporte 2 formats:
       - ancien : {Colonne, Operateur, Valeur}
       - nouveau : {field, op, value}
-
-    Mapping UI :
-      - "Flag résultats" -> compare à resultat_label (= row_cc["Resultat_last_action"])
-      - "NB jours depuis last action" -> row_cc["NB_jour_last_action"]
-      - ✅ "NB jours depuis début de la campagne" -> row_cc["nb_jour_debut_campagne"]
-      - sinon -> row_cc[colonne]
     """
     for c in (conds or []):
+        if not isinstance(c, dict):
+            continue
+
         field = _norm_str(c.get("field") or c.get("Colonne"))
         op = _norm_str(c.get("op") or c.get("Operateur")) or "="
         val = c.get("value", c.get("Valeur"))
@@ -103,32 +178,7 @@ def conds_ok(conds: List[Dict[str, Any]], row_cc: Dict[str, Any], resultat_label
         if not field:
             continue
 
-        fcmp = _norm_cmp(field)
-
-        if fcmp in (_norm_cmp("Flag résultats"), _norm_cmp("Resultat"), _norm_cmp("Resultat_last_action")):
-            left = resultat_label
-
-        elif fcmp in (_norm_cmp("NB jours depuis last action"), _norm_cmp("NB_jour_last_action")):
-            left = row_cc.get("NB_jour_last_action")
-
-        # ✅ NEW : jours depuis début campagne
-        elif fcmp in (
-            _norm_cmp("NB jours depuis début de la campagne"),
-            _norm_cmp("NB jours depuis debut de la campagne"),
-            _norm_cmp("NB jours depuis debut campagne"),
-            _norm_cmp("NB_jour_debut_campagne"),
-            _norm_cmp("nb_jour_debut_campagne"),
-            _norm_cmp("Jours depuis début campagne"),
-            _norm_cmp("Jours depuis debut campagne"),
-        ):
-            # colonne en DB: nb_jour_debut_campagne (nouveau)
-            # on accepte aussi une éventuelle variante camel/ancienne si jamais
-            left = row_cc.get("nb_jour_debut_campagne")
-            if left is None:
-                left = row_cc.get("NB_jour_debut_campagne")
-
-        else:
-            left = row_cc.get(field)
+        left = _resolve_field_value(field, row_cc, resultat_label)
 
         if not _compare(op, left, val):
             return False
@@ -136,146 +186,135 @@ def conds_ok(conds: List[Dict[str, Any]], row_cc: Dict[str, Any], resultat_label
     return True
 
 
+def _child_nav_conditions_ok(child: Dict[str, Any], parent_id: str, row_cc: Dict[str, Any]) -> bool:
+    """
+    Conditions de navigation d'un child en venant de parent_id :
+      - child.Conditions (globales)
+      + child.ConditionsByParent[parent_id] (spécifiques)
+    Le tout en AND.
+    """
+    if not isinstance(child, dict):
+        return False
 
-def pick_next_child(liste_action: List[Dict[str, Any]], current_bloc: Dict[str, Any], row_cc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    pid = _norm_str(parent_id)
+
+    conds_global = child.get("Conditions") or []
+    if not isinstance(conds_global, list):
+        conds_global = []
+
+    cbp = child.get("ConditionsByParent") or {}
+    conds_parent = []
+    if isinstance(cbp, dict) and pid:
+        # clés stockées parfois en str
+        conds_parent = cbp.get(pid) or cbp.get(str(pid)) or []
+    if not isinstance(conds_parent, list):
+        conds_parent = []
+
+    merged = list(conds_global) + list(conds_parent)
+
+    resultat_label = _norm_str(row_cc.get("Resultat_last_action"))
+    return conds_ok(merged, row_cc, resultat_label)
+
+
+# =========================================================
+# Objectif (bloc)
+# =========================================================
+def _objective_conditions_ok(bloc_objectif: Dict[str, Any], row_cc: Dict[str, Any]) -> bool:
     """
-    Choisit le premier fils dont les conditions sont OK.
-    - Supporte structure avec "Fils" sinon fallback via Bloc_mere/Bloc_mère
-    - Ignore Action='Closed'
+    Évalue ObjectiveConditions d'un bloc objectif.
+
+    - ObjectiveOperator: AND / OR (défaut AND)
+    - ObjectiveConditions: liste de conds
+    - Chaque cond est évaluée avec le même moteur que la navigation (support client.* etc.)
     """
+    if not isinstance(bloc_objectif, dict):
+        return False
+
+    conds = bloc_objectif.get("ObjectiveConditions") or []
+    if not isinstance(conds, list) or len(conds) == 0:
+        return False
+
+    op = _norm_str(bloc_objectif.get("ObjectiveOperator") or "AND").upper()
+    if op not in ("AND", "OR"):
+        op = "AND"
+
+    resultat_label = _norm_str(row_cc.get("Resultat_last_action"))
+
+    if op == "AND":
+        return conds_ok(conds, row_cc, resultat_label)
+
+    # OR: au moins une condition vraie
+    for c in conds:
+        if conds_ok([c], row_cc, resultat_label):
+            return True
+    return False
+
+
+def objective_branch(bloc_objectif: Dict[str, Any], row_cc: Dict[str, Any]) -> str:
+    """Retourne 'Oui' si l'objectif est validé, sinon 'Non'."""
+    return "Oui" if _objective_conditions_ok(bloc_objectif, row_cc) else "Non"
+
+
+# =========================================================
+# Navigation principale
+# =========================================================
+def pick_next_child(
+    liste_action: List[Dict[str, Any]],
+    current_bloc: Dict[str, Any],
+    row_cc: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """
+    Choisit le prochain bloc (fils) selon ton nouveau format.
+
+    Règles:
+      - Si current_bloc est NORMAL:
+          - retourne le 1er fils dont les conditions de navigation sont OK
+      - Si current_bloc est OBJECTIF:
+          - calcule branche Oui/Non via ObjectiveConditions
+          - ne considère que les fils avec valide_objectif == 'Oui'/'Non' correspondant
+          - puis applique les conditions de navigation (Conditions + ConditionsByParent[current_id])
+      - Ignore Action='Closed' (legacy)
+    """
+    current_id = _norm_str(current_bloc.get("ID"))
+    if not current_id:
+        return None
+
+    # Fils: nouveau mapping via Parents (sinon fallback legacy)
     children = current_bloc.get("Fils", None)
     if not isinstance(children, list) or len(children) == 0:
-        children = infer_children(liste_action, _norm_str(current_bloc.get("ID")))
+        children = infer_children(liste_action, current_id)
 
     if not isinstance(children, list) or len(children) == 0:
         return None
 
-    resultat_label = _norm_str(row_cc.get("Resultat_last_action"))
+    is_obj = is_objective_bloc(current_bloc)
+    required_valide = None
+    if is_obj:
+        required_valide = "Oui" if _objective_conditions_ok(current_bloc, row_cc) else "Non"
 
     for child in children:
         if not isinstance(child, dict):
             continue
+
+        # legacy ignore
         if _norm_str(child.get("Action")) == "Closed":
             continue
 
-        conds = child.get("Conditions", [])
-        if not isinstance(conds, list):
-            conds = []
+        # Filtrage Oui/Non si parent objectif
+        if is_obj:
+            if _norm_str(child.get("valide_objectif")) != required_valide:
+                continue
 
-        if conds_ok(conds, row_cc, resultat_label):
+        # Conditions de navigation
+        if _child_nav_conditions_ok(child, current_id, row_cc):
             return child
 
     return None
 
 
-def objective_reached(statut_actuel: Any, objectif: Any) -> bool:
-    """
-    Compat legacy:
-      - objective_reached("Oui", "Oui") -> True
-
-    NEW:
-      - objective_reached(row_cc_dict, objectif_json) -> évalue AND/OR sur plusieurs variables
-        objectif_json format:
-        {"op":"AND|OR","items":[
-            {"variable":"Epargne","type":"cat","value":"Oui"},
-            {"variable":"NB_appel","type":"num","min":2,"max":5}
-        ]}
-    """
-    obj = _norm_str(objectif).strip()
-    if not obj:
-        return False
-
-    # =========================
-    # ✅ Si on reçoit row_cc (dict)
-    # =========================
-    if isinstance(statut_actuel, dict):
-        row_cc = statut_actuel
-
-        # try parse JSON
-        expr = None
-        if obj.startswith("{") or obj.startswith("["):
-            try:
-                expr = json.loads(obj)
-            except Exception:
-                expr = None
-
-        # multi-objectifs
-        if isinstance(expr, dict) and "op" in expr and "items" in expr:
-            op = _norm_str(expr.get("op")).upper()
-            items = expr.get("items")
-
-            if op not in ("AND", "OR") or not isinstance(items, list) or len(items) == 0:
-                return False
-
-            results: List[bool] = []
-
-            for it in items:
-                if not isinstance(it, dict):
-                    continue
-
-                var = _norm_str(it.get("variable"))
-                typ = _norm_str(it.get("type")).lower()
-
-                if not var:
-                    continue
-
-                # lecture valeur : d'abord row_cc[var], sinon row_cc["client."+var]
-                val = row_cc.get(var)
-                if val is None:
-                    val = row_cc.get(f"client.{var}")
-
-                # cat
-                if typ == "cat":
-                    target = _norm_str(it.get("value"))
-                    if not target:
-                        results.append(False)
-                        continue
-                    results.append(_norm_cmp(val) == _norm_cmp(target))
-                    continue
-
-                # num
-                if typ == "num":
-                    mn = it.get("min", None)
-                    mx = it.get("max", None)
-
-                    try:
-                        v = float(str(val).replace(",", "."))
-                    except Exception:
-                        results.append(False)
-                        continue
-
-                    ok = True
-                    if mn is not None and str(mn).strip() != "":
-                        try:
-                            ok = ok and (v >= float(mn))
-                        except Exception:
-                            ok = False
-                    if mx is not None and str(mx).strip() != "":
-                        try:
-                            ok = ok and (v <= float(mx))
-                        except Exception:
-                            ok = False
-
-                    results.append(bool(ok))
-                    continue
-
-                # type inconnu
-                results.append(False)
-
-            if not results:
-                return False
-
-            return all(results) if op == "AND" else any(results)
-
-        # fallback legacy sur row_cc["statut_actuel"]
-        return _norm_cmp(row_cc.get("statut_actuel")) == _norm_cmp(obj)
-
-    # =========================
-    # ✅ Legacy (inchangé)
-    # =========================
-    return _norm_cmp(statut_actuel) == _norm_cmp(obj)
-
-
+# =========================================================
+# KPI: Arrive à échéance
+# =========================================================
 def arrive_echeance(
     liste_action: List[Dict[str, Any]],
     current_bloc: Dict[str, Any],
@@ -286,72 +325,77 @@ def arrive_echeance(
     AU MOINS une condition portant sur NB_jour_last_action (ou son label UI),
     et que l'échéance est "proche" selon la règle :
       - si la condition est déjà satisfaite => Oui
-      - sinon, si la différence entre la valeur actuelle et la valeur de condition
-        est de 1 ou moins (en valeur absolue) => Oui
+      - sinon, si abs(val_actuelle - val_condition) <= 1 => Oui
     Sinon => "Non".
 
-    Remarques:
-    - Les enfants sont déterminés comme dans pick_next_child:
-      "Fils" si présent, sinon fallback via infer_children(Bloc_mere/Bloc_mère)
-    - Ignore Action == "Closed"
-    - Supporte fields: "NB_jour_last_action" et "NB jours depuis last action"
+    ✅ Adapté au nouveau format:
+      - les fils viennent de Parents
+      - les conditions peuvent être dans Conditions et/ou ConditionsByParent[current_id]
     """
-
-    # 1) Récupère la valeur actuelle NB_jour_last_action depuis la ligne clients_campagnes
+    # valeur actuelle
     nb = row_cc.get("NB_jour_last_action")
     try:
         nb_val = float(nb)
     except Exception:
-        return "Non"  # impossible de comparer proprement
+        return "Non"
 
-    # 2) Récupère les fils (même logique que pick_next_child)
+    current_id = _norm_str(current_bloc.get("ID"))
+    if not current_id:
+        return "Non"
+
     children = current_bloc.get("Fils", None)
     if not isinstance(children, list) or len(children) == 0:
-        children = infer_children(liste_action, _norm_str(current_bloc.get("ID")))
+        children = infer_children(liste_action, current_id)
 
     if not isinstance(children, list) or len(children) == 0:
         return "Non"
 
-    # 3) Parcours des fils + conditions
-    #    On cherche une condition liée à NB_jour_last_action
     for child in children:
         if not isinstance(child, dict):
             continue
         if _norm_str(child.get("Action")) == "Closed":
             continue
 
-        conds = child.get("Conditions", [])
-        if not isinstance(conds, list) or len(conds) == 0:
+        # on récupère les conditions "effectives" (global + by parent)
+        conds_global = child.get("Conditions") or []
+        if not isinstance(conds_global, list):
+            conds_global = []
+
+        cbp = child.get("ConditionsByParent") or {}
+        conds_parent = []
+        if isinstance(cbp, dict) and current_id:
+            conds_parent = cbp.get(current_id) or cbp.get(str(current_id)) or []
+        if not isinstance(conds_parent, list):
+            conds_parent = []
+
+        conds = list(conds_global) + list(conds_parent)
+        if not conds:
             continue
 
         for c in conds:
             if not isinstance(c, dict):
                 continue
-
             field = _norm_str(c.get("field") or c.get("Colonne"))
             if not field:
                 continue
 
             fcmp = _norm_cmp(field)
             if fcmp not in (_norm_cmp("NB jours depuis last action"), _norm_cmp("NB_jour_last_action")):
-                continue  # pas une condition sur NB_jour_last_action
+                continue
 
             op = _norm_str(c.get("op") or c.get("Operateur")) or "="
             val = c.get("value", c.get("Valeur"))
 
-            # valeur cible de la condition
             try:
                 target = float(val)
             except Exception:
-                # si pas castable, on ne peut pas juger l'échéance
                 continue
 
-            # 3.a) Si la condition est déjà satisfaite selon le moteur existant => Oui
-            #      (ça couvre =, >=, <=, etc.)
+            # si la condition est déjà satisfaite
             if _compare(op, nb_val, target):
                 return "Oui"
 
-            # 3.b) Sinon, règle "arrive à échéance" : écart <= 1
+            # sinon proche <= 1
             if abs(nb_val - target) <= 1.0:
                 return "Oui"
 

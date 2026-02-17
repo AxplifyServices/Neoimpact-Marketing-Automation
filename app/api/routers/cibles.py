@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, List
 
+import math
+import numpy as np
+import pandas as pd
+
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query
 from pydantic import BaseModel
+from fastapi.encoders import jsonable_encoder
 
 from app.domain.ui_facades.cibles_ui_facade import (
     list_cibles_for_ui,
@@ -30,15 +35,6 @@ STRICT_REQUIRED_COLS = ["ID_Client", "Numero_Tel", "Mail"]
 # Helpers: erreurs 400 structurées (schema strict)
 # =========================================================
 def _parse_strict_schema_error(err: Exception) -> Dict[str, Any]:
-    """
-    Convertit un ValueError/Exception (message multi-lignes) en JSON exploitable par le front.
-    Compatible avec les messages du type:
-      - "Fichier invalide (STRICT)..."
-      - "Colonnes manquantes (N): ..."
-      - "Colonnes en trop (N): ..."
-      - "colonne obligatoire manquante..."
-      - "contient des valeurs vides..."
-    """
     raw = str(err).strip()
     lines = [l.strip() for l in raw.splitlines() if l.strip()]
 
@@ -50,18 +46,16 @@ def _parse_strict_schema_error(err: Exception) -> Dict[str, Any]:
 
         # Colonnes manquantes
         if low.startswith("colonnes manquantes"):
-            # "Colonnes manquantes (12): a, b, c"
             parts = line.split(":", 1)
             if len(parts) == 2:
                 missing = [c.strip() for c in parts[1].split(",") if c.strip()]
 
         # Colonnes en trop
-        if low.startswith("colonnes en trop") or low.startswith("colonnes en trop"):
+        if low.startswith("colonnes en trop"):
             parts = line.split(":", 1)
             if len(parts) == 2:
                 extra = [c.strip() for c in parts[1].split(",") if c.strip()]
 
-    # Message principal (1ère ligne si possible)
     message = lines[0] if lines else raw
 
     detail: Dict[str, Any] = {
@@ -70,16 +64,13 @@ def _parse_strict_schema_error(err: Exception) -> Dict[str, Any]:
         "required_columns": STRICT_REQUIRED_COLS,
         "missing_columns": missing,
         "extra_columns": extra,
-        "raw": raw,  # utile pour debug (tu peux le retirer si tu veux)
+        "raw": raw,
         "hint": "Le fichier doit correspondre EXACTEMENT au schéma de la table clients (noms + colonnes).",
     }
     return detail
 
 
 def _raise_400_import_clients(e: Exception) -> None:
-    """
-    400 standardisé pour tous les imports clients.
-    """
     detail = _parse_strict_schema_error(e)
     raise HTTPException(status_code=400, detail=detail)
 
@@ -161,7 +152,6 @@ def list_cibles(
         "page_start": page_start,
         "next_page_start": page_start + nb_pages if end < len(cibles) else None,
     }
-
 
 
 @router.get("/cibles/{id_cible}")
@@ -260,8 +250,52 @@ def delete_cible(id_cible: str):
 
 @router.get("/cibles/{id_cible}/preview")
 def preview_cible(id_cible: str, limit: int = 200):
+    """
+    Preview JSON-safe:
+    - remplace NaN/Inf par None (JSON strict)
+    - convertit numpy scalars -> types python
+    - datetime -> ISO string
+    """
     df_head, total = preview_cible_for_ui(id_cible, limit=limit)
-    return {"total": total, "rows": df_head.to_dict(orient="records")}
+
+    if df_head is None:
+        return {"total": int(total or 0), "rows": []}
+
+    df2 = df_head.copy()
+
+    # Force object + NaN/NaT -> None
+    df2 = df2.astype(object).where(pd.notna(df2), None)
+
+    # Datetime -> ISO string
+    for col in df2.columns:
+        try:
+            if pd.api.types.is_datetime64_any_dtype(df_head[col]):
+                df2[col] = pd.to_datetime(df_head[col]).dt.strftime("%Y-%m-%dT%H:%M:%S")
+        except Exception:
+            pass
+
+    rows = df2.to_dict(orient="records")
+
+    # Nettoyage récursif JSON strict
+    def _clean_json(x):
+        if x is None:
+            return None
+        if isinstance(x, (np.integer,)):
+            return int(x)
+        if isinstance(x, (np.floating,)):
+            v = float(x)
+            return None if (math.isnan(v) or math.isinf(v)) else v
+        if isinstance(x, float):
+            return None if (math.isnan(x) or math.isinf(x)) else x
+        if isinstance(x, dict):
+            return {k: _clean_json(v) for k, v in x.items()}
+        if isinstance(x, list):
+            return [_clean_json(v) for v in x]
+        return x
+
+    rows = _clean_json(rows)
+
+    return {"total": int(total or 0), "rows": jsonable_encoder(rows)}
 
 
 @router.get("/clients/distinct")

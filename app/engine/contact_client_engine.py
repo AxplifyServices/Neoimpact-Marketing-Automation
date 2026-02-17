@@ -14,7 +14,8 @@ from app.domain.canaux import compteur_for_canal
 from app.domain.workflow_nav import (
     find_bloc_by_id,
     pick_next_child,
-    objective_reached,
+    is_objective_bloc,
+    objective_branch,
 )
 
 CLIENTS_CAMPAGNES_TABLE = "clients_campagnes"
@@ -81,25 +82,13 @@ def _get_liste_action_for_modele(conn: sqlite3.Connection, id_modele: str) -> Li
     return data if isinstance(data, list) else []
 
 
-def _get_modele_objectif(conn: sqlite3.Connection, id_modele: str) -> str:
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-
-    cur.execute(f"PRAGMA table_info({MODELES_TABLE})")
-    cols = [str(x[1]) for x in cur.fetchall()]
-    id_col = "id_modele" if "id_modele" in cols else ("ID_MODELE" if "ID_MODELE" in cols else "id_modele")
-
-    cur.execute(f"SELECT objectif FROM {MODELES_TABLE} WHERE {id_col} = ?", (id_modele,))
-    r = cur.fetchone()
-    return _norm_str(r["objectif"]) if r else ""
-
-
 # =========================
 # Queue append (CRC/DA/CC)
 # =========================
 def _append_one_to_queue(queue_table: str, id_campagne: str, radical_compte: str) -> None:
     """
     Insert OR REPLACE dans la queue à partir de clients_campagnes (1 seule ligne).
+    Version robuste: n'insère que les colonnes réellement présentes dans la queue.
     """
     conn = _connect()
     try:
@@ -107,31 +96,45 @@ def _append_one_to_queue(queue_table: str, id_campagne: str, radical_compte: str
             return
 
         cur = conn.cursor()
-        cur.execute(
-            f"""
-            INSERT OR REPLACE INTO {queue_table} (
-                ID_CAMPAGNE, Radical_compte, Numero_Tel, Mail,
-                date_creation_campagne, date_last_action,
-                ID_Action, Canal, Action, Etat_campagne,
-                statut_avant_campagne, statut_actuel
-            )
-            SELECT
-                cc.ID_CAMPAGNE,
-                cc.Radical_compte,
-                cl.Numero_Tel,
-                cl.Mail,
-                COALESCE(c.date_debut,'') as date_creation_campagne,
+
+        # colonnes réelles de la queue
+        cur.execute(f"PRAGMA table_info({queue_table})")
+        qcols = [str(r[1]) for r in cur.fetchall()]
+        qset = set(qcols)
+
+        # mapping colonne -> expression SQL SELECT
+        select_map = {
+            "ID_CAMPAGNE": "cc.ID_CAMPAGNE",
+            "Radical_compte": "cc.Radical_compte",
+            "Numero_Tel": "cl.Numero_Tel",
+            "Mail": "cl.Mail",
+            "date_creation_campagne": "COALESCE(c.date_debut,'')",
+            "date_last_action": """
                 CASE
                     WHEN TRIM(COALESCE(cc.arriv_eche,'')) = 'Oui' THEN '0000-01-01 00:00:00'
                     ELSE COALESCE(cc.Date_last_action,'')
-                END as date_last_action,
+                END
+            """,
+            "ID_Action": "COALESCE(cc.ID_Action,'')",
+            "Canal": "COALESCE(cc.Canal,'')",
+            "Action": "COALESCE(cc.Action,'')",
+            "Etat_campagne": "COALESCE(cc.Etat_campagne,'')",
+            # ⚠️ statut_* supprimés -> on ne les mappe plus
+        }
 
-                COALESCE(cc.ID_Action,'') as ID_Action,
-                COALESCE(cc.Canal,'') as Canal,
-                COALESCE(cc.Action,'') as Action,
-                COALESCE(cc.Etat_campagne,'') as Etat_campagne,
-                COALESCE(cc.statut_avant_campagne,'') as statut_avant_campagne,
-                COALESCE(cc.statut_actuel,'') as statut_actuel
+        # build colonnes à insérer
+        insert_cols = [c for c in select_map.keys() if c in qset]
+        if not insert_cols:
+            return
+
+        insert_sql_cols = ", ".join(insert_cols)
+        select_sql_cols = ", ".join([select_map[c] for c in insert_cols])
+
+        cur.execute(
+            f"""
+            INSERT OR REPLACE INTO {queue_table} ({insert_sql_cols})
+            SELECT
+                {select_sql_cols}
             FROM {CLIENTS_CAMPAGNES_TABLE} cc
             LEFT JOIN {CLIENTS_TABLE} cl ON cl.radical_compte = cc.Radical_compte
             LEFT JOIN {CAMPAGNES_TABLE} c ON c.id_campagne = cc.ID_CAMPAGNE
@@ -142,6 +145,7 @@ def _append_one_to_queue(queue_table: str, id_campagne: str, radical_compte: str
         conn.commit()
     finally:
         conn.close()
+
 
 
 # =========================
@@ -202,7 +206,6 @@ def _send_mail_for_one_client_and_advance(id_campagne: str, radical_compte: str,
         cur = conn.cursor()
 
         id_modele = _get_id_modele_for_campagne(conn, id_campagne) or ""
-        objectif = _get_modele_objectif(conn, id_modele) if id_modele else ""
         liste_action = _get_liste_action_for_modele(conn, id_modele) if id_modele else []
 
         for _ in range(int(max_steps)):
@@ -217,16 +220,6 @@ def _send_mail_for_one_client_and_advance(id_campagne: str, radical_compte: str,
 
             row_cc = dict(r)
             rid = int(row_cc["__rid"])
-
-            # si objectif atteint => Closed immédiat
-            if objective_reached(row_cc.get("statut_actuel"), objectif):
-                cur.execute(
-                    f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET Action='Closed', Canal='Closed' WHERE rowid=?",
-                    (rid,),
-                )
-                conn.commit()
-                summary["stopped_reason"] = "objective_reached_closed"
-                break
 
             canal = _norm_str(row_cc.get("Canal"))
             action = _norm_str(row_cc.get("Action"))
@@ -297,8 +290,15 @@ def _send_mail_for_one_client_and_advance(id_campagne: str, radical_compte: str,
                 break
 
             new_id = _norm_str(nxt.get("ID"))
-            new_canal = _norm_str(nxt.get("Canal"))
-            new_action = _norm_str(nxt.get("Action"))
+
+            # si next est un bloc objectif -> on force Canal/Action
+            if is_objective_bloc(nxt):
+                new_canal = "Objectif"
+                new_action = "Objectif"
+            else:
+                new_canal = _norm_str(nxt.get("Canal"))
+                new_action = _norm_str(nxt.get("Action"))
+
 
             if not new_id or not new_action:
                 cur.execute(f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET Action=? WHERE rowid=?", ("En attente", rid))
@@ -390,7 +390,6 @@ def apply_result_from_queue(row: Dict[str, Any], resultat_label: str, queue_tabl
 
         # charger modèle
         id_modele = _get_id_modele_for_campagne(conn, id_campagne) or ""
-        objectif = _get_modele_objectif(conn, id_modele) if id_modele else ""
         liste_action = _get_liste_action_for_modele(conn, id_modele) if id_modele else []
 
         # re-read
@@ -400,35 +399,33 @@ def apply_result_from_queue(row: Dict[str, Any], resultat_label: str, queue_tabl
             return {"ok": False, "error": "row_missing_after_update"}
         row_after = dict(r2)
 
-        # objectif atteint ? => Closed direct
-        if objective_reached(row_after.get("statut_actuel"), objectif):
-            cur.execute(
-                f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET Action='Closed', Canal='Closed' WHERE rowid=?",
-                (rid,),
-            )
+        # navigation fils (NEW)
+        current = find_bloc_by_id(liste_action, _norm_str(row_after.get("ID_Action")))
+        nxt = pick_next_child(liste_action, current, row_after) if current else None
+
+        if not nxt:
+            cur.execute(f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET Action=? WHERE rowid=?", ("En attente", rid))
             conn.commit()
         else:
-            # navigation fils
-            current = find_bloc_by_id(liste_action, _norm_str(row_after.get("ID_Action")))
-            nxt = pick_next_child(liste_action, current, row_after) if current else None
+            new_id = _norm_str(nxt.get("ID"))
 
-            if not nxt:
-                cur.execute(f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET Action=? WHERE rowid=?", ("En attente", rid))
-                conn.commit()
+            if is_objective_bloc(nxt):
+                new_canal = "Objectif"
+                new_action = "Objectif"
             else:
-                new_id = _norm_str(nxt.get("ID"))
                 new_canal = _norm_str(nxt.get("Canal"))
                 new_action = _norm_str(nxt.get("Action"))
 
-                if not new_id or not new_action:
-                    cur.execute(f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET Action=? WHERE rowid=?", ("En attente", rid))
-                    conn.commit()
-                else:
-                    cur.execute(
-                        f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET ID_Action=?, Canal=?, Action=? WHERE rowid=?",
-                        (new_id, new_canal, new_action, rid),
-                    )
-                    conn.commit()
+            if not new_id or not new_action:
+                cur.execute(f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET Action=? WHERE rowid=?", ("En attente", rid))
+                conn.commit()
+            else:
+                cur.execute(
+                    f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET ID_Action=?, Canal=?, Action=? WHERE rowid=?",
+                    (new_id, new_canal, new_action, rid),
+                )
+                conn.commit()
+
 
         # suppression queue
         cur.execute(f"DELETE FROM {queue_table} WHERE ID_CAMPAGNE=? AND Radical_compte=?", (id_campagne, radical))
@@ -463,6 +460,10 @@ def route_after_update(id_campagne: str, radical_compte: str) -> Dict[str, Any]:
         cc = dict(r)
         canal = _norm_str(cc.get("Canal"))
         action = _norm_str(cc.get("Action"))
+        # NEW: un bloc objectif est une "gate" -> pas de routage queue/mail
+        if canal == "Objectif" or action == "Objectif":
+            return {"ok": True, "routed_to": "none", "action": action, "canal": canal}
+
     finally:
         conn.close()
 

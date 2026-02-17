@@ -59,17 +59,31 @@ def get_campagnes_affichables_for_ui() -> List[Dict[str, Any]]:
 # =========================
 def get_modele_choices_for_ui() -> Tuple[List[str], Dict[str, str]]:
     """
-    Reproduit exactement ton _modele_choices() actuel, mais côté façade.
+    Choix modèles pour l'UI.
     """
     df = load_modeles_db()
     if df is None or df.empty:
         return [], {}
+
+    # colonnes possibles (nouveau / legacy)
+    col_id = "id_modele" if "id_modele" in df.columns else ("ID_MODELE" if "ID_MODELE" in df.columns else None)
+    col_nom = "nom_modele" if "nom_modele" in df.columns else ("Nom_modele" if "Nom_modele" in df.columns else None)
+
+    if not col_id:
+        return [], {}
+
     labels: List[str] = []
     mapping: Dict[str, str] = {}
+
     for _, r in df.iterrows():
-        lbl = f"{r['ID_MODELE']} — {r['Nom_modele']}"
+        mid = _safe_str(r.get(col_id)).strip()
+        if not mid:
+            continue
+        mnom = _safe_str(r.get(col_nom)).strip() if col_nom else ""
+        lbl = f"{mid} — {mnom}" if mnom else mid
         labels.append(lbl)
-        mapping[lbl] = r["ID_MODELE"]
+        mapping[lbl] = mid
+
     return labels, mapping
 
 
@@ -92,12 +106,9 @@ def get_cible_choices_for_ui() -> Tuple[List[str], Dict[str, str]]:
 # =========================
 def get_modele_graph_payload_for_ui(id_modele: str) -> Optional[Dict[str, Any]]:
     """
-    Remplace le bloc UI :
-      dfm = load_modeles_db()
-      row = dfm[dfm["ID_MODELE"] == id_modele]
-      parse liste_action / graphe_json
-
-    Retourne un payload prêt à afficher côté UI.
+    Payload UI pour afficher le graphe d'un modèle.
+    Compatible nouveau schéma (id_modele/nom_modele/liste_action/graphe_json)
+    + fallback legacy (ID_MODELE/Nom_modele/variable_cible/objectif).
     """
     if not id_modele:
         return None
@@ -106,7 +117,15 @@ def get_modele_graph_payload_for_ui(id_modele: str) -> Optional[Dict[str, Any]]:
     if dfm is None or dfm.empty:
         return None
 
-    row = dfm[dfm["ID_MODELE"] == id_modele]
+    # colonnes possibles
+    col_id = "id_modele" if "id_modele" in dfm.columns else ("ID_MODELE" if "ID_MODELE" in dfm.columns else None)
+
+    if not col_id:
+        return None
+
+    # match robuste en string
+    s = dfm[col_id].astype(str).str.strip()
+    row = dfm[s == str(id_modele).strip()]
     if row.empty:
         return None
 
@@ -116,9 +135,8 @@ def get_modele_graph_payload_for_ui(id_modele: str) -> Optional[Dict[str, Any]]:
     graphe_json = _safe_json_load(r.get("graphe_json", ""), {"nodes": [], "edges": []})
 
     return {
-        "id_modele": id_modele,
-        "variable_cible": r.get("variable_cible", "") or "",
-        "objectif": r.get("Objectif", "") or "",
+        "id_modele": str(id_modele).strip(),
         "liste_action": liste_action if isinstance(liste_action, list) else [],
         "graphe_json": graphe_json if isinstance(graphe_json, dict) else {"nodes": [], "edges": []},
     }
+

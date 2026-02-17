@@ -272,10 +272,16 @@ def main():
     k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
     k1.metric("Clients transmis", int(kpis.get("transmis", 0)))
     k2.metric("Clients contactés", int(kpis.get("contactes_total", 0)))
-    k3.metric("Closing", int(kpis.get("closing_total", 0)))
+
+    # ✅ libellés UI: conversion (backend garde closing_total pour compat)
+    k3.metric("Conversions", int(kpis.get("closing_total", 0)))
+
     k4.metric("Total traitements", int(kpis.get("traitements_total", 0)))
     k5.metric("Taux contact", _pct(kpis.get("taux_contact_total", 0.0)))
-    k6.metric("Taux closing / affectés", _pct(kpis.get("taux_closing_sur_affectes", 0.0)))
+
+    # ✅ taux conversion / affectés (backend garde taux_closing_sur_affectes)
+    k6.metric("Taux conversion / affectés", _pct(kpis.get("taux_closing_sur_affectes", 0.0)))
+
     k7.metric("Arrivés à échéance", int(kpis.get("arriv_eche", 0)))
 
     # ---------------------------------------------------------
@@ -284,17 +290,21 @@ def main():
     ch1, ch2, ch3 = st.columns([3, 3, 4], vertical_alignment="top")
 
     with ch1:
-        st.markdown("**Transmis & Closed par région**")
+        st.markdown("**Transmis & Conversions par région**")
         if region_mix.empty:
             st.info("Aucune donnée.")
         else:
             rm = region_mix.copy()
+            # NB: backend renvoie encore colonne "Closed" (compat) => conversions
             melted = rm.melt(
                 id_vars=["Region"],
                 value_vars=["Transmis", "Closed"],
                 var_name="Metric",
                 value_name="Value",
             )
+            # remap label affiché
+            melted["Metric"] = melted["Metric"].replace({"Closed": "Conversions"})
+
             chart = (
                 alt.Chart(melted)
                 .mark_bar()
@@ -328,18 +338,21 @@ def main():
             st.altair_chart(chart, use_container_width=True)
 
     with ch3:
-        st.markdown("**Traitements/jour & Closed/jour**")
+        st.markdown("**Traitements/jour & Conversions/jour**")
         if daily.empty:
             st.info("Aucune donnée.")
         else:
             dd = daily.copy()
             dd["Date"] = pd.to_datetime(dd["Date"])
+            # NB: backend renvoie encore colonne "Closed" (compat) => conversions
             melted = dd.melt(
                 id_vars=["Date"],
                 value_vars=["Traitements", "Closed"],
                 var_name="Metric",
                 value_name="Value",
             )
+            melted["Metric"] = melted["Metric"].replace({"Closed": "Conversions"})
+
             chart = (
                 alt.Chart(melted)
                 .mark_line(point=True)
@@ -365,9 +378,17 @@ def main():
             st.info("Aucune donnée.")
         else:
             fmt = by_channel.copy()
-            for c in ["Taux_closing_sur_traitements", "Taux_contact_sur_transmis"]:
+
+            # ✅ renommer la colonne d'affichage si elle existe
+            if "Closing" in fmt.columns:
+                fmt = fmt.rename(columns={"Closing": "Conversions"})
+            if "Taux_closing_sur_traitements" in fmt.columns:
+                fmt = fmt.rename(columns={"Taux_closing_sur_traitements": "Taux_conversion_sur_traitements"})
+
+            for c in ["Taux_conversion_sur_traitements", "Taux_contact_sur_transmis"]:
                 if c in fmt.columns:
                     fmt[c] = fmt[c].apply(lambda x: _pct(x))
+
             st.dataframe(fmt, use_container_width=True, height=260)
 
     with b2:
@@ -376,7 +397,7 @@ def main():
             _plot_graph_network(payload["graph"], height=300)
         else:
             st.markdown("**Graphe campagne**")
-            st.info("Sélectionne une seule campagne pour afficher le graphe complet avec les counts dans les nœuds.")
+            st.info("Sélectionne une seule campagne pour afficher le graphe complet avec les counts (et conversions) dans les nœuds.")
 
 
 # Standalone run (optional)

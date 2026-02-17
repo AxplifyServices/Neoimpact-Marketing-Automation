@@ -17,7 +17,15 @@ except Exception:
 
 from app.storage.db import DB_PATH
 from app.domain.canaux import resultats_for_canal
-from app.domain.workflow_nav import find_bloc_by_id, pick_next_child, objective_reached
+from app.domain.workflow_nav import (
+    find_bloc_by_id,
+    pick_next_child,
+    is_objective_bloc,
+    objective_branch,
+)
+
+
+
 
 
 CLIENTS_CAMPAGNES_TABLE = "clients_campagnes"
@@ -146,18 +154,6 @@ def _get_liste_action_for_modele(conn: sqlite3.Connection, id_modele: str) -> Li
     return data if isinstance(data, list) else []
 
 
-def _get_objectif_for_modele(conn: sqlite3.Connection, id_modele: str) -> str:
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-
-    cur.execute(f"PRAGMA table_info({MODELES_TABLE})")
-    cols = [str(x[1]) for x in cur.fetchall()]
-    id_col = "id_modele" if "id_modele" in cols else ("ID_MODELE" if "ID_MODELE" in cols else "id_modele")
-
-    cur.execute(f"SELECT objectif FROM {MODELES_TABLE} WHERE {id_col} = ?", (id_modele,))
-    r = cur.fetchone()
-    return _norm_str(r["objectif"]) if r else ""
-
 
 # =========================================================
 # Sous-action 1 : sélectionner les lignes candidates Mail (avec rowid unique)
@@ -224,25 +220,18 @@ def _advance_workflow_after_mail_by_rid(
     rid: int,
     row_after: Dict[str, Any],
     liste_action: List[Dict[str, Any]],
-    objectif: str,
 ) -> bool:
     """
-    True si on a modifié Action/Canal/ID_Action ou Action->En attente/Closed.
+    NEW:
+    - Navigation via pick_next_child (support Parents / ConditionsByParent / objectif)
+    - Si le bloc courant est objectif:
+        * force Canal/Action='Objectif'
+        * si branche Oui => conversion=1 (si colonne existe)
+    - Si aucun next => Action='En attente'
     """
     prev_action = _norm_str(row_after.get("Action"))
     prev_canal = _norm_str(row_after.get("Canal"))
     prev_id_action = _norm_str(row_after.get("ID_Action"))
-
-    # objectif atteint -> Closed
-    if objective_reached(row_after.get("statut_actuel"), objectif):
-        if prev_action == "Closed":
-            return False
-        cur = conn.cursor()
-        cur.execute(
-            f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET Action='Closed', Canal='Closed' WHERE rowid=?",
-            (int(rid),),
-        )
-        return True
 
     current_bloc = find_bloc_by_id(liste_action, prev_id_action)
     if not current_bloc:
@@ -252,6 +241,45 @@ def _advance_workflow_after_mail_by_rid(
         cur.execute(f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET Action=? WHERE rowid=?", ("En attente", int(rid)))
         return True
 
+    # 1) Si bloc objectif => afficher Objectif + conversion si Oui
+    if is_objective_bloc(current_bloc):
+        cur = conn.cursor()
+        cur_id = _norm_str(current_bloc.get("ID")) or prev_id_action  # sécurité
+
+        # ✅ UPDATE atomique : on synchronise ID_Action + Canal + Action ensemble
+        cur.execute(
+            f"""
+            UPDATE {CLIENTS_CAMPAGNES_TABLE}
+            SET ID_Action = ?, Canal = 'Objectif', Action = 'Objectif'
+            WHERE rowid = ?
+            """,
+            (cur_id, int(rid)),
+        )
+
+        # conversion=1 si branche Oui (si colonne existe)
+        try:
+            cur.execute(f"PRAGMA table_info({CLIENTS_CAMPAGNES_TABLE})")
+            cols = {r[1] for r in cur.fetchall()}
+        except Exception:
+            cols = set()
+
+        if "conversion" in cols:
+            if objective_branch(current_bloc, row_after) == "Oui":
+                cur.execute(
+                    f"""
+                    UPDATE {CLIENTS_CAMPAGNES_TABLE}
+                    SET conversion=1
+                    WHERE rowid=? AND COALESCE(conversion,0) <> 1
+                    """,
+                    (int(rid),),
+                )
+
+        conn.commit()
+
+        # NOTE: on ne return pas ici, car tu veux ensuite naviguer vers le next
+        # (ta logique actuelle navigue quand même après un bloc objectif)
+
+    # 2) Navigation NEW
     nxt = pick_next_child(liste_action, current_bloc, row_after)
 
     if not nxt:
@@ -262,8 +290,14 @@ def _advance_workflow_after_mail_by_rid(
         return True
 
     new_id = _norm_str(nxt.get("ID"))
-    new_canal = _norm_str(nxt.get("Canal"))
-    new_action = _norm_str(nxt.get("Action"))
+
+    # si next est objectif => Canal/Action = Objectif
+    if is_objective_bloc(nxt):
+        new_canal = "Objectif"
+        new_action = "Objectif"
+    else:
+        new_canal = _norm_str(nxt.get("Canal"))
+        new_action = _norm_str(nxt.get("Action"))
 
     if not new_id or not new_action:
         if prev_action == "En attente":
@@ -285,6 +319,8 @@ def _advance_workflow_after_mail_by_rid(
         (new_id, new_canal, new_action, int(rid)),
     )
     return True
+
+
 
 
 # =========================================================
@@ -320,7 +356,6 @@ def run_mail_pass(limit_rows: int = 5000, seen_payloads: Optional[Set[Tuple[str,
             return stats
 
         liste_action_cache: Dict[str, List[Dict[str, Any]]] = {}
-        objectif_cache: Dict[str, str] = {}
         now = _now_iso()
 
         touched_rids: List[int] = []
@@ -337,7 +372,6 @@ def run_mail_pass(limit_rows: int = 5000, seen_payloads: Optional[Set[Tuple[str,
             if id_campagne not in liste_action_cache:
                 id_modele = _get_id_modele_for_campagne(conn, id_campagne) or ""
                 liste_action_cache[id_campagne] = _get_liste_action_for_modele(conn, id_modele) if id_modele else []
-                objectif_cache[id_campagne] = _get_objectif_for_modele(conn, id_modele) if id_modele else ""
 
             liste_action = liste_action_cache.get(id_campagne) or []
 
@@ -391,9 +425,8 @@ def run_mail_pass(limit_rows: int = 5000, seen_payloads: Optional[Set[Tuple[str,
             row_after = dict(r)
             id_campagne = _norm_str(row_after.get("ID_CAMPAGNE"))
             liste_action = liste_action_cache.get(id_campagne) or []
-            objectif = objectif_cache.get(id_campagne) or ""
+            changed = _advance_workflow_after_mail_by_rid(conn, rid, row_after, liste_action)
 
-            changed = _advance_workflow_after_mail_by_rid(conn, rid, row_after, liste_action, objectif)
             if changed:
                 stats["workflow_changed"] += 1
 

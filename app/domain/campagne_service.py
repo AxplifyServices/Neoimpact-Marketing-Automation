@@ -17,7 +17,7 @@ from app.storage.clients_campagnes_store_sqlite import (
     set_clients_etat_for_campagne,
 )
 from app.storage.cibles_store_sqlite import load_clients_df_for_cible
-from app.storage.modele_store_sqlite import get_modele_by_id
+from app.storage.modele_store_sqlite import get_modele_dict
 
 # NEW: échéance (arriv_eche)
 from app.domain.workflow_nav import find_bloc_by_id, arrive_echeance  # retourne dict
@@ -97,119 +97,6 @@ def _remove_rupture_relation_strict(df: pd.DataFrame) -> Tuple[pd.DataFrame, int
     return df.loc[~mask].copy(), removed
 
 
-def _filter_objectif_deja_atteint(df: pd.DataFrame, variable_cible: str, objectif: str) -> Tuple[pd.DataFrame, int]:
-    """
-    A la création de campagne, ne pas rajouter les lignes qui ont déjà atteint l'objectif.
-
-    Compat:
-    - objectif "simple" (legacy): exclure df[variable_cible] == objectif (normalisé)
-    - objectif "multi" JSON: {"op":"AND|OR","items":[{...},...]} => exclure si l'expression est déjà vraie
-    """
-    obj_raw = _norm_str(objectif).strip()
-    if not obj_raw:
-        return df, 0
-
-    # --- helper: try parse JSON objectif
-    expr = None
-    if obj_raw.startswith("{") or obj_raw.startswith("["):
-        try:
-            expr = json.loads(obj_raw)
-        except Exception:
-            expr = None
-
-    # =========================
-    # ✅ Multi-objectif JSON
-    # =========================
-    if isinstance(expr, dict) and "op" in expr and "items" in expr:
-        op = _norm_str(expr.get("op")).upper()
-        items = expr.get("items")
-
-        if op not in ("AND", "OR") or not isinstance(items, list) or len(items) == 0:
-            return df, 0
-
-        masks: List[pd.Series] = []
-
-        for it in items:
-            if not isinstance(it, dict):
-                continue
-
-            var = _norm_str(it.get("variable"))
-            typ = _norm_str(it.get("type")).lower()
-
-            if not var or var not in df.columns:
-                # si variable absente => item non évaluable => AND => bloque, OR => ignore
-                if op == "AND":
-                    masks.append(pd.Series([False] * len(df), index=df.index))
-                continue
-
-            # item catégoriel
-            if typ == "cat":
-                val = _norm_str(it.get("value"))
-                if not val:
-                    if op == "AND":
-                        masks.append(pd.Series([False] * len(df), index=df.index))
-                    continue
-                s = df[var].apply(_norm_cmp)
-                masks.append(s.eq(_norm_cmp(val)))
-                continue
-
-            # item numérique
-            if typ == "num":
-                mn = it.get("min", None)
-                mx = it.get("max", None)
-                s_num = pd.to_numeric(df[var], errors="coerce")
-
-                m = pd.Series([True] * len(df), index=df.index)
-                if mn is not None and str(mn).strip() != "":
-                    try:
-                        m = m & (s_num >= float(mn))
-                    except Exception:
-                        m = m & False
-                if mx is not None and str(mx).strip() != "":
-                    try:
-                        m = m & (s_num <= float(mx))
-                    except Exception:
-                        m = m & False
-
-                masks.append(m.fillna(False))
-                continue
-
-            # type inconnu
-            if op == "AND":
-                masks.append(pd.Series([False] * len(df), index=df.index))
-
-        if not masks:
-            return df, 0
-
-        if op == "AND":
-            final_mask = masks[0]
-            for m in masks[1:]:
-                final_mask = final_mask & m
-        else:  # OR
-            final_mask = masks[0]
-            for m in masks[1:]:
-                final_mask = final_mask | m
-
-        removed = int(final_mask.sum())
-        return df.loc[~final_mask].copy(), removed
-
-    # =========================
-    # ✅ Legacy (objectif simple)
-    # =========================
-    var = _norm_str(variable_cible)
-    obj = _norm_str(objectif)
-    if not var or not obj:
-        return df, 0
-    if var not in df.columns:
-        return df, 0
-
-    s = df[var].apply(_norm_cmp)
-    mask = s.eq(_norm_cmp(obj))
-    removed = int(mask.sum())
-    return df.loc[~mask].copy(), removed
-
-
-
 def _safe_json_loads(s: str, default):
     try:
         return json.loads(s)
@@ -218,30 +105,35 @@ def _safe_json_loads(s: str, default):
 
 
 def _find_root_bloc(liste_action: list) -> dict | None:
-    if not isinstance(liste_action, list):
+    """
+    NEW format:
+      - root = bloc dont Parents est [] ou absent
+    Fallback legacy:
+      - Bloc_mere == 'oui'
+      - ID == '1'
+    """
+    if not isinstance(liste_action, list) or not liste_action:
         return None
+
+    # 1) NEW: Parents vide
+    for b in liste_action:
+        if not isinstance(b, dict):
+            continue
+        parents = b.get("Parents")
+        if parents is None or (isinstance(parents, list) and len(parents) == 0):
+            return b
+
+    # 2) Legacy: Bloc_mere / Bloc_mère
     for b in liste_action:
         if isinstance(b, dict) and _norm_str(b.get("Bloc_mere")).lower() == "oui":
             return b
+
+    # 3) Legacy fallback: ID==1
     for b in liste_action:
         if isinstance(b, dict) and _norm_str(b.get("ID")) == "1":
             return b
-    return liste_action[0] if liste_action else None
 
-
-def _fill_outputs_for_campaign(id_campagne: str) -> Dict[str, int]:
-    """
-    Remplit les tables output (crc_input / action_vers_cc / action_vers_da).
-    """
-    from app.storage.crc_input_store_sqlite import fill_crc_input_from_clients_campagnes
-    from app.storage.action_vers_cc_store_sqlite import fill_action_vers_cc_from_clients_campagnes
-    from app.storage.action_vers_da_store_sqlite import fill_action_vers_da_from_clients_campagnes
-
-    n_crc = fill_crc_input_from_clients_campagnes(id_campagne)
-    n_cc = fill_action_vers_cc_from_clients_campagnes(id_campagne)
-    n_da = fill_action_vers_da_from_clients_campagnes(id_campagne)
-
-    return {"crc": int(n_crc), "cc": int(n_cc), "da": int(n_da)}
+    return liste_action[0]
 
 
 def _is_first_action_mail(canal_init: str, action_init: str) -> bool:
@@ -265,7 +157,6 @@ def _delete_outputs_for_campagne(id_campagne: str) -> Dict[str, int]:
     Supprime les lignes liées à la campagne dans les tables CRC / CC / DA.
     Retourne les compteurs supprimés.
     """
-    # noms attendus (d'après tes stores)
     tables = {
         "crc": "crc_input",
         "cc": "vers_cc",
@@ -290,6 +181,66 @@ def _delete_outputs_for_campagne(id_campagne: str) -> Dict[str, int]:
         conn.close()
 
 
+def _extract_final_queue_routing(route_result: Dict[str, Any]) -> str:
+    """
+    route_after_update peut retourner:
+      - routed_to: crc_input / vers_cc / vers_da / none
+      - routed_to: mail + post_mail: {...}
+    On veut compter la queue finale.
+    """
+    rt = (route_result or {}).get("routed_to") or ""
+    rt = str(rt).strip()
+
+    if rt == "mail":
+        post = (route_result or {}).get("post_mail") or {}
+        return _extract_final_queue_routing(post)
+
+    return rt
+
+
+def _route_initial_queues_for_campaign(id_campagne: str) -> Dict[str, int]:
+    """
+    Routage initial (métier) pour tous les clients de la campagne via contact_client_engine.route_after_update.
+    Important: on nettoie les queues avant.
+    """
+    from app.engine.contact_client_engine import route_after_update
+
+    # anti-doublons (sécurité)
+    _delete_outputs_for_campagne(id_campagne)
+
+    # liste des clients
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT Radical_compte
+            FROM clients_campagnes
+            WHERE ID_CAMPAGNE = ?
+            """,
+            (id_campagne,),
+        )
+        radicals = [str(r["Radical_compte"]).strip() for r in cur.fetchall() if str(r["Radical_compte"]).strip()]
+    finally:
+        conn.close()
+
+    counts = {"crc": 0, "cc": 0, "da": 0}
+
+    for rc in radicals:
+        res = route_after_update(id_campagne, rc)
+        final_rt = _extract_final_queue_routing(res)
+
+        if final_rt == "crc_input":
+            counts["crc"] += 1
+        elif final_rt == "vers_cc":
+            counts["cc"] += 1
+        elif final_rt == "vers_da":
+            counts["da"] += 1
+
+    return counts
+
+
 # =========================================================
 def create_campagne(
     nom_campagne: str,
@@ -305,28 +256,54 @@ def create_campagne(
 
     Règles appliquées à la création :
     - Exclure STATUT_CLIENT == 'Rupture de relation'
-    - Exclure les clients ayant déjà atteint l'objectif (variable_cible / objectif)
     - Si la campagne démarre "En cours":
         - si la première action est Mail => exécuter mail meta-loop immédiatement
-        - puis remplir les outputs CRC/CC/DA (état post-mail)
+        - puis router initialement vers CRC/CC/DA via route_after_update (métier)
     """
 
     # 0) Etat campagne
     if not etat_campagne:
         etat_campagne = _infer_etat(date_debut, date_fin)
 
-    # 1) Charger modèle
-    modele = get_modele_by_id(id_modele)
+    # 1) Charger modèle (nouveau schéma / ancien toléré)
+    modele = get_modele_dict(id_modele) or {}
     if not modele:
         raise ValueError(f"Modèle introuvable: {id_modele}")
 
+    raw_liste = modele.get("liste_action") or "[]"
+    if isinstance(raw_liste, list):
+        liste_action = raw_liste
+    else:
+        try:
+            liste_action = json.loads(str(raw_liste))
+        except Exception:
+            liste_action = []
+    if not isinstance(liste_action, list):
+        liste_action = []
+
+    # graphe_json optionnel (pas utilisé ici)
+    raw_graph = modele.get("graphe_json") or "{}"
+    if isinstance(raw_graph, dict):
+        graphe_json = raw_graph
+    else:
+        try:
+            graphe_json = json.loads(str(raw_graph))
+        except Exception:
+            graphe_json = {}
+    _ = graphe_json  # gardé pour compat/cohérence
+
     # 2) Root bloc (ID_Action/Canal/Action init)
-    liste_action = _safe_json_loads(modele.get("liste_action") or "[]", [])
     root = _find_root_bloc(liste_action) or {}
 
     id_action_init = _norm_str(root.get("ID")) or "1"
     canal_init = _norm_str(root.get("Canal")) or "Appel"
-    action_init = _norm_str(root.get("Action")) or "Contacter"
+    action_init = _norm_str(root.get("Action")) or "Appeler"
+
+    # Si le root est un bloc objectif => on force Canal/Action "Objectif"
+    from app.domain.workflow_nav import is_objective_bloc
+    if is_objective_bloc(root):
+        canal_init = "Objectif"
+        action_init = "Objectif"
 
     # Bloc courant initial (pour calcul arriv_eche)
     current_bloc_init = find_bloc_by_id(liste_action, id_action_init) or root
@@ -337,12 +314,6 @@ def create_campagne(
 
     # 4) Filtre rupture relation
     df, removed_rupture = _remove_rupture_relation_strict(df)
-
-    # 5) Filtre objectif déjà atteint
-    variable_cible = _norm_str(modele.get("variable_cible"))
-    objectif = _norm_str(modele.get("objectif"))
-    df, removed_obj = _filter_objectif_deja_atteint(df, variable_cible, objectif)
-
     nb_apres = int(len(df))
 
     # 6) Création campagne
@@ -359,7 +330,6 @@ def create_campagne(
 
     # 7) Préparer lignes clients_campagnes
     radical_col = _detect_radical_col(df)
-    statut_col = _detect_statut_col(df)
 
     rows: List[Dict[str, Any]] = []
     today_iso = date.today().isoformat()
@@ -369,14 +339,10 @@ def create_campagne(
         if not rc:
             continue
 
-        statut_avant = _norm_str(r.get(statut_col)) if statut_col else ""
-
         row_cc = {
             "Nom_campagne": nom_campagne,
             "ID_CAMPAGNE": id_campagne,
             "Radical_compte": rc,
-            "statut_avant_campagne": statut_avant,
-            "statut_actuel": statut_avant,
             "Etat_campagne": etat_campagne,
             "NB_jour_campagne": 0,
             "ID_Action": id_action_init,
@@ -391,8 +357,9 @@ def create_campagne(
             "NB_sms": 0,
             "NB_message": 0,
             "NB_approche_commercial": 0,
-            "date_debut_campagne": _norm_str(date_debut)[:10],  # début "logique" de la campagne
+            "date_debut_campagne": _norm_str(date_debut)[:10],
             "nb_jour_debut_campagne": 0,
+            "conversion": 0,
         }
 
         # arriv_eche : Oui/Non selon les conditions de type NB_jour_last_action dans les fils
@@ -414,21 +381,19 @@ def create_campagne(
     output_counts = {"crc": 0, "cc": 0, "da": 0}
     mail_summary = None
 
-    # 10) Si "En cours":
+    # 10) Si "En cours" uniquement: mails init puis routage métier (queues)
     if etat_campagne == "En cours":
         # (A) Si 1ère action = Mail => traiter immédiatement
         if _is_first_action_mail(canal_init, action_init):
             try:
-                # nouveau mail engine (méta boucle)
                 from app.engine.traitement_mail_engine import run_mail_meta_loop
-
                 mail_summary = run_mail_meta_loop(max_passes=20, limit_rows_per_pass=9999)
             except Exception as e:
                 mail_summary = {"error": "mail_meta_loop_failed", "details": str(e)}
 
-        # (B) Remplir outputs APRÈS le traitement mail (état post-mail)
+        # (B) Routage initial (métier) vers CRC/CC/DA
         try:
-            output_counts = _fill_outputs_for_campaign(id_campagne)
+            output_counts = _route_initial_queues_for_campaign(id_campagne)
         except Exception:
             output_counts = {"crc": 0, "cc": 0, "da": 0}
 
@@ -437,7 +402,6 @@ def create_campagne(
         "nb_cible_initial": nb_init,
         "nb_apres_filtrage": nb_apres,
         "nb_exclus_rupture": int(removed_rupture),
-        "nb_exclus_objectif_atteint": int(removed_obj),
         "nb_clients_insérés": int(len(rows)),
         "etat_campagne": etat_campagne,
         "id_action_initial": id_action_init,
@@ -452,8 +416,8 @@ def annuler_campagne(id_campagne: str) -> Dict[str, Any]:
     """
     Annule une campagne et supprime automatiquement les lignes liées dans:
     - crc_input
-    - action_vers_cc
-    - action_vers_da
+    - vers_cc
+    - vers_da
     """
     update_etat(id_campagne, "Annulée")
     set_clients_etat_for_campagne(id_campagne, "Annulée")
@@ -523,12 +487,11 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
         - supprime les anciennes queues de cette campagne
         - NEW: sync nouveaux clients depuis la cible (INSERT ONLY)
         - traite les mails si nécessaire (au moins un client a Canal=Mail)
-        - remplit à nouveau les queues (crc_input / vers_cc / vers_da)
+        - route vers queues CRC/CC/DA via route_after_update (métier)
     - si Planifiée ou Terminée:
         - supprime les queues de cette campagne (sécurité)
         - ne remplit rien
     """
-    # lecture campagne
     from app.storage.campagnes_store_sqlite import get_campagne
 
     c = get_campagne(id_campagne) or {}
@@ -550,7 +513,7 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
     update_etat(id_campagne, new_etat)
     set_clients_etat_for_campagne(id_campagne, new_etat)
 
-    # toujours nettoyer queues associées avant décision
+    # nettoyer queues associées avant décision
     deleted = {"crc": 0, "cc": 0, "da": 0}
     try:
         deleted = _delete_outputs_for_campagne(id_campagne)
@@ -566,40 +529,25 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
         try:
             id_cible = _norm_str(c.get("id_cible") or c.get("ID_CIBLE") or c.get("cible_id"))
             if id_cible:
-                # la fonction est dans batch_manuel (tu l'as ajoutée là-bas)
                 from app.scripts.batch_manuel import sync_new_clients_from_cible_insert_only
 
-                # ouverture connexion DB (on essaie _connect si présent, sinon sqlite3/DB_PATH)
-                conn = None
+                conn = sqlite3.connect(DB_PATH)
                 try:
-                    try:
-                        conn = _connect()  # si ton module a déjà ce helper
-                    except Exception:
-                        import sqlite3
-                        conn = sqlite3.connect(DB_PATH)  # si DB_PATH existe dans ce module
-
                     new_clients_added = sync_new_clients_from_cible_insert_only(
                         conn,
                         id_campagne=_norm_str(id_campagne),
                         id_cible=id_cible,
-                        # ⚠️ valeurs initiales comme dans ton batch (tu peux les rendre dynamiques ensuite)
                         id_action_initiale="2",
                         canal_initial="Appel",
                         action_initial="Appeler",
                     )
                     conn.commit()
                 finally:
-                    try:
-                        if conn is not None:
-                            conn.close()
-                    except Exception:
-                        pass
+                    conn.close()
 
-                # Important: aligner l'état des nouveaux entrants aussi
                 set_clients_etat_for_campagne(id_campagne, new_etat)
 
         except Exception:
-            # On ne bloque pas l'activation si le sync échoue
             new_clients_added = 0
 
         # si au moins une ligne de cette campagne est en Mail -> traiter mails
@@ -611,9 +559,9 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
             except Exception as e:
                 mail_summary = {"error": "mail_meta_loop_failed", "details": str(e)}
 
-        # remplir queues (après traitement mail)
+        # route vers queues (métier) après traitement mail
         try:
-            output_counts = _fill_outputs_for_campaign(id_campagne)
+            output_counts = _route_initial_queues_for_campaign(id_campagne)
         except Exception:
             output_counts = {"crc": 0, "cc": 0, "da": 0}
 
@@ -622,7 +570,136 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
         "ok": True,
         "etat": new_etat,
         "deleted_before_refill": deleted,
-        "new_clients_added_from_cibles": new_clients_added,  # NEW
+        "new_clients_added_from_cibles": new_clients_added,
         "mail_meta_loop": mail_summary,
         "output_insert": output_counts,
     }
+
+def sync_new_clients_from_cible_for_campaign(conn: sqlite3.Connection, id_campagne: str) -> Dict[str, Any]:
+
+    """
+    Insert-only :
+    - Recalcule la cible (via load_clients_df_for_cible + filtres)
+    - Ajoute les nouveaux membres dans clients_cibles (+ volume)
+    - Ajoute les nouveaux dans clients_campagnes en respectant le modèle (root bloc)
+    """
+    from app.storage.campagnes_store_sqlite import get_campagne
+    from app.storage.clients_cibles_store_sqlite import (
+        insert_only_members,
+        update_cible_volume_if_column_exists,
+    )
+    from app.domain.workflow_nav import is_objective_bloc
+
+    c = get_campagne(id_campagne) or {}
+    id_cible = _norm_str(c.get("id_cible") or c.get("ID_CIBLE") or c.get("cible_id"))
+    id_modele = _norm_str(c.get("id_modele") or c.get("ID_MODELE"))
+
+    if not id_cible or not id_modele:
+        return {"ok": False, "error": "campagne missing id_cible or id_modele", "new_cible_members": 0, "new_clients_campagne": 0}
+
+    # 1) Charger modèle -> root bloc (init)
+    modele = get_modele_dict(id_modele) or {}
+    raw_liste = modele.get("liste_action") or "[]"
+    if isinstance(raw_liste, list):
+        liste_action = raw_liste
+    else:
+        try:
+            liste_action = json.loads(str(raw_liste))
+        except Exception:
+            liste_action = []
+    if not isinstance(liste_action, list):
+        liste_action = []
+
+    root = _find_root_bloc(liste_action) or {}
+    id_action_init = _norm_str(root.get("ID")) or "1"
+    canal_init = _norm_str(root.get("Canal")) or "Appel"
+    action_init = _norm_str(root.get("Action")) or "Appeler"
+    if is_objective_bloc(root):
+        canal_init = "Objectif"
+        action_init = "Objectif"
+
+    current_bloc_init = find_bloc_by_id(liste_action, id_action_init) or root
+
+    # 2) Charger DF cible + filtre rupture relation
+    df = load_clients_df_for_cible(id_cible)
+    df, _ = _remove_rupture_relation_strict(df)
+
+    radical_col = _detect_radical_col(df)
+    radicals = []
+    if radical_col:
+        for _, r in df.iterrows():
+            rc = _norm_str(r.get(radical_col))
+            if rc:
+                radicals.append(rc)
+
+    # dedup
+    radicals = list(dict.fromkeys(radicals))
+
+    # 3) Mettre à jour la cible (insert-only) + volume
+    new_cible = insert_only_members(id_cible, radicals)
+    update_cible_volume_if_column_exists(id_cible)
+
+    # 4) Ajouter dans clients_campagnes (insert-only, via store)
+    #    -> on doit insérer uniquement les RC absents pour cette campagne
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT Radical_compte
+            FROM clients_campagnes
+            WHERE ID_CAMPAGNE = ?
+            """,
+            (id_campagne,),
+        )
+        existing = {_norm_str(x[0]) for x in cur.fetchall() if _norm_str(x[0])}
+
+    finally:
+        conn.close()
+
+    to_add = [rc for rc in radicals if _norm_str(rc) and _norm_str(rc) not in existing]
+
+    if not to_add:
+        return {"ok": True, "new_cible_members": int(new_cible), "new_clients_campagne": 0}
+
+    today_iso = date.today().isoformat()
+
+    rows = []
+    for rc in to_add:
+        row_cc = {
+            "Nom_campagne": _norm_str(c.get("nom_campagne") or c.get("Nom_campagne")),
+            "ID_CAMPAGNE": id_campagne,
+            "Radical_compte": rc,
+            "Etat_campagne": _norm_str(c.get("etat") or c.get("etat_campagne") or "En cours"),
+            "NB_jour_campagne": 0,
+            "ID_Action": id_action_init,
+            "Canal": canal_init,
+            "Action": action_init,
+            "Last_action": "",
+            "Resultat_last_action": "",
+            "Date_last_action": today_iso,
+            "NB_jour_last_action": 0,
+            "NB_appel": 0,
+            "NB_mail": 0,
+            "NB_sms": 0,
+            "NB_message": 0,
+            "NB_approche_commercial": 0,
+            "date_debut_campagne": _norm_str(c.get("date_debut") or "")[:10],
+            "nb_jour_debut_campagne": 0,
+            "conversion": 0,
+        }
+
+        # arriv_eche selon ton workflow_nav
+        if _norm_str(row_cc.get("Action")) == "Closed":
+            row_cc["arriv_eche"] = "Non"
+        else:
+            row_cc["arriv_eche"] = arrive_echeance(liste_action, current_bloc_init, row_cc)
+
+        rows.append(row_cc)
+
+    inserted = bulk_insert_clients(rows)
+
+    # sécurité : resync Etat_campagne
+    set_clients_etat_for_campagne(id_campagne, _norm_str(c.get("etat") or c.get("etat_campagne") or "En cours"))
+
+    return {"ok": True, "new_cible_members": int(new_cible), "new_clients_campagne": int(inserted)}

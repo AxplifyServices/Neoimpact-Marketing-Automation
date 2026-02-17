@@ -6,20 +6,17 @@ import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.storage.db import DB_PATH
-from app.domain.modele import (
-    Modele,
-    list_variables_objectif,
-    modalites_for,
-    normalize_variable_cible,
-    parse_objectif_numeric,
-)
 
+# ✅ Nouveau Modele (sans objectif, sans variable_cible)
+from app.domain.modele import Modele
+
+# ✅ Nouveau store (sans objectif, sans variable_cible)
 from app.storage.modele_store_sqlite import (
     ensure_modeles_table,
     list_modeles,
     insert_modele,
     delete_modele,
-    get_modele_by_id,
+    get_modele_dict,
     update_modele_field,
 )
 
@@ -59,7 +56,6 @@ def _is_numeric_sqltype(t: str) -> bool:
 def get_clients_columns_with_types_for_ui() -> Dict[str, str]:
     """
     Retourne {col: type} depuis PRAGMA table_info(clients)
-    (sorti du front)
     """
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -75,23 +71,28 @@ def get_clients_columns_with_types_for_ui() -> Dict[str, str]:
 
 def get_variable_choices_for_ui() -> Tuple[List[str], List[str], List[str]]:
     """
-    Construit la liste des variables disponibles comme dans l'UI:
-    - d'abord variables catégorielles autorisées (positives only)
-    - puis colonnes numériques de clients
+    ⚠️ Gardé car utile pour l'UI de conditions / choix variables,
+    mais plus pour 'objectif modèle'.
+
     Retourne: (variable_choices, categorical_cols_allowed, numeric_cols)
+
+    Ici, on considère:
+    - categorical_cols_allowed = toutes les colonnes non-numériques de clients
+    - numeric_cols = colonnes numériques de clients
+    - variable_choices = cat puis num
     """
     cols_types = get_clients_columns_with_types_for_ui()
     if not cols_types:
         return [], [], []
 
     numeric_cols = [c for c, t in cols_types.items() if _is_numeric_sqltype(t)]
-    categorical_cols_allowed = list_variables_objectif()  # positives only
+    categorical_cols_allowed = [c for c, t in cols_types.items() if not _is_numeric_sqltype(t)]
 
     variable_choices: List[str] = []
     seen: Set[str] = set()
 
-    for c in categorical_cols_allowed:
-        if c in cols_types and c not in seen:
+    for c in sorted(categorical_cols_allowed):
+        if c not in seen:
             variable_choices.append(c)
             seen.add(c)
 
@@ -103,14 +104,12 @@ def get_variable_choices_for_ui() -> Tuple[List[str], List[str], List[str]]:
     return variable_choices, categorical_cols_allowed, numeric_cols
 
 
-
 # =========================================================
 # Conditions (clients columns for UI)
 # =========================================================
 def _norm_colname_for_compare(name: str) -> str:
     """Normalise pour comparer (case-insensitive + underscores)."""
     s = (name or "").strip().lower()
-    # garder lettres/chiffres/_ uniquement
     s = re.sub(r"[^a-z0-9_]", "", s)
     return s
 
@@ -154,15 +153,14 @@ def get_client_condition_fields_for_ui() -> List[Dict[str, str]]:
             }
         )
 
-    # tri stable: d'abord non-numériques, puis numériques, par nom
     out.sort(key=lambda d: (d.get("is_numeric") != "0", d.get("col", "").lower()))
     return out
+
 
 def get_clients_campagnes_condition_fields_for_ui() -> List[Dict[str, str]]:
     """
     Champs utilisables dans les conditions basées sur la table clients_campagnes.
-    Format identique à get_client_condition_fields_for_ui():
-      [{"col": "...", "type": "...", "is_numeric": "1"}, ...]
+    On expose ici uniquement ce dont tu as besoin.
     """
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -189,87 +187,10 @@ def get_clients_campagnes_condition_fields_for_ui() -> List[Dict[str, str]]:
                 }
             )
 
-        # (optionnel) tri stable
         out.sort(key=lambda d: (d.get("is_numeric") != "0", d.get("col", "").lower()))
         return out
     finally:
         conn.close()
-
-def is_categorical_positive_objectif_for_ui(variable_cible: str) -> bool:
-    """
-    True si variable_cible correspond à une variable catégorielle autorisée (positives only)
-    """
-    categorical_cols_allowed = set(list_variables_objectif())
-    return normalize_variable_cible(variable_cible) in categorical_cols_allowed
-
-
-# =========================================================
-# Objectif helpers (numérique)
-# =========================================================
-def build_numeric_objectif_json_for_ui(min_txt: str, max_txt: str) -> str:
-    """
-    Construit le JSON string {"min": ..., "max": ...} (même logique que l'UI initiale),
-    en dehors du front.
-    """
-    mn = None
-    mx = None
-
-    if str(min_txt).strip() != "":
-        try:
-            mn = float(min_txt)
-        except Exception:
-            raise ValueError("Min doit être un nombre.")
-    if str(max_txt).strip() != "":
-        try:
-            mx = float(max_txt)
-        except Exception:
-            raise ValueError("Max doit être un nombre.")
-
-    if mn is None and mx is None:
-        raise ValueError("Objectif numérique : min et max ne peuvent pas être tous les deux vides.")
-
-    payload: Dict[str, Any] = {}
-    if mn is not None:
-        payload["min"] = mn
-    if mx is not None:
-        payload["max"] = mx
-
-    return json.dumps(payload, ensure_ascii=False)
-
-def build_multi_objectif_json_for_ui(op: str, items: List[Dict[str, Any]]) -> str:
-    """
-    Construit un objectif multi au format JSON string:
-      {"op":"AND|OR","items":[...]}
-    La validation métier finale est faite par Modele.new() (modele.py).
-    """
-    op2 = _safe_str(op).upper()
-    if op2 not in ("AND", "OR"):
-        raise ValueError("op doit être AND ou OR")
-
-    if not isinstance(items, list) or len(items) == 0:
-        raise ValueError("items doit être une liste non vide")
-
-    payload = {"op": op2, "items": items}
-    return json.dumps(payload, ensure_ascii=False)
-
-
-def numeric_objectif_prefill_for_ui(default_obj: Any) -> Tuple[str, str]:
-    """
-    Préfill min/max à partir d'un objectif stocké (JSON string)
-    Retourne (pre_min, pre_max) en string.
-    """
-    pre_min = ""
-    pre_max = ""
-
-    if isinstance(default_obj, str) and default_obj.strip().startswith("{"):
-        try:
-            mn, mx = parse_objectif_numeric(default_obj)
-            pre_min = "" if mn is None else str(mn)
-            pre_max = "" if mx is None else str(mx)
-        except Exception:
-            pass
-
-    return pre_min, pre_max
 
 
 # =========================================================
@@ -282,7 +203,7 @@ def list_modeles_for_ui() -> List[Dict[str, Any]]:
 
 def get_modele_by_id_for_ui(id_modele: str) -> Dict[str, Any]:
     ensure_modeles_table()
-    return get_modele_by_id(id_modele) or {}
+    return get_modele_dict(id_modele) or {}
 
 
 def get_modele_blocks_for_ui(id_modele: str) -> List[Dict[str, Any]]:
@@ -319,38 +240,37 @@ def save_modele_for_ui(
     is_editing: bool,
     id_modele: str,
     nom_modele: str,
-    variable_cible: str,
-    objectif_value_for_store: str,
     blocks: List[Dict[str, Any]],
 ) -> None:
     """
-    Centralise INSERT/UPDATE hors UI, en conservant exactement tes champs et ton store.
+    Nouvelle logique:
+    - plus d'objectif modèle
+    - plus de variable_cible
+    - un bloc peut être objectif via b["objectif"]=True + Conditions
     """
     ensure_modeles_table()
 
-    # ✅ Valider l'objectif via Modele.new (sans insérer)
+    # ✅ Validation métier via Modele.new (sans insertion)
     _ = Modele.new(
         nom_modele=nom_modele,
-        variable_cible=variable_cible,
-        objectif=objectif_value_for_store,
         liste_action=blocks,
+        graphe_json=None,
     )
 
     if is_editing:
         mid = _safe_str(id_modele)
+        if not mid:
+            raise ValueError("id_modele requis en mode édition")
+
         update_modele_field(mid, "nom_modele", nom_modele)
-        update_modele_field(mid, "variable_cible", variable_cible)
-        update_modele_field(mid, "objectif", objectif_value_for_store)
         update_modele_field(mid, "liste_action", json.dumps(blocks, ensure_ascii=False))
     else:
         modele = Modele.new(
             nom_modele=nom_modele,
-            variable_cible=variable_cible,
-            objectif=objectif_value_for_store,
             liste_action=blocks,
+            graphe_json=None,
         )
         insert_modele(modele)
-
 
 # =========================================================
 # Locking (campagnes actives)
@@ -373,24 +293,37 @@ def get_locked_modele_ids_for_ui() -> Set[str]:
 # =========================================================
 def get_modele_edit_payload_for_ui(id_modele: str) -> Dict[str, Any]:
     """
-    Retourne tout ce qu'il faut pour pré-remplir l'UI en mode édition:
+    Nouvelle UI édition:
       - nom_modele
-      - variable_cible
-      - objectif
       - blocks (liste_action parsed)
     """
     d = get_modele_by_id_for_ui(id_modele)
 
     nom = _safe_str(d.get("nom_modele") or d.get("Nom_modele") or "")
-    varc = _safe_str(d.get("variable_cible") or "")
-    obj = d.get("objectif", d.get("Objectif"))
-
     blocks = get_modele_blocks_for_ui(id_modele)
 
     return {
         "id_modele": _safe_str(id_modele),
         "nom_modele": nom,
-        "variable_cible": varc,
-        "objectif": obj,
         "blocks": blocks,
+    }
+
+# =========================================================
+# Compat API (objectif multi)
+# =========================================================
+def build_multi_objectif_json_for_ui(op: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Utilisé par l'endpoint API /meta/objectif/build-multi.
+    On retourne une structure simple et stable.
+    """
+    op2 = (op or "").upper().strip()
+    if op2 not in ("AND", "OR"):
+        op2 = "AND"
+
+    if not isinstance(items, list):
+        items = []
+
+    return {
+        "op": op2,
+        "items": items,
     }

@@ -1,9 +1,10 @@
+# app/api/routers/modeles.py
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.domain.canaux import (
     list_canaux,
@@ -13,24 +14,19 @@ from app.domain.canaux import (
 )
 
 from app.domain.ui_facades.modeles_ui_facade import (
+    # meta
     get_client_condition_fields_for_ui,
+    get_clients_campagnes_condition_fields_for_ui,
     get_variable_choices_for_ui,
+    # crud
     list_modeles_for_ui,
     get_locked_modele_ids_for_ui,
     delete_modele_for_ui,
     get_modele_edit_payload_for_ui,
     save_modele_for_ui,
     get_modele_by_id_for_ui,
-    # Objectif multi uniquement
+    # objectif multi uniquement (si ton front en a besoin)
     build_multi_objectif_json_for_ui,
-    # NOTE: on retire volontairement toute façade liée à l’objectif simple
-)
-
-# NOTE: ce façade est appelée plus bas dans le fichier.
-# Si elle n'existe pas dans ton projet, il faut la rajouter dans le module de façade
-# (app/domain/ui_facades/modeles_ui_facade.py) ou supprimer l'endpoint associé.
-from app.domain.ui_facades.modeles_ui_facade import (
-    get_clients_campagnes_condition_fields_for_ui,
 )
 
 router = APIRouter()
@@ -40,16 +36,22 @@ router = APIRouter()
 # Payloads
 # =========================================================
 class ModeleSaveIn(BaseModel):
+    """
+    IMPORTANT (compat front) :
+    - On conserve les champs legacy `variable_cible` et `objectif_value_for_store`
+      pour ne pas casser le front existant.
+    - MAIS : ils ne sont plus utilisés côté back avec le nouveau format.
+    """
+
     is_editing: bool
-    id_modele: Optional[str] = ""
+    id_modele: Optional[str] = Field(default="")
     nom_modele: str
-    variable_cible: str
 
-    # IMPORTANT:
-    # - objectif NON obligatoire (peut être None ou "")
-    # - plus de notion d’objectif simple dans l’API
-    objectif_value_for_store: Optional[str] = None
+    # legacy (compat)
+    variable_cible: Optional[str] = Field(default="")
+    objectif_value_for_store: Optional[str] = Field(default=None)
 
+    # nouveau
     blocks: List[Dict[str, Any]]
 
 
@@ -58,9 +60,9 @@ class ModeleSaveIn(BaseModel):
 # =========================================================
 @router.get("/modeles")
 def list_modeles(
-    limit: int = Query(default=200, ge=1, le=5000),  # taille page
-    offset: int = Query(default=0, ge=0),            # page_start
-    pages: int = Query(default=1, ge=1, le=50),      # nb pages à charger
+    limit: int = Query(default=200, ge=1, le=5000),   # taille page
+    offset: int = Query(default=0, ge=0),             # page_start (0,1,2,...)
+    pages: int = Query(default=1, ge=1, le=50),       # nb pages consécutives
 ):
     """
     Retourne la liste des modèles + champ `locked` (True/False)
@@ -73,17 +75,23 @@ def list_modeles(
       - total max renvoyé = limit * pages
     """
     modeles = list_modeles_for_ui() or []
-    locked_ids = set(get_locked_modele_ids_for_ui() or [])
+    locked_ids: Set[str] = set(str(x).strip() for x in (get_locked_modele_ids_for_ui() or []))
 
     # enrichissement locked (inchangé)
     for m in modeles:
         if isinstance(m, dict):
-            mid = m.get("id_modele") or m.get("id") or m.get("ID")
-            m["locked"] = bool(mid in locked_ids)
+            mid = (m.get("id_modele") or m.get("id") or m.get("ID") or "").strip()
+            m["locked"] = bool(mid and mid in locked_ids)
         else:
-            mid = getattr(m, "id_modele", None) or getattr(m, "id", None) or getattr(m, "ID", None)
+            mid = (
+                getattr(m, "id_modele", None)
+                or getattr(m, "id", None)
+                or getattr(m, "ID", None)
+                or ""
+            )
+            mid = str(mid).strip()
             try:
-                setattr(m, "locked", bool(mid in locked_ids))
+                setattr(m, "locked", bool(mid and mid in locked_ids))
             except Exception:
                 pass
 
@@ -120,19 +128,19 @@ def edit_payload(id_modele: str):
 
 @router.get("/modeles/locked")
 def locked_modeles():
-    locked = sorted(list(get_locked_modele_ids_for_ui()))
+    locked = sorted(list(set(str(x).strip() for x in (get_locked_modele_ids_for_ui() or []))))
     return {"locked_ids": locked}
 
 
 @router.delete("/modeles/{id_modele}")
 def delete_modele(id_modele: str):
     id_modele = (id_modele or "").strip()
-    locked_ids = set(str(x).strip() for x in get_locked_modele_ids_for_ui())
+    locked_ids = set(str(x).strip() for x in (get_locked_modele_ids_for_ui() or []))
 
     if id_modele in locked_ids:
         raise HTTPException(
             status_code=409,
-            detail="Suppression impossible : ce modèle est lié à une campagne active/planifiée."
+            detail="Suppression impossible : ce modèle est lié à une campagne active/planifiée.",
         )
 
     delete_modele_for_ui(id_modele)
@@ -141,24 +149,36 @@ def delete_modele(id_modele: str):
 
 @router.post("/modeles/save")
 def save_modele(payload: ModeleSaveIn):
-    # objectif optionnel : on normalise en "" pour le store si besoin
-    objectif_store = payload.objectif_value_for_store
-    if objectif_store is None:
-        objectif_store = ""
+    """
+    Compat front :
+    - accepte toujours variable_cible / objectif_value_for_store
+    Nouveau back :
+    - on ne les utilise plus
+    - on enregistre uniquement blocks (nouveau format)
+    """
+    try:
+        save_modele_for_ui(
+            is_editing=payload.is_editing,
+            id_modele=(payload.id_modele or "").strip(),
+            nom_modele=payload.nom_modele,
+            blocks=payload.blocks,
+        )
+        return {"ok": True}
 
-    save_modele_for_ui(
-        is_editing=payload.is_editing,
-        id_modele=payload.id_modele or "",
-        nom_modele=payload.nom_modele,
-        variable_cible=payload.variable_cible,
-        objectif_value_for_store=objectif_store,  # peut être ""
-        blocks=payload.blocks,
-    )
-    return {"ok": True}
+    except ValueError as e:
+        # Erreur de validation métier
+        raise HTTPException(status_code=400, detail=str(e))
+
+    except Exception:
+        # erreur inattendue => 500 mais message propre
+        raise HTTPException(
+            status_code=500,
+            detail="Erreur interne lors de l'enregistrement du modèle.",
+        )
 
 
 # =========================================================
-# Meta endpoints (pour reconstruire exactement les mêmes dropdowns/boutons que Streamlit)
+# Meta endpoints (pour reconstruire les dropdowns/boutons côté front)
 # =========================================================
 @router.get("/meta/variables")
 def variables_meta():
@@ -173,10 +193,10 @@ def variables_meta():
 @router.post("/meta/objectif/build-multi")
 def build_multi_objectif(payload: Dict[str, Any]):
     """
-    Objectif MULTI uniquement.
+    Objectif MULTI uniquement (si ton UI le requiert encore).
     payload:
-      - op: "AND" / "OR" (ou autre selon ton UI)
-      - items: liste d'items objectifs (numériques min/max, catégorielles liste modalités)
+      - op: "AND" / "OR"
+      - items: liste d'items objectifs
     """
     op = payload.get("op", "")
     items = payload.get("items", [])
@@ -186,9 +206,7 @@ def build_multi_objectif(payload: Dict[str, Any]):
 @router.get("/meta/conditions/clients-fields")
 def clients_condition_fields():
     """
-    Champs utilisables dans les conditions basées sur la table `clients`
-    (hors colonnes déjà affichées dans l'écran), avec informations de type
-    pour construire l'UI (numérique vs texte).
+    Champs utilisables dans les conditions basées sur la table `clients`.
     """
     return {"fields": get_client_condition_fields_for_ui()}
 
@@ -207,10 +225,3 @@ def canaux_meta():
         "resultats_by_canal": {c: resultats_for_canal(c) for c in canaux},
         "compteur_by_canal": {c: compteur_for_canal(c) for c in canaux},
     }
-
-
-# NOTE:
-# On SUPPRIME volontairement tous les endpoints "objectif simple".
-# Les modalités (valeurs distinctes) se gèrent déjà via:
-# - /api/clients/distinct?column=... (dans cibles.py)
-# et/ou via la logique UI existante.

@@ -61,16 +61,42 @@ def _safe_json_loads(x: object, default: Any) -> Any:
     except Exception:
         return default
 
+
 def _clean_campagne_id(x: object) -> str:
     """
     Normalise un id campagne venant potentiellement de l'UI/API.
     Exemple: 'CP000029|' -> 'CP000029'
     """
     s = _norm_str(x)
-    # retire les séparateurs parasites
     s = s.replace("\u200b", "")  # zero-width space si jamais
     s = s.strip().rstrip("|").strip()
     return s
+
+
+def _to_int_series_safe(s: pd.Series, default: int = 0) -> pd.Series:
+    """Coerce une série en int (NaN -> default)."""
+    try:
+        out = pd.to_numeric(s, errors="coerce").fillna(default).astype(int)
+        return out
+    except Exception:
+        return pd.Series([default] * len(s), index=s.index)
+
+
+def _compute_is_converted(df: pd.DataFrame) -> pd.Series:
+    """
+    Source de vérité conversion:
+      - colonne 'conversion' (int) : conversion == 1
+    Si colonne absente => tout à 0 (pas de conversion).
+    """
+    if df is None or df.empty:
+        return pd.Series([], dtype=bool)
+
+    if "conversion" not in df.columns:
+        return pd.Series([False] * len(df), index=df.index)
+
+    conv = _to_int_series_safe(df["conversion"], default=0)
+    return conv.eq(1)
+
 
 # =========================================================
 # Filters model
@@ -163,7 +189,6 @@ def load_clients_campagnes_df(filters: DashboardFilters) -> pd.DataFrame:
         where.append(f"Etat_campagne IN ({placeholders})")
         params.extend([str(x).strip() for x in filters.etats_campagne])
 
-    # ✅ NEW: filtre gestionnaires doit être ajouté AVANT de construire le WHERE SQL
     if filters.gestionnaires:
         placeholders = ",".join(["?"] * len(filters.gestionnaires))
         where.append(f"COALESCE(cl.Gestionnaire,'') IN ({placeholders})")
@@ -188,9 +213,13 @@ def load_clients_campagnes_df(filters: DashboardFilters) -> pd.DataFrame:
     if df.empty:
         return df
 
-    # --- le reste inchangé ---
+    # ---------------------------------------------------------
+    # Flags standardisés
+    # ---------------------------------------------------------
     df["_action_norm"] = df.get("Action", "").apply(_normalize_action)
-    df["_is_closed"] = df["_action_norm"].eq("closed")
+
+    # ✅ Nouveau: conversion = 1 est la vérité
+    df["_is_converted"] = _compute_is_converted(df)
 
     df["ID_Action"] = df.get("ID_Action", "").astype(str).str.strip()
     df["Canal"] = df.get("Canal", "").astype(str).str.strip()
@@ -211,10 +240,16 @@ def load_clients_campagnes_df(filters: DashboardFilters) -> pd.DataFrame:
             df[col] = 0
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
+    # s'assure que conversion existe (utile pour affichage / compat)
+    if "conversion" not in df.columns:
+        df["conversion"] = 0
+    else:
+        df["conversion"] = _to_int_series_safe(df["conversion"], default=0)
+
     return df
 
-##################################################################################################
 
+##################################################################################################
 def load_clients_dim_regions() -> pd.DataFrame:
     """
     Retourne un DF avec:
@@ -233,7 +268,6 @@ def load_clients_dim_regions() -> pd.DataFrame:
 
     cols = list(df.columns)
 
-    # colonne radical
     radical_col = None
     for cand in ["radical_compte", "Radical_compte", "RADICAL_COMPTE", "radical"]:
         if cand in cols:
@@ -247,7 +281,6 @@ def load_clients_dim_regions() -> pd.DataFrame:
     if radical_col is None:
         return pd.DataFrame(columns=["radical_compte", "Region"])
 
-    # colonne région (auto)
     region_col = None
     preferred = ["Region", "REGION", "region", "Région", "REGION_CLIENT", "Region_client"]
     for cand in preferred:
@@ -278,17 +311,20 @@ def compute_kpis_compact(df: pd.DataFrame) -> Dict[str, Any]:
         return {
             "transmis": 0,
             "contactes_total": 0,
-            "closing_total": 0,
+            "closing_total": 0,  # (compat) = conversions
             "traitements_total": 0,
             "taux_contact_total": 0.0,
-            "taux_closing_sur_affectes": 0.0,
-            "taux_closing_sur_traitements_total": 0.0,
+            "taux_closing_sur_affectes": 0.0,  # (compat) = taux conversion / affectés
+            "taux_closing_sur_traitements_total": 0.0,  # (compat)
             "arriv_eche": 0,
         }
 
     transmis = int(len(df))
     contactes_total = int(df["_is_treated"].sum())
-    closing_total = int(df["_is_closed"].sum())
+
+    # ✅ conversion remplace "closed"
+    closing_total = int(df["_is_converted"].sum())
+
     traitements_total = int(sum(df[col].sum() for _, col in CHANNEL_COLS))
     arriv_eche = compute_arriv_eche_oui(df)
 
@@ -318,7 +354,7 @@ def compute_table_by_channel(df: pd.DataFrame) -> pd.DataFrame:
     cols = [
         "Canal",
         "Traitements",
-        "Closing",
+        "Closing",  # (compat) = conversions
         "Taux_closing_sur_traitements",
         "Clients_contactes",
         "Taux_contact_sur_transmis",
@@ -331,8 +367,11 @@ def compute_table_by_channel(df: pd.DataFrame) -> pd.DataFrame:
 
     for canal, col in CHANNEL_COLS:
         traitements = int(df[col].sum())
-        closing = int((df["_is_closed"] & df["Canal"].eq(canal)).sum())
-        clients_contactes = int((df[col] > 0).sum())  # nb clients touchés au moins 1 fois sur ce canal
+
+        # ✅ conversion remplace closed
+        closing = int((df["_is_converted"] & df["Canal"].eq(canal)).sum())
+
+        clients_contactes = int((df[col] > 0).sum())
 
         rows.append(
             {
@@ -366,8 +405,7 @@ def compute_table_by_channel(df: pd.DataFrame) -> pd.DataFrame:
 def compute_region_transmit_closed(df: pd.DataFrame) -> pd.DataFrame:
     """
     Retourne: Region | Transmis | Closed
-    - Transmis = count lignes (affectées) par région
-    - Closed = count lignes Action=Closed par région
+    ⚠️ (compat) "Closed" = conversions (conversion==1)
     """
     if df is None or df.empty:
         return pd.DataFrame(columns=["Region", "Transmis", "Closed"])
@@ -385,7 +423,9 @@ def compute_region_transmit_closed(df: pd.DataFrame) -> pd.DataFrame:
         tmp["Region"] = tmp["Region"].replace({"": "Inconnue"}).fillna("Inconnue")
 
     g_transmis = tmp.groupby("Region", as_index=False).size().rename(columns={"size": "Transmis"})
-    g_closed = tmp[tmp["_is_closed"]].groupby("Region", as_index=False).size().rename(columns={"size": "Closed"})
+
+    # ✅ conversions par région (colonne conservée "Closed" pour compat UI)
+    g_closed = tmp[tmp["_is_converted"]].groupby("Region", as_index=False).size().rename(columns={"size": "Closed"})
 
     out = g_transmis.merge(g_closed, on="Region", how="left").fillna(0)
     out["Closed"] = out["Closed"].astype(int)
@@ -409,6 +449,10 @@ def compute_funnel_by_id_action(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_daily_treatments_and_closed(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Retourne: Date | Traitements | Closed
+    ⚠️ (compat) "Closed" = conversions (conversion==1)
+    """
     if df is None or df.empty:
         return pd.DataFrame(columns=["Date", "Traitements", "Closed"])
 
@@ -419,7 +463,8 @@ def compute_daily_treatments_and_closed(df: pd.DataFrame) -> pd.DataFrame:
     tr = tmp[tmp["_is_treated"]].groupby("_date_last_action", as_index=False).size()
     tr = tr.rename(columns={"_date_last_action": "Date", "size": "Traitements"})
 
-    cl = tmp[tmp["_is_closed"]].groupby("_date_last_action", as_index=False).size()
+    # ✅ conversions/jour (colonne conservée "Closed" pour compat UI)
+    cl = tmp[tmp["_is_converted"]].groupby("_date_last_action", as_index=False).size()
     cl = cl.rename(columns={"_date_last_action": "Date", "size": "Closed"})
 
     out = tr.merge(cl, on="Date", how="outer").fillna(0)
@@ -432,9 +477,6 @@ def compute_daily_treatments_and_closed(df: pd.DataFrame) -> pd.DataFrame:
 # Helpers: per-campaign isolation (for API)
 # =========================================================
 def _split_df_by_campaign(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-    """
-    Retourne un dict {id_campagne: sub_df}.
-    """
     if df is None or df.empty or "ID_CAMPAGNE" not in df.columns:
         return {}
     out: Dict[str, pd.DataFrame] = {}
@@ -444,10 +486,6 @@ def _split_df_by_campaign(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
 
 
 def _compute_payload_isolated_for_campaign(df_all: pd.DataFrame, cid: str) -> Dict[str, Any]:
-    """
-    Retourne un payload complet (kpis/tables/series/graph) pour 1 campagne.
-    df_all: df déjà filtré par filters globaux (dates/etats/campagne_ids...)
-    """
     sub = df_all[df_all["ID_CAMPAGNE"].astype(str).str.strip().eq(str(cid).strip())].copy()
 
     kpis = compute_kpis_compact(sub)
@@ -467,7 +505,6 @@ def _compute_payload_isolated_for_campaign(df_all: pd.DataFrame, cid: str) -> Di
             "funnel_by_id_action": funnel.to_dict(orient="records"),
             "daily_treatments_closed": daily.to_dict(orient="records"),
         },
-        # graphe toujours disponible au niveau isolé (même si multi-campagnes)
         "graph": build_graph_payload_for_single_campaign(df_all, str(cid).strip()),
     }
     return out
@@ -513,8 +550,8 @@ def build_graph_payload_for_single_campaign(df: pd.DataFrame, campagne_id: str) 
       "modele_id": "...",
       "modele_nom": "...",
       "nodes":[
-         {"id":"5","label":"5 | Appel | Appeler (500 | 12 closed)",
-          "count":500,"closed_count":12,"canal":"Appel","action":"Appeler"}
+         {"id":"5","label":"5 | Appel | Appeler (500 | 12 conv)",
+          "count":500,"converted_count":12,"canal":"Appel","action":"Appeler"}
       ],
       "edges":[{"from":"1","to":"2"}, ...]
     }
@@ -523,25 +560,23 @@ def build_graph_payload_for_single_campaign(df: pd.DataFrame, campagne_id: str) 
     if not modele:
         return {"campaign_id": campagne_id, "modele_id": "", "modele_nom": "", "nodes": [], "edges": []}
 
-    # counts by ID_Action for THIS campaign (within already-filtered df)
     counts: Dict[str, int] = {}
-    closed_counts: Dict[str, int] = {}
+    conv_counts: Dict[str, int] = {}
 
     if df is not None and not df.empty:
         sub = df[df["ID_CAMPAGNE"].astype(str).str.strip().eq(str(campagne_id).strip())].copy()
         if not sub.empty:
             counts = sub.groupby("ID_Action").size().to_dict()
 
-            # closed par noeud (ID_Action)
-            if "_is_closed" in sub.columns:
-                closed_counts = sub[sub["_is_closed"]].groupby("ID_Action").size().to_dict()
+            # ✅ conversions par noeud (ID_Action)
+            if "_is_converted" in sub.columns:
+                conv_counts = sub[sub["_is_converted"]].groupby("ID_Action").size().to_dict()
             else:
-                closed_counts = {}
+                conv_counts = {}
 
     graphe = _safe_json_loads(modele.get("graphe_json"), {"nodes": [], "edges": []})
     liste_action = _safe_json_loads(modele.get("liste_action"), [])
 
-    # map id_action -> (canal, action) depuis liste_action
     id_to_meta: Dict[str, Dict[str, str]] = {}
     if isinstance(liste_action, list):
         for a in liste_action:
@@ -556,7 +591,6 @@ def build_graph_payload_for_single_campaign(df: pd.DataFrame, campagne_id: str) 
     nodes: List[Dict[str, Any]] = []
     edges: List[Dict[str, str]] = []
 
-    # Prefer graphe_json if non-empty; else build from liste_action via Bloc_mère
     if isinstance(graphe, dict) and isinstance(graphe.get("nodes"), list) and graphe.get("nodes"):
         for n in graphe.get("nodes", []):
             nid = _norm_str(n.get("id") or n.get("ID") or n.get("node_id"))
@@ -565,7 +599,7 @@ def build_graph_payload_for_single_campaign(df: pd.DataFrame, campagne_id: str) 
             action = _norm_str(n.get("action") or n.get("Action")) or _norm_str(meta.get("action"))
 
             cnt = int(counts.get(nid, 0))
-            clo = int(closed_counts.get(nid, 0))
+            conv = int(conv_counts.get(nid, 0))
 
             base_label = _norm_str(n.get("label"))
             if not base_label:
@@ -576,14 +610,14 @@ def build_graph_payload_for_single_campaign(df: pd.DataFrame, campagne_id: str) 
                 if action and action not in base_label:
                     base_label = f"{base_label} | {action}"
 
-            label = f"{base_label} ({cnt} | {clo} closed)"
+            label = f"{base_label} ({cnt} | {conv} conv)"
 
             nodes.append(
                 {
                     "id": nid,
                     "label": label,
                     "count": cnt,
-                    "closed_count": clo,
+                    "converted_count": conv,
                     "canal": canal,
                     "action": action,
                 }
@@ -603,16 +637,16 @@ def build_graph_payload_for_single_campaign(df: pd.DataFrame, campagne_id: str) 
                 parent = _norm_str(a.get("Bloc_mère") or a.get("bloc_mere") or a.get("parent"))
 
                 cnt = int(counts.get(nid, 0))
-                clo = int(closed_counts.get(nid, 0))
+                conv = int(conv_counts.get(nid, 0))
 
-                label = f"{nid} | {canal} | {action} ({cnt} | {clo} closed)"
+                label = f"{nid} | {canal} | {action} ({cnt} | {conv} conv)"
 
                 nodes.append(
                     {
                         "id": nid,
                         "label": label,
                         "count": cnt,
-                        "closed_count": clo,
+                        "converted_count": conv,
                         "canal": canal,
                         "action": action,
                     }
@@ -634,15 +668,8 @@ def build_graph_payload_for_single_campaign(df: pd.DataFrame, campagne_id: str) 
 # Orchestrator (Streamlit + API)
 # =========================================================
 def compute_dashboard_payload(filters: DashboardFilters) -> Dict[str, Any]:
-    """
-    Payload global + (si campagne_ids fourni) breakdown isolé par campagne via by_campaign.
-    - payload["kpis"]/["tables"]/["series"] : union des campagnes (filtrées)
-    - payload["graph"] : compat historique (uniquement si 1 campagne)
-    - payload["by_campaign"] : dict {campagne_id: {kpis,tables,series,graph}} (si campagne_ids)
-    """
     df = load_clients_campagnes_df(filters)
 
-    # GLOBAL (union)
     kpis = compute_kpis_compact(df)
     table_canal = compute_table_by_channel(df)
     region_mix = compute_region_transmit_closed(df)
@@ -657,9 +684,7 @@ def compute_dashboard_payload(filters: DashboardFilters) -> Dict[str, Any]:
             "date_max": filters.date_max.isoformat() if filters.date_max else None,
         },
         "kpis": kpis,
-        "tables": {
-            "by_channel": table_canal.to_dict(orient="records"),
-        },
+        "tables": {"by_channel": table_canal.to_dict(orient="records")},
         "series": {
             "region_transmit_closed": region_mix.to_dict(orient="records"),
             "funnel_by_id_action": funnel.to_dict(orient="records"),
@@ -667,13 +692,9 @@ def compute_dashboard_payload(filters: DashboardFilters) -> Dict[str, Any]:
         },
     }
 
-    # COMPAT: graphe top-level seulement si 1 campagne (comme avant)
     if filters.campagne_ids and len(filters.campagne_ids) == 1:
         payload["graph"] = build_graph_payload_for_single_campaign(df, _clean_campagne_id(filters.campagne_ids[0]))
 
-
-    # NOUVEAU: breakdown isolé par campagne (pour React dev)
-    # On le calcule seulement si campagne_ids est fourni (sélection explicite)
     if filters.campagne_ids:
         by_campaign: Dict[str, Any] = {}
         for raw in (filters.campagne_ids or []):
@@ -681,8 +702,6 @@ def compute_dashboard_payload(filters: DashboardFilters) -> Dict[str, Any]:
             if not cid:
                 continue
             by_campaign[cid] = _compute_payload_isolated_for_campaign(df, cid)
-
-
         payload["by_campaign"] = by_campaign
 
     return payload
@@ -692,12 +711,7 @@ def compute_dashboard_payload(filters: DashboardFilters) -> Dict[str, Any]:
 # Arrivant échéance (helpers existants inchangés)
 # =========================================================
 def _extract_deadline_days_from_node(node: dict) -> List[int]:
-    """
-    Retourne les valeurs de seuil (en jours) trouvées dans les conditions
-    de type nb_jour_last_action.
-    """
     out = []
-
     conditions = node.get("conditions") or []
     if not isinstance(conditions, list):
         return out
@@ -718,17 +732,12 @@ def _extract_deadline_days_from_node(node: dict) -> List[int]:
 
 
 def compute_clients_arrivant_echeance(df: pd.DataFrame) -> int:
-    """
-    KPI : nombre de clients arrivant à échéance
-    (J-1 avant une condition nb_jour_last_action non atteinte)
-    """
     if df is None or df.empty:
         return 0
 
     today = date.today()
     total_flagged = 0
 
-    # Groupement par campagne pour éviter de recharger le modèle 100 fois
     for campagne_id, sub_df in df.groupby("ID_CAMPAGNE"):
         modele = _load_modele_for_campagne(campagne_id)
         if not modele:
@@ -741,7 +750,6 @@ def compute_clients_arrivant_echeance(df: pd.DataFrame) -> int:
         if not nodes or not edges:
             continue
 
-        # mapping parent -> enfants
         children_map: Dict[str, List[str]] = {}
         for e in edges:
             parent = str(e.get("from")).strip()
@@ -761,19 +769,16 @@ def compute_clients_arrivant_echeance(df: pd.DataFrame) -> int:
             children_ids = children_map.get(id_action, [])
 
             flagged = False
-
             for cid in children_ids:
                 child_node = node_by_id.get(cid)
                 if not child_node:
                     continue
 
                 deadlines = _extract_deadline_days_from_node(child_node)
-
                 for d in deadlines:
                     if days_elapsed == d - 1:
                         flagged = True
                         break
-
                 if flagged:
                     break
 

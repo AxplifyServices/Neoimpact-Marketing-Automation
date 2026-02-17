@@ -15,10 +15,6 @@ def _connect() -> sqlite3.Connection:
 
 
 def ensure_table() -> None:
-    """
-    Table attendue par campagne_service.py + les queries dans campagne_service
-    (ID_CAMPAGNE, Canal, Action, Etat_campagne, etc.)
-    """
     conn = _connect()
     cur = conn.cursor()
 
@@ -28,8 +24,6 @@ def ensure_table() -> None:
             Nom_campagne            TEXT,
             ID_CAMPAGNE             TEXT,
             Radical_compte          TEXT,
-            statut_avant_campagne   TEXT,
-            statut_actuel           TEXT,
             Etat_campagne           TEXT,
             NB_jour_campagne        INTEGER,
             ID_Action               TEXT,
@@ -46,40 +40,33 @@ def ensure_table() -> None:
             NB_approche_commercial  INTEGER,
             arriv_eche              TEXT DEFAULT 'Non',
 
-            -- ✅ NEW (ne casse pas l'existant)
             date_debut_campagne     TEXT,
-            nb_jour_debut_campagne  INTEGER
+            nb_jour_debut_campagne  INTEGER,
+            conversion              INTEGER DEFAULT 0
         )
         """
     )
 
-    # Migration douce : ajoute arriv_eche si la table existait déjà sans la colonne
-    try:
-        cur.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN arriv_eche TEXT DEFAULT 'Non'")
-    except Exception:
-        pass
+    # Colonnes manquantes ? => on migre proprement (sans doublons)
+    cur.execute(f"PRAGMA table_info({TABLE_NAME})")
+    cols = {row[1] for row in cur.fetchall()}
 
-    # ✅ Migration douce : ajoute date_debut_campagne si absent
-    try:
-        cur.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN date_debut_campagne TEXT")
-    except Exception:
-        pass
+    def _add_col(sql: str, col_name: str) -> None:
+        if col_name not in cols:
+            cur.execute(sql)
 
-    # ✅ Migration douce : ajoute nb_jour_debut_campagne si absent
-    try:
-        cur.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN nb_jour_debut_campagne INTEGER")
-    except Exception:
-        pass
+    _add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN arriv_eche TEXT DEFAULT 'Non'", "arriv_eche")
+    _add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN date_debut_campagne TEXT", "date_debut_campagne")
+    _add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN nb_jour_debut_campagne INTEGER", "nb_jour_debut_campagne")
+    _add_col(f"ALTER TABLE {TABLE_NAME} ADD COLUMN conversion INTEGER DEFAULT 0", "conversion")
 
     # indexes non bloquants
-    try:
-        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_cc_idcamp ON {TABLE_NAME}(ID_CAMPAGNE)")
-        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_cc_radical ON {TABLE_NAME}(Radical_compte)")
-    except Exception:
-        pass
+    cur.execute(f"CREATE INDEX IF NOT EXISTS idx_cc_idcamp ON {TABLE_NAME}(ID_CAMPAGNE)")
+    cur.execute(f"CREATE INDEX IF NOT EXISTS idx_cc_radical ON {TABLE_NAME}(Radical_compte)")
 
     conn.commit()
     conn.close()
+
 
 
 def bulk_insert_clients(rows: List[Dict[str, Any]]) -> int:
@@ -96,8 +83,6 @@ def bulk_insert_clients(rows: List[Dict[str, Any]]) -> int:
         "Nom_campagne",
         "ID_CAMPAGNE",
         "Radical_compte",
-        "statut_avant_campagne",
-        "statut_actuel",
         "Etat_campagne",
         "NB_jour_campagne",
         "ID_Action",
@@ -117,6 +102,7 @@ def bulk_insert_clients(rows: List[Dict[str, Any]]) -> int:
         # ✅ NEW
         "date_debut_campagne",
         "nb_jour_debut_campagne",
+        "conversion"
     ]
 
     sql = f"""
@@ -138,6 +124,10 @@ def bulk_insert_clients(rows: List[Dict[str, Any]]) -> int:
         # date_debut_campagne peut être ""/None si tu veux; mais idéalement campaign_service la mettra
         if "date_debut_campagne" not in r:
             r["date_debut_campagne"] = None
+        
+        if "conversion" not in r or r.get("conversion") is None:
+            r["conversion"] = 0
+
 
         values.append([r.get(c) for c in cols])
 
