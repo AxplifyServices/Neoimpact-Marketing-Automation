@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS modeles (
     nom_modele TEXT NOT NULL,
     date_creation TEXT,
     liste_action TEXT,
-    graphe_json TEXT
+    graphe_json TEXT,
+    ui_positions TEXT
 );
 """
 
@@ -37,6 +38,15 @@ def ensure_modeles_table() -> None:
     conn = _connect()
     cur = conn.cursor()
     cur.execute(CREATE_TABLE_SQL)
+
+        # --- NEW: migration légère si colonne manquante ---
+    try:
+        cur.execute("PRAGMA table_info(modeles)")
+        cols = [r[1] for r in cur.fetchall()]  # name
+        if "ui_positions" not in cols:
+            cur.execute("ALTER TABLE modeles ADD COLUMN ui_positions TEXT")
+    except Exception:
+        pass
 
     try:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_modeles_date ON modeles(date_creation)")
@@ -80,7 +90,7 @@ def list_modeles() -> List[Dict[str, Any]]:
 
     cur.execute(
         """
-        SELECT id_modele, nom_modele, date_creation, liste_action, graphe_json
+        SELECT id_modele, nom_modele, date_creation, liste_action, graphe_json, ui_positions
         FROM modeles
         ORDER BY date_creation DESC
         """
@@ -104,7 +114,7 @@ def get_modele_dict(id_modele: str) -> Optional[Dict[str, Any]]:
 
     cur.execute(
         """
-        SELECT id_modele, nom_modele, date_creation, liste_action, graphe_json
+        SELECT id_modele, nom_modele, date_creation, liste_action, graphe_json, ui_positions
         FROM modeles
         WHERE id_modele = ?
         """,
@@ -125,6 +135,11 @@ def insert_modele(modele: Modele) -> str:
         modele.id_modele = _next_modele_id(cur)
 
     try:
+         ui_positions_json = modele.ui_positions_str()
+    except Exception:
+         ui_positions_json = json.dumps(getattr(modele, "ui_positions", {}) or {}, ensure_ascii=False)
+
+    try:
         liste_action_json = modele.liste_action_json()
     except Exception:
         liste_action_json = json.dumps(modele.liste_action or [], ensure_ascii=False)
@@ -137,8 +152,8 @@ def insert_modele(modele: Modele) -> str:
     cur.execute(
         """
         INSERT INTO modeles (
-            id_modele, nom_modele, date_creation, liste_action, graphe_json
-        ) VALUES (?, ?, ?, ?, ?)
+            id_modele, nom_modele, date_creation, liste_action, graphe_json, ui_positions
+        ) VALUES (?, ?, ?, ?, ?, ?)
         """,
         (
             modele.id_modele,
@@ -146,6 +161,7 @@ def insert_modele(modele: Modele) -> str:
             modele.date_creation,
             liste_action_json,
             graphe_json,
+            ui_positions_json,  # NEW
         ),
     )
 
@@ -173,6 +189,7 @@ def update_modele_field(id_modele: str, field: str, value: Any) -> None:
         "date_creation": "date_creation",
         "liste_action": "liste_action",
         "graphe_json": "graphe_json",
+        "ui_positions": "ui_positions",  # NEW
     }
 
     col = allowed.get(field)
@@ -196,10 +213,16 @@ def dict_to_modele(d: Dict[str, Any]) -> Modele:
     except Exception:
         graphe = {}
 
+    try:
+          ui_positions = json.loads(d.get("ui_positions") or "{}")
+    except Exception:
+          ui_positions = {}
+
     return Modele(
         id_modele=str(d.get("id_modele") or ""),
         nom_modele=str(d.get("nom_modele") or ""),
         date_creation=str(d.get("date_creation") or ""),
         liste_action=liste_action,
         graphe_json=graphe,
+        ui_positions=ui_positions,
     )

@@ -241,6 +241,7 @@ def save_modele_for_ui(
     id_modele: str,
     nom_modele: str,
     blocks: List[Dict[str, Any]],
+    ui_positions: Optional[Dict[str, Any]] = None,  # NEW
 ) -> None:
     """
     Nouvelle logique:
@@ -250,11 +251,15 @@ def save_modele_for_ui(
     """
     ensure_modeles_table()
 
+    # NEW: positions UI (front only)
+    ui_positions = ui_positions if isinstance(ui_positions, dict) else {}
+
     # ✅ Validation métier via Modele.new (sans insertion)
     _ = Modele.new(
         nom_modele=nom_modele,
         liste_action=blocks,
         graphe_json=None,
+        ui_positions=ui_positions,  # NEW
     )
 
     if is_editing:
@@ -264,11 +269,13 @@ def save_modele_for_ui(
 
         update_modele_field(mid, "nom_modele", nom_modele)
         update_modele_field(mid, "liste_action", json.dumps(blocks, ensure_ascii=False))
+        update_modele_field(mid, "ui_positions", json.dumps(ui_positions, ensure_ascii=False))  # NEW
     else:
         modele = Modele.new(
             nom_modele=nom_modele,
             liste_action=blocks,
             graphe_json=None,
+            ui_positions=ui_positions,  # NEW
         )
         insert_modele(modele)
 
@@ -302,10 +309,15 @@ def get_modele_edit_payload_for_ui(id_modele: str) -> Dict[str, Any]:
     nom = _safe_str(d.get("nom_modele") or d.get("Nom_modele") or "")
     blocks = get_modele_blocks_for_ui(id_modele)
 
+    ui_positions = _safe_json_load(d.get("ui_positions"), {})
+    if not isinstance(ui_positions, dict):
+        ui_positions = {}
+
     return {
         "id_modele": _safe_str(id_modele),
         "nom_modele": nom,
         "blocks": blocks,
+        "ui_positions": ui_positions,  # NEW
     }
 
 # =========================================================

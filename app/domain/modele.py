@@ -186,25 +186,21 @@ def validate_blocs_schema(liste_action: List[Dict[str, Any]]) -> None:
             if v is not None and v != "no_goal":
                 raise ValueError("Bloc sans parent objectif: valide_objectif doit être 'no_goal' (ou absent)")
 
-    # (2) Objectif <= 2 fils (Oui/Non)
+    # (2) Objectif: autoriser plusieurs fils (Oui/Non) sans limite
     for pid, parent in id_to_block.items():
         if not bool(parent.get("objectif")):
             continue
 
         childs = children_map.get(pid, [])
-        # ne garder que ceux qui ont pid comme parent (déjà fait) + vérifier le tag
-        oui = [c for c in childs if c.get("valide_objectif") == "Oui"]
-        non = [c for c in childs if c.get("valide_objectif") == "Non"]
+
+        # chaque enfant d’un objectif doit être taggé Oui ou Non
         other = [c for c in childs if c.get("valide_objectif") not in {"Oui", "Non"}]
-
         if other:
-            raise ValueError(f"Bloc objectif #{pid}: chaque fils doit avoir valide_objectif='Oui' ou 'Non'")
+            raise ValueError(
+                f"Bloc objectif #{pid}: chaque fils doit avoir valide_objectif='Oui' ou 'Non'"
+            )
 
-        if len(oui) > 1 or len(non) > 1:
-            raise ValueError(f"Bloc objectif #{pid}: un seul fils Oui et un seul fils Non autorisés")
-
-        if len(childs) > 2:
-            raise ValueError(f"Bloc objectif #{pid}: maximum 2 fils (Oui/Non)")
+    # ✅ plus de limite sur le nombre de fils, ni sur le nombre de Oui/Non
 
 
 
@@ -219,6 +215,7 @@ class Modele:
     date_creation: str
     liste_action: List[Dict[str, Any]]
     graphe_json: Dict[str, Any]
+    ui_positions: Dict[str, Any]  # NEW (stockage positions front)
 
     # -----------------------------------------------------
     # Constructeur principal
@@ -228,6 +225,7 @@ class Modele:
         nom_modele: str,
         liste_action: List[Dict[str, Any]],
         graphe_json: Optional[Dict[str, Any]] = None,
+        ui_positions: Optional[Dict[str, Any]] = None,  # NEW
     ) -> "Modele":
 
         if not nom_modele or not nom_modele.strip():
@@ -244,6 +242,7 @@ class Modele:
             date_creation=dc,
             liste_action=liste_action,
             graphe_json=graphe_json or {"nodes": [], "edges": []},
+            ui_positions=ui_positions or {},
         )
 
     # -----------------------------------------------------
@@ -254,3 +253,6 @@ class Modele:
 
     def graphe_json_str(self) -> str:
         return json.dumps(self.graphe_json, ensure_ascii=False)
+    
+    def ui_positions_str(self) -> str:
+        return json.dumps(self.ui_positions or {}, ensure_ascii=False)

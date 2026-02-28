@@ -53,6 +53,7 @@ class ModeleSaveIn(BaseModel):
 
     # nouveau
     blocks: List[Dict[str, Any]]
+    ui_positions: Optional[Dict[str, Any]] = Field(default=None)  # NEW
 
 
 # =========================================================
@@ -162,6 +163,7 @@ def save_modele(payload: ModeleSaveIn):
             id_modele=(payload.id_modele or "").strip(),
             nom_modele=payload.nom_modele,
             blocks=payload.blocks,
+            ui_positions=payload.ui_positions,
         )
         return {"ok": True}
 

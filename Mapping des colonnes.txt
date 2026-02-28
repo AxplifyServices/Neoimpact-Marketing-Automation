@@ -1,0 +1,79 @@
+Nouvelles colonnes : 
+
+is_actif_sem: Oui / Non
+is_actif_mois: Oui / Non
+is_actif_trois_mois: Oui / Non
+is_actif_an: Oui / Non
+
+is_inactif_sem: Oui / Non
+is_inactif_mois: Oui / Non
+is_inactif_trois_mois: Oui / Non
+is_inactif_an : Oui / Non
+
+credit_conso : Oui / Non
+credit_immo : Oui / Non
+credit_autre : Oui / Non
+
+Eligible_credit : Oui / Non
+
+Compte CIH Mobile active : Oui / Non
+
+Compte MAD convertible : Oui / Non
+
+Compte MAD convertible active : Oui / Non
+
+Carte viertuelle active : Oui / Non
+
+Nb Operation : Numérique
+Vol Operation : Numérique
+
+Colonne à modifier : 
+
+Epargne : Oui / Non
+Segment Actuel : Affluent / En stress / Jeunes / Mass Market / Premium / Medium / Haut de gamme
+Assurance : Actuelle Aucune / Immobilier / Vie
+Nature Carte : CMI / MasterCard / Visa / Aucune
+Dossier Complet : Oui / Non
+Validation KYC : Oui / Non
+Activation Du Compte : Oui / Non
+Activation Carte : Oui / Non
+Compte CIH Mobile : Oui / Non
+
+Qualite : Femme / Homme
+Canal Acquisition : Agence / Digital
+
+Mapping de l'existant : 
+
+STATUT CLIENT : Actif / Inactif / Prospect / Rupture de relation
+Carte Actuelle : Aucune / Black / Classic / Code 212 / Code 30 / Gold / Silver / Standard
+Categorie : Entreprise / Particulier / Pro/TPE
+Revenu Domicilie : Oui / Non
+App Instaled : Oui / Non
+Premiere Connex : Oui / Non
+Carte Dispo Agence : Oui / Non
+Carte Retiree : Oui / Non 
+Carte Virtuelle : Oui / Non
+Chequier Dispo Agence : Oui / Non
+Chequier Retire : Oui / Non
+Chequier Active : Oui / Non
+Dotation Touristique : Oui / Non
+Dotation Ecom : Oui / Non
+Compte MAD Convertible : Oui / Non
+
+Nb Transaction : Numérique
+Vol Transaction : Numérique
+Nb Retrait Gab : Numérique
+Vol Retrait Gab : Numérique
+Nb Transaction Ecom : Numérique
+Vol Transaction Ecom : Numérique
+Nb Virement : Numérique
+Vol Virement : Numérique
+Solde Moyen Depots : Numérique
+Encours Moyen : Numérique
+Encours Global : Numérique
+Encours Conso : Numérique
+Encours Immo : Numérique
+Montant Revenu : Numérique
+
+
+

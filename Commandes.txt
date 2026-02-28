@@ -62,8 +62,12 @@ docker run --rm \
   -e MA_DB_PATH=/app/database.db \
   -v "$PWD/database.db:/app/database.db" \
   marketing_app:latest \
-  python -m app.scripts.migrate_add_conversion_column
+  python -m app.scripts.migrate_clients_add_cols_and_normalize
 
+
+Log : 
+
+docker logs -f marketing_app
 
 
 
