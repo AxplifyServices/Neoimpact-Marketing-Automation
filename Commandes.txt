@@ -62,7 +62,7 @@ docker run --rm \
   -e MA_DB_PATH=/app/database.db \
   -v "$PWD/database.db:/app/database.db" \
   marketing_app:latest \
-  python -m app.scripts.migrate_clients_add_cols_and_normalize
+  python -m app.scripts.migrate_add_ui_positions
 
 
 Log : 
@@ -70,4 +70,26 @@ Log :
 docker logs -f marketing_app
 
 
+Clé Git action : 
 
++--[ED25519 256]--+
+|         o.+oo o |
+|        o.+.* o +|
+|       o.o.= o.oo|
+|       .o.+.=o+o |
+|        S..*.*.oo|
+|          . O   *|
+|           * + = |
+|          . Eo+ .|
+|           oo.o..|
++----[SHA256]-----+
+
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDW0ramQK9Q2uHytiUTw2FvdLPU5Bk+DJFesQXS8J0KC github-actions-deploy
+
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACA1tK2pkCvUNrh8rYlE8Nhb3Sz1OQZPgyRXrEF0vCdCggAAAJhX8+9hV/Pv
+YQAAAAtzc2gtZWQyNTUxOQAAACA1tK2pkCvUNrh8rYlE8Nhb3Sz1OQZPgyRXrEF0vCdCgg
+AAAEBmj86swx6wTAh0BqlEOWb8oFkTRyWkv76WqV20FQKA+DW0ramQK9Q2uHytiUTw2Fvd
+LPU5Bk+DJFesQXS8J0KCAAAAFWdpdGh1Yi1hY3Rpb25zLWRlcGxveQ==
+-----END OPENSSH PRIVATE KEY-----
