@@ -23,7 +23,7 @@ from app.streamlit.Formulaire_nouveau_client_int import main as new_client_main
 
 
 def creation_view():
-    st.title("🧩 Création")
+    st.title("🧩 Création CI/CD Automatisé")
     st.caption("Gérer les Cibles et les Modèles depuis un seul endroit.")
 
     if "creation_tab" not in st.session_state:
