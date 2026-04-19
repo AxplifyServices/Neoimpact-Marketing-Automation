@@ -104,6 +104,12 @@ def main():
         mdl_lbl = st.selectbox("Modèle", modele_labels)
         cbl_lbl = st.selectbox("Cible", cible_labels)
 
+        type_campagne = st.selectbox(
+            "Type de campagne",
+            ["sans_action_terrain", "avec_action_terrain"],
+            index=0,
+        )
+
         col_a, col_b = st.columns([0.85, 0.15], vertical_alignment="center")
         with col_b:
             if st.button("✅ Créer", use_container_width=True):
@@ -118,6 +124,7 @@ def main():
                     date_debut=d_debut.isoformat(),
                     date_fin=d_fin.isoformat(),
                     description=description,  # ✅ NEW
+                    type_campagne=type_campagne,
                 )
                 st.success(
                     f"Campagne créée ✅ ID={res['id_campagne']} | état={res['etat_campagne']} | "

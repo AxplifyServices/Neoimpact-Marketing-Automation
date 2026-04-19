@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI
 
 from app.api.routers.health import router as health_router
@@ -11,6 +14,7 @@ from app.api.routers.queues import router as queues_router
 from app.api.routers.data_admin import router as data_admin_router
 from app.api.routers.dashboard import router as dashboard_router
 from app.api.routers.clients import router as clients_router
+from app.api.routers.terrain_queues import router as terrain_queues_router
 
 app = FastAPI(
     title="Marketing Automation API",
@@ -36,3 +40,4 @@ app.include_router(queues_router, prefix=API_PREFIX, tags=["Queues"])
 app.include_router(data_admin_router, prefix=API_PREFIX, tags=["Data"])
 app.include_router(dashboard_router, prefix=API_PREFIX, tags=["Dashboard"])
 app.include_router(clients_router, prefix=API_PREFIX, tags=["Clients"])
+app.include_router(terrain_queues_router, prefix=API_PREFIX, tags=["Terrain Queues"])

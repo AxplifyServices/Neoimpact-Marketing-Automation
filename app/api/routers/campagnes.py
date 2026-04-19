@@ -38,6 +38,7 @@ class CampagneCreateIn(BaseModel):
     date_debut: str
     date_fin: str
     description: Optional[str] = Field(default="")
+    type_campagne: Optional[str] = Field(default="sans_action_terrain")
 
 
 # =========================================================
@@ -200,6 +201,7 @@ def create_campagne_endpoint(payload: CampagneCreateIn):
             date_fin=payload.date_fin,
             etat_campagne=None,
             description=payload.description,
+            type_campagne=payload.type_campagne,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

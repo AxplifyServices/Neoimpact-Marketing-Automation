@@ -53,6 +53,17 @@ CANAL_MAPPING: Dict[str, Dict[str, object]] = {
         "compteur": "NB_approche_commercial",
         "resultats": ["Non Aboutit", "Aboutit"],
     },
+
+    "Push notification": {
+    "action": "Push notification",
+    "resultats": [
+        "Transmis",
+        "Non transmis",
+        "Lu",
+        "Non lu"
+    ],
+    "compteur": "NB_push"
+}
 }
 
 

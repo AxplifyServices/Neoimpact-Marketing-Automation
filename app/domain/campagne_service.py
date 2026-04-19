@@ -161,9 +161,11 @@ def _delete_outputs_for_campagne(id_campagne: str) -> Dict[str, int]:
         "crc": "crc_input",
         "cc": "vers_cc",
         "da": "vers_da",
+        "cc_terrain": "vers_cc_terrain",
+        "da_terrain": "vers_da_terrain",
     }
 
-    deleted = {"crc": 0, "cc": 0, "da": 0}
+    deleted = {"crc": 0, "cc": 0, "da": 0, "cc_terrain": 0, "da_terrain": 0}
 
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -225,7 +227,7 @@ def _route_initial_queues_for_campaign(id_campagne: str) -> Dict[str, int]:
     finally:
         conn.close()
 
-    counts = {"crc": 0, "cc": 0, "da": 0}
+    counts = {"crc": 0, "cc": 0, "da": 0, "cc_terrain": 0, "da_terrain": 0}
 
     for rc in radicals:
         res = route_after_update(id_campagne, rc)
@@ -237,6 +239,10 @@ def _route_initial_queues_for_campaign(id_campagne: str) -> Dict[str, int]:
             counts["cc"] += 1
         elif final_rt == "vers_da":
             counts["da"] += 1
+        elif final_rt == "vers_cc_terrain":
+            counts["cc_terrain"] += 1
+        elif final_rt == "vers_da_terrain":
+            counts["da_terrain"] += 1
 
     return counts
 
@@ -250,6 +256,7 @@ def create_campagne(
     date_fin: str,
     etat_campagne: str | None = None,
     description: str | None = None,
+    type_campagne: str | None = None,
 ) -> Dict[str, Any]:
     """
     Crée campagne + peuple clients_campagnes.
@@ -264,6 +271,10 @@ def create_campagne(
     # 0) Etat campagne
     if not etat_campagne:
         etat_campagne = _infer_etat(date_debut, date_fin)
+    
+    type_campagne = _norm_str(type_campagne) or "sans_action_terrain"
+    if type_campagne not in ("sans_action_terrain", "avec_action_terrain"):
+        raise ValueError("type_campagne invalide: sans_action_terrain | avec_action_terrain")
 
     # 1) Charger modèle (nouveau schéma / ancien toléré)
     modele = get_modele_dict(id_modele) or {}
@@ -326,6 +337,7 @@ def create_campagne(
         date_fin=date_fin,
         etat_campagne=etat_campagne,
         description=description,
+        type_campagne=type_campagne,
     )
 
     # 7) Préparer lignes clients_campagnes
@@ -378,7 +390,7 @@ def create_campagne(
     # 9) Sync état campagne sur clients_campagnes
     set_clients_etat_for_campagne(id_campagne, etat_campagne)
 
-    output_counts = {"crc": 0, "cc": 0, "da": 0}
+    output_counts = {"crc": 0, "cc": 0, "da": 0, "cc_terrain": 0, "da_terrain": 0}
     mail_summary = None
 
     # 10) Si "En cours" uniquement: mails init puis routage métier (queues)
@@ -395,7 +407,7 @@ def create_campagne(
         try:
             output_counts = _route_initial_queues_for_campaign(id_campagne)
         except Exception:
-            output_counts = {"crc": 0, "cc": 0, "da": 0}
+            output_counts = {"crc": 0, "cc": 0, "da": 0, "cc_terrain": 0, "da_terrain": 0}
 
     return {
         "id_campagne": id_campagne,
@@ -404,6 +416,7 @@ def create_campagne(
         "nb_exclus_rupture": int(removed_rupture),
         "nb_clients_insérés": int(len(rows)),
         "etat_campagne": etat_campagne,
+        "type_campagne": type_campagne,
         "id_action_initial": id_action_init,
         "canal_initial": canal_init,
         "action_initiale": action_init,
@@ -422,7 +435,7 @@ def annuler_campagne(id_campagne: str) -> Dict[str, Any]:
     update_etat(id_campagne, "Annulée")
     set_clients_etat_for_campagne(id_campagne, "Annulée")
 
-    deleted = {"crc": 0, "cc": 0, "da": 0}
+    deleted = {"crc": 0, "cc": 0, "da": 0, "cc_terrain": 0, "da_terrain": 0}
     try:
         deleted = _delete_outputs_for_campagne(id_campagne)
     except Exception as e:
@@ -466,7 +479,7 @@ def mettre_en_pause_campagne(id_campagne: str) -> Dict[str, Any]:
     update_etat(id_campagne, "En pause")
     set_clients_etat_for_campagne(id_campagne, "En pause")
 
-    deleted = {"crc": 0, "cc": 0, "da": 0}
+    deleted = {"crc": 0, "cc": 0, "da": 0, "cc_terrain": 0, "da_terrain": 0}
     try:
         deleted = _delete_outputs_for_campagne(id_campagne)
     except Exception as e:
@@ -514,14 +527,14 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
     set_clients_etat_for_campagne(id_campagne, new_etat)
 
     # nettoyer queues associées avant décision
-    deleted = {"crc": 0, "cc": 0, "da": 0}
+    deleted = {"crc": 0, "cc": 0, "da": 0, "cc_terrain": 0, "da_terrain": 0}
     try:
         deleted = _delete_outputs_for_campagne(id_campagne)
     except Exception:
         pass
 
     mail_summary = None
-    output_counts = {"crc": 0, "cc": 0, "da": 0}
+    output_counts = {"crc": 0, "cc": 0, "da": 0, "cc_terrain": 0, "da_terrain": 0}
     new_clients_added = 0  # NEW
 
     if new_etat == "En cours":
@@ -563,7 +576,7 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
         try:
             output_counts = _route_initial_queues_for_campaign(id_campagne)
         except Exception:
-            output_counts = {"crc": 0, "cc": 0, "da": 0}
+            output_counts = {"crc": 0, "cc": 0, "da": 0, "cc_terrain": 0, "da_terrain": 0}
 
     return {
         "id_campagne": id_campagne,

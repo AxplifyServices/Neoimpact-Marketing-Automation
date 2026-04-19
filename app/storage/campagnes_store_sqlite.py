@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
     date_fin      TEXT NOT NULL,
     Etat_campagne TEXT NOT NULL,
     date_creation TEXT NOT NULL,
-    description   TEXT
+    description   TEXT,
+    type_campagne  TEXT NOT NULL DEFAULT 'sans_action_terrain'
 )
 """
 
@@ -51,6 +52,7 @@ def insert_campagne(
     date_fin: str,
     etat_campagne: str,
     description: Optional[str] = None,
+    type_campagne: str = "sans_action_terrain",
 ) -> str:
     """
     Signature attendue par campagne_service.py
@@ -79,9 +81,10 @@ def insert_campagne(
             date_fin,
             Etat_campagne,
             date_creation,
-            description
+            description,
+            type_campagne
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             id_campagne,
@@ -93,6 +96,7 @@ def insert_campagne(
             str(etat_campagne),
             today,
             description_v,
+            str(type_campagne or "sans_action_terrain").strip(),
         ),
     )
 

@@ -62,6 +62,17 @@ def _get_id_modele_for_campagne(conn: sqlite3.Connection, id_campagne: str) -> O
     r = cur.fetchone()
     return _norm_str(r["id_modele"]) if r else None
 
+def _get_type_campagne_for_campagne(conn: sqlite3.Connection, id_campagne: str) -> str:
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute(
+        f"SELECT type_campagne FROM {CAMPAGNES_TABLE} WHERE id_campagne = ?",
+        (id_campagne,),
+    )
+    r = cur.fetchone()
+    val = _norm_str(r["type_campagne"]) if r and "type_campagne" in r.keys() else ""
+    return val or "sans_action_terrain"
+
 
 def _get_liste_action_for_modele(conn: sqlite3.Connection, id_modele: str) -> List[Dict[str, Any]]:
     conn.row_factory = sqlite3.Row
@@ -437,6 +448,20 @@ def apply_result_from_queue(row: Dict[str, Any], resultat_label: str, queue_tabl
     # routage immédiat
     return route_after_update(id_campagne, radical)
 
+def _resolve_queue_for_action(action: str, type_campagne: str) -> str:
+    action = _norm_str(action)
+    type_campagne = _norm_str(type_campagne) or "sans_action_terrain"
+
+    if action == "Appeler":
+        return "crc_input"
+
+    if action == "Directeur d'agence":
+        return "vers_da_terrain" if type_campagne == "avec_action_terrain" else "vers_da"
+
+    if action == "Conseiller client":
+        return "vers_cc_terrain" if type_campagne == "avec_action_terrain" else "vers_cc"
+
+    return ""
 
 def route_after_update(id_campagne: str, radical_compte: str) -> Dict[str, Any]:
     """
@@ -460,6 +485,8 @@ def route_after_update(id_campagne: str, radical_compte: str) -> Dict[str, Any]:
         cc = dict(r)
         canal = _norm_str(cc.get("Canal"))
         action = _norm_str(cc.get("Action"))
+        type_campagne = _get_type_campagne_for_campagne(conn, id_campagne)
+
         # NEW: un bloc objectif est une "gate" -> pas de routage queue/mail
         if canal == "Objectif" or action == "Objectif":
             return {"ok": True, "routed_to": "none", "action": action, "canal": canal}
@@ -467,17 +494,10 @@ def route_after_update(id_campagne: str, radical_compte: str) -> Dict[str, Any]:
     finally:
         conn.close()
 
-    if action == "Appeler":
-        _append_one_to_queue("crc_input", id_campagne, radical_compte)
-        return {"ok": True, "routed_to": "crc_input"}
-
-    if action == "Directeur d'agence":
-        _append_one_to_queue("vers_da", id_campagne, radical_compte)
-        return {"ok": True, "routed_to": "vers_da"}
-
-    if action == "Conseiller client":
-        _append_one_to_queue("vers_cc", id_campagne, radical_compte)
-        return {"ok": True, "routed_to": "vers_cc"}
+    queue_name = _resolve_queue_for_action(action, type_campagne)
+    if queue_name:
+        _append_one_to_queue(queue_name, id_campagne, radical_compte)
+        return {"ok": True, "routed_to": queue_name}
 
     if _is_mail_node(canal, action):
         mail_summary = _send_mail_for_one_client_and_advance(id_campagne, radical_compte, max_steps=10)
@@ -485,3 +505,4 @@ def route_after_update(id_campagne: str, radical_compte: str) -> Dict[str, Any]:
         return {"ok": True, "routed_to": "mail", "mail": mail_summary, "post_mail": post}
 
     return {"ok": True, "routed_to": "none", "action": action, "canal": canal}
+
