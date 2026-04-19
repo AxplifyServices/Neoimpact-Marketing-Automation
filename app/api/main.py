@@ -15,11 +15,7 @@ from app.api.routers.data_admin import router as data_admin_router
 from app.api.routers.dashboard import router as dashboard_router
 from app.api.routers.clients import router as clients_router
 from app.api.routers.terrain_queues import router as terrain_queues_router
-
-app = FastAPI(
-    title="Marketing Automation API",
-    version="1.0.0",
-)
+from fastapi.middleware.cors import CORSMiddleware
 
 API_PREFIX = "/api"
 
@@ -29,6 +25,21 @@ ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:5173",
 ]
+
+app = FastAPI(
+    title="Marketing Automation API",
+    version="1.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 
 
 app.include_router(health_router, prefix=API_PREFIX, tags=["Health"])
