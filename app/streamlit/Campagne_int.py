@@ -110,6 +110,26 @@ def main():
             index=0,
         )
 
+        visitMode = None
+        visitPurpose = None
+
+        if type_campagne == "avec_action_terrain":
+            t1, t2 = st.columns([1, 1])
+
+            with t1:
+                visitMode = st.selectbox(
+                    "Mode de visite",
+                    ["A_DISTANCE", "TERRAIN"],
+                    index=0,
+                )
+
+            with t2:
+                visitPurpose = st.selectbox(
+                    "Objet de la visite",
+                    ["COMMERCIAL", "RECOUVREMENT"],
+                    index=0,
+                )
+
         col_a, col_b = st.columns([0.85, 0.15], vertical_alignment="center")
         with col_b:
             if st.button("✅ Créer", use_container_width=True):
@@ -125,6 +145,8 @@ def main():
                     date_fin=d_fin.isoformat(),
                     description=description,  # ✅ NEW
                     type_campagne=type_campagne,
+                    visitMode=visitMode,
+                    visitPurpose=visitPurpose,
                 )
                 st.success(
                     f"Campagne créée ✅ ID={res['id_campagne']} | état={res['etat_campagne']} | "
@@ -229,6 +251,12 @@ def main():
 
                 # ✅ NEW: description affichée
                 st.write(f"**Description :** {desc if desc else '—'}")
+
+                st.write(f"**Type campagne :** {c.get('type_campagne', '—')}")
+
+                if c.get("type_campagne") == "avec_action_terrain":
+                    st.write(f"**Mode de visite :** {c.get('visitMode') or '—'}")
+                    st.write(f"**Objet de la visite :** {c.get('visitPurpose') or '—'}")
 
                 st.markdown("**Graphe du modèle**")
 

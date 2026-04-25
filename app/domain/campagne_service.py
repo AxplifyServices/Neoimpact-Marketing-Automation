@@ -257,6 +257,8 @@ def create_campagne(
     etat_campagne: str | None = None,
     description: str | None = None,
     type_campagne: str | None = None,
+    visitMode: str | None = None,
+    visitPurpose: str | None = None,
 ) -> Dict[str, Any]:
     """
     Crée campagne + peuple clients_campagnes.
@@ -275,6 +277,18 @@ def create_campagne(
     type_campagne = _norm_str(type_campagne) or "sans_action_terrain"
     if type_campagne not in ("sans_action_terrain", "avec_action_terrain"):
         raise ValueError("type_campagne invalide: sans_action_terrain | avec_action_terrain")
+
+    visitMode = _norm_str(visitMode) or None
+    visitPurpose = _norm_str(visitPurpose) or None
+
+    if type_campagne == "avec_action_terrain":
+        if visitMode not in ("A_DISTANCE", "TERRAIN"):
+            raise ValueError("visitMode invalide: A_DISTANCE | TERRAIN")
+        if visitPurpose not in ("COMMERCIAL", "RECOUVREMENT"):
+            raise ValueError("visitPurpose invalide: COMMERCIAL | RECOUVREMENT")
+    else:
+        visitMode = None
+        visitPurpose = None
 
     # 1) Charger modèle (nouveau schéma / ancien toléré)
     modele = get_modele_dict(id_modele) or {}
@@ -338,6 +352,8 @@ def create_campagne(
         etat_campagne=etat_campagne,
         description=description,
         type_campagne=type_campagne,
+        visitMode=visitMode,
+        visitPurpose=visitPurpose,
     )
 
     # 7) Préparer lignes clients_campagnes
@@ -403,12 +419,41 @@ def create_campagne(
             except Exception as e:
                 mail_summary = {"error": "mail_meta_loop_failed", "details": str(e)}
 
-        # (B) Routage initial (métier) vers CRC/CC/DA
+        # (B) Routage initial
         try:
-            output_counts = _route_initial_queues_for_campaign(id_campagne)
-        except Exception:
-            output_counts = {"crc": 0, "cc": 0, "da": 0, "cc_terrain": 0, "da_terrain": 0}
+            if (
+                type_campagne == "avec_action_terrain"
+                and action_init in ("Directeur d'agence", "Conseiller client")
+            ):
+                from app.domain.terrain_visit_webhook import dispatch_pending_visits_for_campaign
 
+                dispatch = dispatch_pending_visits_for_campaign(id_campagne)
+
+                output_counts = {
+                    "crc": 0,
+                    "cc": 0,
+                    "da": 0,
+                    "cc_terrain": 0,
+                    "da_terrain": 0,
+                    "external_visit_sent": int(dispatch.get("sent") or 0),
+                    "external_visit_skipped": int(dispatch.get("skipped") or 0),
+                    "external_visit_errors": int(dispatch.get("errors") or 0),
+                }
+            else:
+                output_counts = _route_initial_queues_for_campaign(id_campagne)
+
+        except Exception as e:
+            output_counts = {
+                "crc": 0,
+                "cc": 0,
+                "da": 0,
+                "cc_terrain": 0,
+                "da_terrain": 0,
+                "external_visit_sent": 0,
+                "external_visit_skipped": 0,
+                "external_visit_errors": 0,
+                "error": str(e),
+            }
     return {
         "id_campagne": id_campagne,
         "nb_cible_initial": nb_init,
@@ -422,6 +467,8 @@ def create_campagne(
         "action_initiale": action_init,
         "mail_meta_loop": mail_summary,
         "output_insert": output_counts,
+        "visitMode": visitMode,
+        "visitPurpose": visitPurpose,
     }
 
 

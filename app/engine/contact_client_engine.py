@@ -18,6 +18,8 @@ from app.domain.workflow_nav import (
     objective_branch,
 )
 
+from app.domain.terrain_visit_webhook import send_visit_for_client
+
 CLIENTS_CAMPAGNES_TABLE = "clients_campagnes"
 CAMPAGNES_TABLE = "campagnes"
 MODELES_TABLE = "modeles"
@@ -367,15 +369,46 @@ def apply_result_from_queue(row: Dict[str, Any], resultat_label: str, queue_tabl
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
 
+        block_id = _norm_str(row.get("ID_Action"))
+
         cur.execute(
-            f"SELECT rowid as __rid, * FROM {CLIENTS_CAMPAGNES_TABLE} WHERE ID_CAMPAGNE=? AND Radical_compte=?",
-            (id_campagne, radical),
+            f"""
+            SELECT rowid as __rid, *
+            FROM {CLIENTS_CAMPAGNES_TABLE}
+            WHERE ID_CAMPAGNE = ?
+              AND Radical_compte = ?
+              AND ID_Action = ?
+            """,
+            (id_campagne, radical, block_id),
         )
+
         r = cur.fetchone()
         if not r:
-            cur.execute(f"DELETE FROM {queue_table} WHERE ID_CAMPAGNE=? AND Radical_compte=?", (id_campagne, radical))
+            if queue_table == "external_visit_dispatches":
+                cur.execute(
+                    """
+                    UPDATE external_visit_dispatches
+                    SET status = 'callback_not_matched'
+                    WHERE id_campagne = ?
+                      AND radical_compte = ?
+                      AND block_id = ?
+                    """,
+                    (id_campagne, radical, block_id),
+                )
+            else:
+                cur.execute(
+                    f"DELETE FROM {queue_table} WHERE ID_CAMPAGNE=? AND Radical_compte=?",
+                    (id_campagne, radical),
+                )
+
             conn.commit()
-            return {"ok": False, "error": "client_campagne_not_found"}
+            return {
+                "ok": False,
+                "error": "client_campagne_not_found_or_not_on_this_block",
+                "id_campagne": id_campagne,
+                "radical_compte": radical,
+                "block_id": block_id,
+            }
 
         cc = dict(r)
         rid = int(cc["__rid"])
@@ -438,8 +471,24 @@ def apply_result_from_queue(row: Dict[str, Any], resultat_label: str, queue_tabl
                 conn.commit()
 
 
-        # suppression queue
-        cur.execute(f"DELETE FROM {queue_table} WHERE ID_CAMPAGNE=? AND Radical_compte=?", (id_campagne, radical))
+        # suppression / marquage source
+        if queue_table == "external_visit_dispatches":
+            cur.execute(
+                """
+                UPDATE external_visit_dispatches
+                SET status = 'callback_received'
+                WHERE id_campagne = ?
+                  AND radical_compte = ?
+                  AND block_id = ?
+                """,
+                (id_campagne, radical, block_id),
+            )
+        else:
+            cur.execute(
+                f"DELETE FROM {queue_table} WHERE ID_CAMPAGNE=? AND Radical_compte=?",
+                (id_campagne, radical, block_id),
+            )
+
         conn.commit()
 
     finally:
@@ -456,10 +505,10 @@ def _resolve_queue_for_action(action: str, type_campagne: str) -> str:
         return "crc_input"
 
     if action == "Directeur d'agence":
-        return "vers_da_terrain" if type_campagne == "avec_action_terrain" else "vers_da"
+        return "" if type_campagne == "avec_action_terrain" else "vers_da"
 
     if action == "Conseiller client":
-        return "vers_cc_terrain" if type_campagne == "avec_action_terrain" else "vers_cc"
+        return "" if type_campagne == "avec_action_terrain" else "vers_cc"
 
     return ""
 
@@ -493,6 +542,14 @@ def route_after_update(id_campagne: str, radical_compte: str) -> Dict[str, Any]:
 
     finally:
         conn.close()
+
+    if type_campagne == "avec_action_terrain" and action in ("Directeur d'agence", "Conseiller client"):
+        dispatch = send_visit_for_client(id_campagne, radical_compte)
+        return {
+            "ok": bool(dispatch.get("ok")),
+            "routed_to": "external_visit_webhook",
+            "dispatch": dispatch,
+        }
 
     queue_name = _resolve_queue_for_action(action, type_campagne)
     if queue_name:

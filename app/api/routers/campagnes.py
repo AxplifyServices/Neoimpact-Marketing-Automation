@@ -25,6 +25,8 @@ from app.domain.campagne_service import (
     activer_campagne as _activer_campagne,
 )
 
+from app.domain.terrain_visit_webhook import dispatch_pending_visits_for_campaign
+
 router = APIRouter()
 
 
@@ -39,6 +41,10 @@ class CampagneCreateIn(BaseModel):
     date_fin: str
     description: Optional[str] = Field(default="")
     type_campagne: Optional[str] = Field(default="sans_action_terrain")
+
+     # Uniquement utile si type_campagne = avec_action_terrain
+    visitMode: Optional[str] = Field(default=None)      # A_DISTANCE | TERRAIN
+    visitPurpose: Optional[str] = Field(default=None)   # COMMERCIAL | RECOUVREMENT
 
 
 # =========================================================
@@ -202,6 +208,8 @@ def create_campagne_endpoint(payload: CampagneCreateIn):
             etat_campagne=None,
             description=payload.description,
             type_campagne=payload.type_campagne,
+            visitMode=payload.visitMode,
+            visitPurpose=payload.visitPurpose,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -239,7 +247,20 @@ def activer_campagne(id_campagne: str):
         raise HTTPException(status_code=400, detail=res.get("error", "Activation impossible"))
     return res
 
+@router.post("/campagnes/{id_campagne}/dispatch-terrain")
+def dispatch_terrain_for_campaign(id_campagne: str):
+    """
+    Envoie vers la plateforme terrain tous les clients actuellement positionnés
+    sur un bloc DA/CC d'une campagne avec action terrain.
 
+    Sécurisé anti-doublon via external_visit_dispatches :
+    un même client + bloc n'est pas renvoyé si déjà envoyé.
+    """
+    try:
+        return dispatch_pending_visits_for_campaign(id_campagne)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
 # =========================================================
 # Endpoints META (additifs -> ne cassent rien)
 # =========================================================

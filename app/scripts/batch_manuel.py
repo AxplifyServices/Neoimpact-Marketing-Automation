@@ -43,6 +43,8 @@ from app.domain.workflow_nav import (
     objective_branch,
 )
 
+from app.domain.terrain_visit_webhook import dispatch_pending_visits_for_campaign
+
 CLIENTS_CAMPAGNES_TABLE = "clients_campagnes"
 CAMPAGNES_TABLE = "campagnes"
 MODELES_TABLE = "modeles"
@@ -566,26 +568,47 @@ def _rebuild_outputs_for_all_en_cours(conn: sqlite3.Connection, campagnes: List[
     cur = conn.cursor()
     cur.execute("DELETE FROM vers_da")
     cur.execute("DELETE FROM vers_cc")
+
+    # Anciennes queues terrain : on les vide, elles ne servent plus.
+    cur.execute("DELETE FROM vers_da_terrain") if _table_exists(conn, "vers_da_terrain") else None
+    cur.execute("DELETE FROM vers_cc_terrain") if _table_exists(conn, "vers_cc_terrain") else None
+
     conn.commit()
 
     n_crc = 0
     n_da = 0
     n_cc = 0
+    n_external_sent = 0
+    n_external_errors = 0
 
     for c in campagnes:
         etat = _norm_str(c.get("etat") or c.get("etat_campagne"))
         if etat != "En cours":
             continue
+
         id_c = _norm_str(c.get("id_campagne"))
         if not id_c:
             continue
 
+        type_campagne = _norm_str(c.get("type_campagne")) or "sans_action_terrain"
+
         n_crc += int(fill_crc_input_from_clients_campagnes(id_c) or 0)
-        n_da += int(fill_action_vers_da_from_clients_campagnes(id_c) or 0)
-        n_cc += int(fill_action_vers_cc_from_clients_campagnes(id_c) or 0)
 
-    return {"crc_input": n_crc, "vers_da": n_da, "vers_cc": n_cc}
+        if type_campagne == "avec_action_terrain":
+            dispatch = dispatch_pending_visits_for_campaign(id_c)
+            n_external_sent += int(dispatch.get("sent") or 0)
+            n_external_errors += int(dispatch.get("errors") or 0)
+        else:
+            n_da += int(fill_action_vers_da_from_clients_campagnes(id_c) or 0)
+            n_cc += int(fill_action_vers_cc_from_clients_campagnes(id_c) or 0)
 
+    return {
+        "crc_input": n_crc,
+        "vers_da": n_da,
+        "vers_cc": n_cc,
+        "external_visit_sent": n_external_sent,
+        "external_visit_errors": n_external_errors,
+    }
 
 # =========================================================
 # Public (lié au bouton refresh)
