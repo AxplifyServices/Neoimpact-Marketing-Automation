@@ -18,8 +18,9 @@ from app.storage.cibles_store_sqlite import (
     get_distinct_values_clients,
     load_clients_df_for_cible,
 )
-from app.storage.campagnes_store_sqlite import list_campagnes_active
+from app.storage.campagnes_store_sqlite import list_campagnes_active, list_all_campagnes
 from app.domain.cible import Cible
+
 
 
 # =========================================================
@@ -142,6 +143,26 @@ def get_distinct_values_for_ui(sql_column: str) -> List[str]:
         return []
     return get_distinct_values_clients(sql_column) or []
 
+def list_campaigns_for_objective_filter_ui() -> List[Dict[str, Any]]:
+    """
+    Campagnes sélectionnables dans le filtre :
+    clients ayant déjà atteint un objectif dans une ou plusieurs campagnes.
+    """
+    rows = list_all_campagnes() or []
+
+    out = []
+    for r in rows:
+        cid = _safe_str(r.get("id_campagne"))
+        if not cid:
+            continue
+
+        out.append({
+            "id_campagne": cid,
+            "nom_campagne": _safe_str(r.get("nom_campagne")),
+            "etat": _safe_str(r.get("Etat_campagne") or r.get("etat_campagne") or r.get("etat")),
+        })
+
+    return out
 
 # =========================================================
 # Upload + import

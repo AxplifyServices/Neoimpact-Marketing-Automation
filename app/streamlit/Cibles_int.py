@@ -34,6 +34,7 @@ from app.domain.ui_facades.cibles_ui_facade import (
     update_cible_for_ui,
     delete_cible_for_ui,
     preview_cible_for_ui,
+    list_campaigns_for_objective_filter_ui,
 )
 
 # =========================================================
@@ -319,6 +320,31 @@ def main() -> None:
 
                 if max_val and max_val >= min_val:
                     filtre[db_field] = {"min": min_val, "max": max_val}
+
+            st.markdown("#### Filtre objectif atteint dans une autre campagne")
+
+            campagnes = list_campaigns_for_objective_filter_ui()
+            campagne_options = {
+                f"{c.get('nom_campagne') or c.get('id_campagne')} — {c.get('id_campagne')} [{c.get('etat')}]": c.get("id_campagne")
+                for c in campagnes
+            }
+
+            selected_campaign_labels = st.multiselect(
+                "Garder uniquement les clients ayant atteint un objectif dans ces campagnes",
+                options=list(campagne_options.keys()),
+                key="objectif_campagnes_filter",
+            )
+
+            selected_campaign_ids = [
+                campagne_options[label]
+                for label in selected_campaign_labels
+                if campagne_options.get(label)
+            ]
+
+            if selected_campaign_ids:
+                filtre["__objectif_campagnes__"] = {
+                    "values": selected_campaign_ids
+                }
 
             if st.button("✅ Créer la cible (DB)", type="primary"):
                 try:

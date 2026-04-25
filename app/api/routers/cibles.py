@@ -23,6 +23,7 @@ from app.domain.ui_facades.cibles_ui_facade import (
     save_uploaded_file_for_ui,
     import_leads_into_clients_for_ui,
     get_cible_filtre_dict_for_ui,
+    list_campaigns_for_objective_filter_ui,
 )
 
 router = APIRouter()
@@ -153,6 +154,15 @@ def list_cibles(
         "next_page_start": page_start + nb_pages if end < len(cibles) else None,
     }
 
+@router.get("/cibles/objective-campaigns")
+def list_objective_campaigns_for_cible_filter():
+    """
+    Liste des campagnes disponibles pour le filtre :
+    clients ayant atteint un objectif dans une autre campagne.
+    """
+    return {
+        "items": list_campaigns_for_objective_filter_ui()
+    }
 
 @router.get("/cibles/{id_cible}")
 def get_cible(id_cible: str):

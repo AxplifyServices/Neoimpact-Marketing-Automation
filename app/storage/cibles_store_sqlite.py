@@ -52,63 +52,11 @@ def ensure_cibles_table() -> None:
     conn.close()
 
 def count_clients_for_cible(id_cible: str) -> int:
-    cible = get_cible(id_cible)
-    if not cible:
-        return 0
-
-    source = (cible.get("source") or "").strip()
-
-    # --- DB: COUNT via SQL ---
-    if source == "DB":
-        filtre = {}
-        try:
-            filtre_str = cible.get("filtre") or "{}"
-            filtre = json.loads(filtre_str) if isinstance(filtre_str, str) else (filtre_str or {})
-        except Exception:
-            filtre = {}
-
-        conn = _connect()
-        table = _detect_clients_table(conn)
-
-        where = []
-        params = []
-        for field, payload in (filtre or {}).items():
-            if not isinstance(payload, dict):
-                continue
-
-            if "values" in payload:
-                vals = payload.get("values") or []
-                vals = [str(v) for v in vals if str(v).strip() != ""]
-                if vals:
-                    where.append(f"{field} IN ({', '.join(['?'] * len(vals))})")
-                    params.extend(vals)
-            else:
-                if payload.get("min") is not None:
-                    where.append(f"{field} >= ?")
-                    params.append(payload["min"])
-                if payload.get("max") is not None:
-                    where.append(f"{field} <= ?")
-                    params.append(payload["max"])
-
-        sql = f"SELECT COUNT(*) as n FROM {table}"
-        if where:
-            sql += " WHERE " + " AND ".join(where)
-
-        try:
-            r = conn.execute(sql, params).fetchone()
-            return int(r[0] if r else 0)
-        finally:
-            conn.close()
-
-    # --- Fichier plat: fallback simple ---
-    if source == "Fichier plat":
-        path = (cible.get("chemin") or "").strip()
-        if not path:
-            return 0
-        df = _read_flat_file(path)
+    try:
+        df = load_clients_df_for_cible(id_cible)
         return int(len(df))
-
-    return 0
+    except Exception:
+        return 0
 
 # =========================================================
 # IDS
@@ -521,15 +469,54 @@ def get_distinct_values_clients(column: str) -> List[str]:
     finally:
         conn.close()
 
+OOBJECTIF_CAMPAGNES_FILTER_KEY = "__objectif_campagnes__"
+
+
+def _split_objectif_campaign_filter(filtre: Dict[str, Any]) -> tuple[Dict[str, Any], List[str], str]:
+    normal_filtre: Dict[str, Any] = {}
+    campagne_ids: List[str] = []
+    mode = "atteint"
+
+    for k, v in (filtre or {}).items():
+        if k == OBJECTIF_CAMPAGNES_FILTER_KEY:
+            if isinstance(v, dict):
+                raw = v.get("values") or v.get("ids") or []
+                mode = str(v.get("mode") or v.get("status") or "atteint").strip().lower()
+            elif isinstance(v, list):
+                raw = v
+            else:
+                raw = []
+
+            campagne_ids = [str(x).strip() for x in raw if str(x).strip()]
+        else:
+            normal_filtre[k] = v
+
+    if mode not in {"atteint", "non_atteint"}:
+        mode = "atteint"
+
+    return normal_filtre, campagne_ids, mode
+
+
+def _detect_radical_column(conn: sqlite3.Connection, table: str) -> str:
+    cols = _get_table_columns(conn, table)
+    by_lower = {str(c).lower(): str(c) for c in cols}
+
+    if "radical_compte" in by_lower:
+        return by_lower["radical_compte"]
+
+    raise ValueError("Base clients : colonne 'radical_compte' manquante")
+
 
 def _query_clients_by_filtre(filtre: Dict[str, Any]) -> pd.DataFrame:
     conn = _connect()
     table = _detect_clients_table(conn)
 
+    normal_filtre, objectif_campagne_ids, objectif_mode = _split_objectif_campaign_filter(filtre or {})
+
     where = []
     params = []
 
-    for field, payload in (filtre or {}).items():
+    for field, payload in (normal_filtre or {}).items():
         if not isinstance(payload, dict):
             continue
 
@@ -537,17 +524,48 @@ def _query_clients_by_filtre(filtre: Dict[str, Any]) -> pd.DataFrame:
             vals = payload.get("values") or []
             vals = [str(v) for v in vals if str(v).strip() != ""]
             if vals:
-                where.append(f"{field} IN ({', '.join(['?'] * len(vals))})")
+                where.append(f"c.{field} IN ({', '.join(['?'] * len(vals))})")
                 params.extend(vals)
         else:
             if payload.get("min") is not None:
-                where.append(f"{field} >= ?")
+                where.append(f"c.{field} >= ?")
                 params.append(payload["min"])
             if payload.get("max") is not None:
-                where.append(f"{field} <= ?")
+                where.append(f"c.{field} <= ?")
                 params.append(payload["max"])
 
-    sql = f"SELECT * FROM {table}"
+    if objectif_campagne_ids:
+        radical_col = _detect_radical_column(conn, table)
+        placeholders = ", ".join(["?"] * len(objectif_campagne_ids))
+
+        if objectif_mode == "atteint":
+            where.append(
+                f"""
+                EXISTS (
+                    SELECT 1
+                    FROM clients_campagnes cc
+                    WHERE cc.Radical_compte = c.{radical_col}
+                      AND cc.ID_CAMPAGNE IN ({placeholders})
+                      AND COALESCE(cc.conversion, 0) = 1
+                )
+                """
+            )
+        else:
+            where.append(
+                f"""
+                NOT EXISTS (
+                    SELECT 1
+                    FROM clients_campagnes cc
+                    WHERE cc.Radical_compte = c.{radical_col}
+                      AND cc.ID_CAMPAGNE IN ({placeholders})
+                      AND COALESCE(cc.conversion, 0) = 1
+                )
+                """
+            )
+
+        params.extend(objectif_campagne_ids)
+
+    sql = f"SELECT c.* FROM {table} c"
     if where:
         sql += " WHERE " + " AND ".join(where)
 
@@ -555,7 +573,6 @@ def _query_clients_by_filtre(filtre: Dict[str, Any]) -> pd.DataFrame:
         return pd.read_sql_query(sql, conn, params=params)
     finally:
         conn.close()
-
 
 def load_clients_df_for_cible(id_cible: str) -> pd.DataFrame:
     """
