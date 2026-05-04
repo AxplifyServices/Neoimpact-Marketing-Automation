@@ -21,7 +21,7 @@ from app.storage.modele_store_sqlite import get_modele_dict
 
 # NEW: échéance (arriv_eche)
 from app.domain.workflow_nav import find_bloc_by_id, arrive_echeance  # retourne dict
-
+from app.domain.terrain_visit_webhook import cancel_visits_for_campaign, dispatch_pending_visits_for_campaign
 
 # =========================================================
 # Helpers
@@ -474,21 +474,66 @@ def create_campagne(
 
 def annuler_campagne(id_campagne: str) -> Dict[str, Any]:
     """
-    Annule une campagne et supprime automatiquement les lignes liées dans:
-    - crc_input
-    - vers_cc
-    - vers_da
+    Annule une campagne:
+    - supprime côté plateforme d'animation commerciale les tiers déjà affectés
+    - campagne.etat = 'Annulée'
+    - clients_campagnes.Etat_campagne = 'Annulée'
+    - supprime les queues internes liées à la campagne
     """
+    external_cancel = {"ok": True, "skipped": True, "reason": "not_called"}
+
+    try:
+        external_cancel = cancel_visits_for_campaign(
+            id_campagne,
+            local_status="cancelled_on_campaign_cancel",
+        )
+    except Exception as e:
+        external_cancel = {"ok": False, "error": str(e)}
+
+    if not external_cancel.get("ok", False) and not external_cancel.get("skipped", False):
+        return {
+            "id_campagne": id_campagne,
+            "ok": False,
+            "error": "external_visit_cancel_failed",
+            "external_cancel": external_cancel,
+            "deleted": {
+                "crc": 0,
+                "cc": 0,
+                "da": 0,
+                "cc_terrain": 0,
+                "da_terrain": 0,
+            },
+        }
+
     update_etat(id_campagne, "Annulée")
     set_clients_etat_for_campagne(id_campagne, "Annulée")
 
-    deleted = {"crc": 0, "cc": 0, "da": 0, "cc_terrain": 0, "da_terrain": 0}
+    deleted = {
+        "crc": 0,
+        "cc": 0,
+        "da": 0,
+        "cc_terrain": 0,
+        "da_terrain": 0,
+    }
+
     try:
         deleted = _delete_outputs_for_campagne(id_campagne)
     except Exception as e:
-        return {"id_campagne": id_campagne, "ok": False, "error": str(e), "deleted": deleted}
+        return {
+            "id_campagne": id_campagne,
+            "ok": False,
+            "error": str(e),
+            "external_cancel": external_cancel,
+            "deleted": deleted,
+        }
 
-    return {"id_campagne": id_campagne, "ok": True, "deleted": deleted}
+    return {
+        "id_campagne": id_campagne,
+        "ok": True,
+        "etat": "Annulée",
+        "external_cancel": external_cancel,
+        "deleted": deleted,
+    }
 
 
 def _campagne_has_mail_action(id_campagne: str) -> bool:
@@ -519,21 +564,69 @@ def _campagne_has_mail_action(id_campagne: str) -> bool:
 def mettre_en_pause_campagne(id_campagne: str) -> Dict[str, Any]:
     """
     Met une campagne en pause:
+    - supprime côté plateforme d'animation commerciale les tiers déjà affectés
     - campagne.etat = 'En pause'
-    - clients_campagnes.Etat_campagne = 'En pause' (pour cette campagne)
-    - supprime immédiatement les lignes de queues liées (crc_input / vers_cc / vers_da)
+    - clients_campagnes.Etat_campagne = 'En pause'
+    - supprime les queues internes liées
+
+    Point clé:
+    les logs external_visit_dispatches status='sent' sont libérés après DELETE
+    externe réussi pour permettre un renvoi lors de la réactivation.
     """
+    external_cancel = {"ok": True, "skipped": True, "reason": "not_called"}
+
+    try:
+        external_cancel = cancel_visits_for_campaign(
+            id_campagne,
+            local_status="cancelled_on_campaign_pause",
+        )
+    except Exception as e:
+        external_cancel = {"ok": False, "error": str(e)}
+
+    if not external_cancel.get("ok", False) and not external_cancel.get("skipped", False):
+        return {
+            "id_campagne": id_campagne,
+            "ok": False,
+            "error": "external_visit_cancel_failed",
+            "external_cancel": external_cancel,
+            "deleted": {
+                "crc": 0,
+                "cc": 0,
+                "da": 0,
+                "cc_terrain": 0,
+                "da_terrain": 0,
+            },
+        }
+
     update_etat(id_campagne, "En pause")
     set_clients_etat_for_campagne(id_campagne, "En pause")
 
-    deleted = {"crc": 0, "cc": 0, "da": 0, "cc_terrain": 0, "da_terrain": 0}
+    deleted = {
+        "crc": 0,
+        "cc": 0,
+        "da": 0,
+        "cc_terrain": 0,
+        "da_terrain": 0,
+    }
+
     try:
         deleted = _delete_outputs_for_campagne(id_campagne)
     except Exception as e:
-        return {"id_campagne": id_campagne, "ok": False, "error": str(e), "deleted": deleted}
+        return {
+            "id_campagne": id_campagne,
+            "ok": False,
+            "error": str(e),
+            "external_cancel": external_cancel,
+            "deleted": deleted,
+        }
 
-    return {"id_campagne": id_campagne, "ok": True, "etat": "En pause", "deleted": deleted}
-
+    return {
+        "id_campagne": id_campagne,
+        "ok": True,
+        "etat": "En pause",
+        "external_cancel": external_cancel,
+        "deleted": deleted,
+    }
 
 def activer_campagne(id_campagne: str) -> Dict[str, Any]:
     """
@@ -620,10 +713,36 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
                 mail_summary = {"error": "mail_meta_loop_failed", "details": str(e)}
 
         # route vers queues (métier) après traitement mail
+        # route vers queues (métier) après traitement mail.
+        # Pour une campagne avec_action_terrain, route_after_update appelle déjà
+        # send_visit_for_client quand le bloc courant est DA/CC.
         try:
             output_counts = _route_initial_queues_for_campaign(id_campagne)
         except Exception:
-            output_counts = {"crc": 0, "cc": 0, "da": 0, "cc_terrain": 0, "da_terrain": 0}
+            output_counts = {
+                "crc": 0,
+                "cc": 0,
+                "da": 0,
+                "cc_terrain": 0,
+                "da_terrain": 0,
+            }
+
+        # Sécurité supplémentaire:
+        # après réactivation, on refait un scan ciblé des clients encore
+        # positionnés sur DA/CC et non envoyés.
+        # Grâce au statut local libéré par la pause, les clients supprimés côté
+        # Wafa peuvent repartir. Les autres restent protégés par l'anti-doublon.
+        try:
+            external_dispatch_after_activation = dispatch_pending_visits_for_campaign(id_campagne)
+        except Exception as e:
+            external_dispatch_after_activation = {"ok": False, "error": str(e)}
+
+    else:
+        external_dispatch_after_activation = {
+            "ok": True,
+            "skipped": True,
+            "reason": f"etat_{new_etat}",
+        }
 
     return {
         "id_campagne": id_campagne,
@@ -633,6 +752,7 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
         "new_clients_added_from_cibles": new_clients_added,
         "mail_meta_loop": mail_summary,
         "output_insert": output_counts,
+        "external_dispatch_after_activation": external_dispatch_after_activation,
     }
 
 def sync_new_clients_from_cible_for_campaign(conn: sqlite3.Connection, id_campagne: str) -> Dict[str, Any]:

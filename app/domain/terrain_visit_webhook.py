@@ -192,6 +192,126 @@ def _insert_dispatch_log(
     )
     conn.commit()
 
+def cancel_visits_for_campaign(id_campagne: str, *, local_status: str = "cancelled") -> Dict[str, Any]:
+    """
+    Supprime côté plateforme d'animation commerciale les tiers déjà affectés
+    à une campagne, puis libère le log local pour permettre un renvoi
+    après réactivation.
+
+    API externe attendue:
+      DELETE {WEBHOOK_URL}/{correlationId}
+
+    Exemple:
+      DELETE https://wafa-api.swiftnova.ma/api/webhooks/visits/CP00002
+    """
+    id_campagne = _norm_str(id_campagne)
+    if not id_campagne:
+        return {"ok": False, "error": "missing_id_campagne"}
+
+    conn = _connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            SELECT type_campagne
+            FROM campagnes
+            WHERE id_campagne = ?
+            LIMIT 1
+            """,
+            (id_campagne,),
+        )
+        c = cur.fetchone()
+
+        if not c:
+            return {
+                "ok": False,
+                "error": "campagne_not_found",
+                "id_campagne": id_campagne,
+            }
+
+        if _norm_str(c["type_campagne"]) != "avec_action_terrain":
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "not_terrain_campaign",
+                "id_campagne": id_campagne,
+            }
+
+        _ensure_dispatch_table(conn)
+
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM external_visit_dispatches
+            WHERE id_campagne = ?
+              AND status = 'sent'
+            """,
+            (id_campagne,),
+        )
+        local_sent_before = int(cur.fetchone()[0] or 0)
+
+    finally:
+        conn.close()
+
+    url = f"{WEBHOOK_URL.rstrip('/')}/{id_campagne}"
+    req = urllib.request.Request(url, method="DELETE")
+
+    external_ok = False
+    status_code = None
+    response_body = ""
+    error = ""
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            status_code = int(response.status)
+            response_body = response.read().decode("utf-8", errors="ignore")
+
+        external_ok = 200 <= int(status_code or 0) < 300
+
+    except Exception as e:
+        error = str(e)
+
+    # Important:
+    # On libère les logs locaux uniquement si la suppression externe a réussi.
+    # Sinon, on garde status='sent' pour éviter un renvoi qui pourrait créer
+    # des doublons côté plateforme d'animation commerciale.
+    local_released = 0
+
+    if external_ok:
+        conn = _connect()
+        try:
+            _ensure_dispatch_table(conn)
+            cur = conn.cursor()
+
+            cur.execute(
+                """
+                UPDATE external_visit_dispatches
+                SET status = ?,
+                    error = NULL
+                WHERE id_campagne = ?
+                  AND status = 'sent'
+                """,
+                (_norm_str(local_status) or "cancelled", id_campagne),
+            )
+
+            local_released = int(cur.rowcount or 0)
+            conn.commit()
+
+        finally:
+            conn.close()
+
+    return {
+        "ok": external_ok,
+        "id_campagne": id_campagne,
+        "url": url,
+        "status_code": status_code,
+        "response": response_body,
+        "error": error,
+        "local_sent_before": local_sent_before,
+        "local_released_for_resend": local_released,
+    }
 
 def send_visit_for_client(id_campagne: str, radical_compte: str) -> Dict[str, Any]:
     conn = _connect()

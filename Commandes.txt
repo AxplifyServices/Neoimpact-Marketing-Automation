@@ -1,4 +1,4 @@
-cd OneDrive\Bureau\Marketing_automation_V2
+cd OneDrive\Bureau\Projet Dev\Marketing_automation_V2
 
 .\.venv\Scripts\Activate
 
@@ -8,6 +8,8 @@ serv :ssh ubuntu@51.75.252.139
 Code serveur : zitanezac
 
 http://vps-2fd6dcaa.vps.ovh.net/
+
+cd /opt/apps
 
 Liens : 
 
