@@ -24,3 +24,6 @@ Lien API.txt
 reste à faire.docx
 
 database.db
+*.db
+*.sqlite
+*.sqlite3

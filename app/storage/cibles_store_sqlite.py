@@ -469,7 +469,7 @@ def get_distinct_values_clients(column: str) -> List[str]:
     finally:
         conn.close()
 
-OOBJECTIF_CAMPAGNES_FILTER_KEY = "__objectif_campagnes__"
+OBJECTIF_CAMPAGNES_FILTER_KEY = "__objectif_campagnes__"
 
 
 def _split_objectif_campaign_filter(filtre: Dict[str, Any]) -> tuple[Dict[str, Any], List[str], str]:
