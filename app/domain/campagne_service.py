@@ -36,6 +36,16 @@ def _norm_str(x: Any) -> str:
         pass
     return str(x).strip()
 
+def _get_campaign_state(campagne: Dict[str, Any]) -> str:
+    if not isinstance(campagne, dict):
+        return ""
+
+    return _norm_str(
+        campagne.get("Etat_campagne")
+        or campagne.get("etat_campagne")
+        or campagne.get("etat")
+    )
+
 
 def _norm_cmp(x: Any) -> str:
     """Normalisation robuste pour comparer des valeurs métier (casse/espaces/accents)."""
@@ -819,23 +829,26 @@ def sync_new_clients_from_cible_for_campaign(conn: sqlite3.Connection, id_campag
     new_cible = insert_only_members(id_cible, radicals)
     update_cible_volume_if_column_exists(id_cible)
 
-    # 4) Ajouter dans clients_campagnes (insert-only, via store)
-    #    -> on doit insérer uniquement les RC absents pour cette campagne
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT Radical_compte
-            FROM clients_campagnes
-            WHERE ID_CAMPAGNE = ?
-            """,
-            (id_campagne,),
-        )
-        existing = {_norm_str(x[0]) for x in cur.fetchall() if _norm_str(x[0])}
+    # 4) Déterminer les clients qui ne sont pas encore affectés
+    # à cette campagne.
+    #
+    # On utilise volontairement la connexion fournie par le batch.
+    # La fonction ne doit ni la remplacer ni la fermer.
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT Radical_compte
+        FROM clients_campagnes
+        WHERE ID_CAMPAGNE = ?
+        """,
+        (id_campagne,),
+    )
 
-    finally:
-        conn.close()
+    existing = {
+        _norm_str(row[0])
+        for row in cur.fetchall()
+        if _norm_str(row[0])
+    }
 
     to_add = [rc for rc in radicals if _norm_str(rc) and _norm_str(rc) not in existing]
 
@@ -850,7 +863,7 @@ def sync_new_clients_from_cible_for_campaign(conn: sqlite3.Connection, id_campag
             "Nom_campagne": _norm_str(c.get("nom_campagne") or c.get("Nom_campagne")),
             "ID_CAMPAGNE": id_campagne,
             "Radical_compte": rc,
-            "Etat_campagne": _norm_str(c.get("etat") or c.get("etat_campagne") or "En cours"),
+            "Etat_campagne": _get_campaign_state(c) or "En cours",
             "NB_jour_campagne": 0,
             "ID_Action": id_action_init,
             "Canal": canal_init,
@@ -880,6 +893,9 @@ def sync_new_clients_from_cible_for_campaign(conn: sqlite3.Connection, id_campag
     inserted = bulk_insert_clients(rows)
 
     # sécurité : resync Etat_campagne
-    set_clients_etat_for_campagne(id_campagne, _norm_str(c.get("etat") or c.get("etat_campagne") or "En cours"))
+    set_clients_etat_for_campagne(
+        id_campagne,
+        _get_campaign_state(c) or "En cours",
+    )
 
     return {"ok": True, "new_cible_members": int(new_cible), "new_clients_campagne": int(inserted)}

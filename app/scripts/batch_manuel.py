@@ -64,6 +64,22 @@ def _norm_str(x: Any) -> str:
     s = str(x).strip()
     return "" if s.lower() == "none" else s
 
+def _get_campaign_state(campagne: Dict[str, Any]) -> str:
+    """
+    Retourne l'état d'une campagne, quel que soit le nom historique
+    utilisé pour la colonne.
+
+    La colonne officielle actuelle de la table campagnes est :
+    Etat_campagne
+    """
+    if not isinstance(campagne, dict):
+        return ""
+
+    return _norm_str(
+        campagne.get("Etat_campagne")
+        or campagne.get("etat_campagne")
+        or campagne.get("etat")
+    )
 
 def _norm_cmp(x: Any) -> str:
     s = _norm_str(x).lower()
@@ -108,6 +124,34 @@ def _cc_columns(conn: sqlite3.Connection) -> List[str]:
 def _cc_has_col(conn: sqlite3.Connection, col: str) -> bool:
     return col in set(_cc_columns(conn))
 
+def _table_exists(
+    conn: sqlite3.Connection,
+    table_name: str,
+) -> bool:
+    """
+    Vérifie qu'une table SQLite existe avant de l'utiliser.
+
+    Le nom de table n'est jamais injecté directement dans une requête
+    métier. Il est recherché dans sqlite_master via un paramètre SQL.
+    """
+    normalized_table_name = _norm_str(table_name)
+
+    if not normalized_table_name:
+        return False
+
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name = ?
+        LIMIT 1
+        """,
+        (normalized_table_name,),
+    )
+
+    return cur.fetchone() is not None
 
 def _recompute_nb_jour_debut_campagne(conn: sqlite3.Connection) -> int:
     """
@@ -220,13 +264,29 @@ def _inject_client_fields(row_clients_campagnes: Dict[str, Any], client_row: Dic
 # =========================================================
 # Batch steps (ordre imposé)
 # =========================================================
-def _list_active_campaigns(campagnes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    out = []
-    for c in campagnes:
-        etat = _norm_str(c.get("etat") or c.get("etat_campagne"))
+def _list_active_campaigns(
+    campagnes: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Retourne les campagnes devant être prises en charge par le batch.
+
+    États concernés :
+    - En cours
+    - Planifiée
+    - En pause
+
+    Une campagne en pause reste chargée pour les traitements techniques
+    compatibles, mais ne doit pas être routée comme une campagne en cours.
+    """
+    active_campaigns: List[Dict[str, Any]] = []
+
+    for campagne in campagnes:
+        etat = _get_campaign_state(campagne)
+
         if etat in ("En cours", "Planifiée", "En pause"):
-            out.append(c)
-    return out
+            active_campaigns.append(campagne)
+
+    return active_campaigns
 
 
 def _load_modele_meta(conn: sqlite3.Connection, id_modele: str) -> Tuple[List[Dict[str, Any]]]:
@@ -322,30 +382,58 @@ def _cancel_if_rupture_relation(conn: sqlite3.Connection, id_campagne: str) -> i
 
 
 
-def _update_campaigns_status_from_dates(campagnes: List[Dict[str, Any]]) -> Dict[str, int]:
+def _update_campaigns_status_from_dates(
+    campagnes: List[Dict[str, Any]],
+) -> Dict[str, int]:
+    """
+    Met à jour automatiquement l'état des campagnes selon leurs dates.
+
+    Règles :
+    - Planifiée et date courante comprise entre début et fin -> En cours
+    - En cours et date de fin dépassée -> Terminée
+    - En pause -> aucun changement automatique
+    - Annulée ou Terminée -> aucun changement
+    """
     today = date.today()
-    counts = {"to_en_cours": 0, "to_terminee": 0}
 
-    for c in campagnes:
-        id_c = _norm_str(c.get("id_campagne"))
-        etat = _norm_str(c.get("etat") or c.get("etat_campagne"))
-        d0 = _parse_iso_date(c.get("date_debut"))
-        d1 = _parse_iso_date(c.get("date_fin"))
+    counts = {
+        "to_en_cours": 0,
+        "to_terminee": 0,
+        "invalid_dates": 0,
+    }
 
-        if not id_c or etat == "Annulée" or not d0 or not d1:
+    for campagne in campagnes:
+        id_campagne = _norm_str(campagne.get("id_campagne"))
+        etat = _get_campaign_state(campagne)
+        date_debut = _parse_iso_date(campagne.get("date_debut"))
+        date_fin = _parse_iso_date(campagne.get("date_fin"))
+
+        if not id_campagne:
+            continue
+
+        if etat in ("Annulée", "Terminée"):
             continue
 
         if etat == "En pause":
             continue
 
-        if etat == "Planifiée" and d0 <= today <= d1:
-            update_etat(id_c, "En cours")
-            set_clients_etat_for_campagne(id_c, "En cours")
-            counts["to_en_cours"] += 1
+        if not date_debut or not date_fin:
+            counts["invalid_dates"] += 1
+            continue
 
-        if etat == "En cours" and d1 < today:
-            update_etat(id_c, "Terminée")
-            set_clients_etat_for_campagne(id_c, "Terminée")
+        if date_fin < date_debut:
+            counts["invalid_dates"] += 1
+            continue
+
+        if etat == "Planifiée" and date_debut <= today <= date_fin:
+            update_etat(id_campagne, "En cours")
+            set_clients_etat_for_campagne(id_campagne, "En cours")
+            counts["to_en_cours"] += 1
+            continue
+
+        if etat == "En cours" and date_fin < today:
+            update_etat(id_campagne, "Terminée")
+            set_clients_etat_for_campagne(id_campagne, "Terminée")
             counts["to_terminee"] += 1
 
     return counts
@@ -582,7 +670,8 @@ def _rebuild_outputs_for_all_en_cours(conn: sqlite3.Connection, campagnes: List[
     n_external_errors = 0
 
     for c in campagnes:
-        etat = _norm_str(c.get("etat") or c.get("etat_campagne"))
+        etat = _get_campaign_state(c)
+
         if etat != "En cours":
             continue
 
@@ -637,6 +726,13 @@ def run_batch_manuel() -> Dict[str, Any]:
         "closed_objectif": 0,
 
         "new_clients_added_from_cibles": 0,
+        "new_cible_members": 0,
+        "target_sync": {
+            "campaigns_processed": 0,
+            "campaigns_succeeded": 0,
+            "campaigns_failed": 0,
+            "details": [],
+        },
         "mails_processed": None,
         "outputs_rebuilt": {"crc_input": 0, "vers_da": 0, "vers_cc": 0},
     }
@@ -681,17 +777,69 @@ def run_batch_manuel() -> Dict[str, Any]:
 
         conn.commit()
 
-        # 5.5) sync nouveaux clients (cible + campagne) - via campagne_service
-        for c in actives:
-            id_c = _norm_str(c.get("id_campagne"))
-            if not id_c:
+        # 5.5) Synchronisation insert-only :
+        # cible dynamique -> clients_cibles -> clients_campagnes
+        for campagne in actives:
+            id_campagne = _norm_str(campagne.get("id_campagne"))
+
+            if not id_campagne:
                 continue
 
-            res = sync_new_clients_from_cible_for_campaign(conn, id_c)
-            if res.get("ok"):
-                out["new_clients_added_from_cibles"] += int(res.get("new_clients_campagne") or 0)
+            out["target_sync"]["campaigns_processed"] += 1
 
-                conn.commit()
+            try:
+                result = sync_new_clients_from_cible_for_campaign(
+                    conn,
+                    id_campagne,
+                )
+
+                detail = {
+                    "id_campagne": id_campagne,
+                    "etat": _get_campaign_state(campagne),
+                    "ok": bool(result.get("ok")),
+                    "new_cible_members": int(
+                        result.get("new_cible_members") or 0
+                    ),
+                    "new_clients_campagne": int(
+                        result.get("new_clients_campagne") or 0
+                    ),
+                }
+
+                if result.get("ok"):
+                    out["target_sync"]["campaigns_succeeded"] += 1
+
+                    out["new_cible_members"] += detail[
+                        "new_cible_members"
+                    ]
+
+                    out["new_clients_added_from_cibles"] += detail[
+                        "new_clients_campagne"
+                    ]
+
+                    conn.commit()
+                else:
+                    out["target_sync"]["campaigns_failed"] += 1
+                    detail["error"] = _norm_str(
+                        result.get("error")
+                        or "Erreur de synchronisation non précisée"
+                    )
+
+                out["target_sync"]["details"].append(detail)
+
+            except Exception as exc:
+                conn.rollback()
+
+                out["target_sync"]["campaigns_failed"] += 1
+                out["target_sync"]["details"].append(
+                    {
+                        "id_campagne": id_campagne,
+                        "etat": _get_campaign_state(campagne),
+                        "ok": False,
+                        "new_cible_members": 0,
+                        "new_clients_campagne": 0,
+                        "error": str(exc),
+                    }
+                )
 
         # 5bis) update arriv_eche (après recompute NB_jour_last_action et advance)
         for c in actives:
