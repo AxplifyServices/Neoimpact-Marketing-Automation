@@ -24,13 +24,16 @@ openpyxl==3.1.5
 packaging==25.0
 pandas==2.3.3
 pillow==12.1.0
+plotly
 protobuf==6.33.2
+psycopg[binary]>=3.2,<4
 pyarrow==22.0.0
 pydantic==2.12.5
 pydantic_core==2.41.5
 pydeck==0.9.1
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.1
+python-multipart==0.0.20
 pytz==2025.2
 referencing==0.37.0
 requests==2.32.5
@@ -49,7 +52,4 @@ urllib3==2.6.2
 watchdog==6.0.0
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
-python-multipart==0.0.20
-plotly
 networkx
-
