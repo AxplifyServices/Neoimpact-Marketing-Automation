@@ -16,6 +16,7 @@ from app.storage.clients_campagnes_store_sqlite import (
 )
 
 from app.domain.campagne_service import sync_new_clients_from_cible_for_campaign
+from app.domain.conversion_service import mark_converted, record_objective_entry
 
 from app.storage.crc_input_store_sqlite import (
     ensure_crc_input_table,
@@ -520,6 +521,7 @@ def _advance_en_attente_rows(
         FROM {CLIENTS_CAMPAGNES_TABLE}
         WHERE ID_CAMPAGNE = ?
           AND COALESCE(Etat_campagne,'') = 'En cours'
+          AND COALESCE(conversion, 0) <> 1
           AND COALESCE(Action,'') IN ('En attente', 'Objectif')
         """,
         (id_campagne,),
@@ -588,17 +590,19 @@ def _advance_en_attente_rows(
                         conv_val = 0
 
                     if conv_val != 1:
-                        cur.execute(
-                            f"""
-                            UPDATE {CLIENTS_CAMPAGNES_TABLE}
-                            SET conversion = 1
-                            WHERE rowid = ?
-                              AND COALESCE(conversion, 0) <> 1
-                            """,
-                            (rid,),
+                        converted_now = mark_converted(
+                            conn,
+                            rid,
+                            objective_id_action=cur_id,
                         )
-                        changed += int(cur.rowcount or 0)
+                        if converted_now:
+                            changed += 1
                         row["conversion"] = 1
+
+                    # Une conversion est terminale pour ce client :
+                    # aucune navigation supplémentaire n'est autorisée.
+                    if int(row.get("conversion") or 0) == 1:
+                        continue
 
         nxt = pick_next_child(liste_action, current, row)
 
@@ -616,6 +620,12 @@ def _advance_en_attente_rows(
 
         new_id = _norm_str(nxt.get("ID"))
         if is_objective_bloc(nxt):
+            record_objective_entry(
+                conn,
+                rid,
+                source_id_action=id_action,
+                source_canal=_norm_str(row.get("Canal")),
+            )
             new_canal = "Objectif"
             new_action = "Objectif"
         else:
@@ -656,7 +666,8 @@ def _update_arriv_eche_for_campaign(
             Etat_campagne,
             Resultat_last_action,
             NB_jour_last_action,
-            arriv_eche
+            arriv_eche,
+            conversion
         FROM {CLIENTS_CAMPAGNES_TABLE}
         WHERE ID_CAMPAGNE = ?
           AND COALESCE(Etat_campagne,'') = 'En cours'
@@ -672,13 +683,21 @@ def _update_arriv_eche_for_campaign(
         if rid <= 0:
             continue
 
-        id_action = _norm_str(row.get("ID_Action"))
-        current = find_bloc_by_id(liste_action, id_action)
-        new_flag = (
-            "Non"
-            if not current
-            else arrive_echeance(liste_action, current, row)
-        )
+        try:
+            converted = int(row.get("conversion") or 0) == 1
+        except Exception:
+            converted = False
+
+        if converted:
+            new_flag = "Non"
+        else:
+            id_action = _norm_str(row.get("ID_Action"))
+            current = find_bloc_by_id(liste_action, id_action)
+            new_flag = (
+                "Non"
+                if not current
+                else arrive_echeance(liste_action, current, row)
+            )
 
         if _norm_str(row.get("arriv_eche")) != _norm_str(new_flag):
             cur.execute(

@@ -19,7 +19,7 @@ MODELES_TABLE = "modeles"
 
 # États dashboard (DB truth)
 # NB: "En pause" n'existe peut-être pas dans ta DB actuelle, mais on le supporte si ça arrive plus tard.
-ALLOWED_CAMPAGNE_ETATS = ("Terminée", "En cours", "En pause")
+ALLOWED_CAMPAGNE_ETATS = ("Planifiée", "En cours", "En pause", "Terminée")
 
 CHANNEL_COLS = [
     ("Appel", "NB_appel"),
@@ -171,19 +171,29 @@ def get_dynamic_filter_options(
 # Data access
 # =========================================================
 def load_clients_campagnes_df(filters: DashboardFilters) -> pd.DataFrame:
-    where = ["COALESCE(Etat_campagne,'') <> 'Annulée'"]
+    """
+    Charge toutes les affectations historiques des campagnes sélectionnées.
+
+    Important : l'état individuel de clients_campagnes peut devenir Canceled
+    après une rupture de relation. Cela ne doit jamais effacer l'affectation
+    historique du client à la campagne. Les filtres d'état portent donc sur
+    l'état maître de la table campagnes.
+    """
+    where = ["COALESCE(c.etat_campagne,'') <> 'Annulée'"]
     params: List[object] = []
 
-    where.append("COALESCE(Etat_campagne,'') IN ('Terminée','En cours','En pause')")
+    where.append(
+        "COALESCE(c.etat_campagne,'') IN ('Planifiée','En cours','En pause','Terminée')"
+    )
 
     if filters.campagne_ids:
         placeholders = ",".join(["?"] * len(filters.campagne_ids))
-        where.append(f"ID_CAMPAGNE IN ({placeholders})")
+        where.append(f"cc.ID_CAMPAGNE IN ({placeholders})")
         params.extend([_clean_campagne_id(x) for x in filters.campagne_ids])
 
     if filters.etats_campagne:
         placeholders = ",".join(["?"] * len(filters.etats_campagne))
-        where.append(f"Etat_campagne IN ({placeholders})")
+        where.append(f"c.etat_campagne IN ({placeholders})")
         params.extend([str(x).strip() for x in filters.etats_campagne])
 
     if filters.gestionnaires:
@@ -191,30 +201,26 @@ def load_clients_campagnes_df(filters: DashboardFilters) -> pd.DataFrame:
         where.append(f"COALESCE(cl.Gestionnaire,'') IN ({placeholders})")
         params.extend([str(x).strip() for x in filters.gestionnaires])
 
-    # ✅ SELECT explicite pour garantir la colonne Gestionnaire
     sql = f"""
-    SELECT cc.*, cl.Gestionnaire AS Gestionnaire
+    SELECT
+        cc.*,
+        cl.Gestionnaire AS Gestionnaire,
+        c.etat_campagne AS campagne_master_etat
     FROM {CLIENTS_TABLE} cc
-    LEFT JOIN {CLIENTS_DIM_TABLE} cl ON cl.radical_compte = cc.Radical_compte
+    LEFT JOIN {CLIENTS_DIM_TABLE} cl
+        ON cl.radical_compte = cc.Radical_compte
+    LEFT JOIN {CAMPAGNES_TABLE} c
+        ON c.id_campagne = cc.ID_CAMPAGNE
     """
 
     if where:
         sql += " WHERE " + " AND ".join(where)
 
-    df = read_dataframe(
-        sql,
-        params=params,
-    )
-
+    df = read_dataframe(sql, params=params)
     if df.empty:
         return df
 
-    # ---------------------------------------------------------
-    # Flags standardisés
-    # ---------------------------------------------------------
     df["_action_norm"] = df.get("Action", "").apply(_normalize_action)
-
-    # ✅ Nouveau: conversion = 1 est la vérité
     df["_is_converted"] = _compute_is_converted(df)
 
     df["ID_Action"] = df.get("ID_Action", "").astype(str).str.strip()
@@ -222,25 +228,48 @@ def load_clients_campagnes_df(filters: DashboardFilters) -> pd.DataFrame:
     df["ID_CAMPAGNE"] = df.get("ID_CAMPAGNE", "").astype(str).str.strip()
 
     df["_has_last_action"] = df.get("Date_last_action", "").astype(str).str.strip().ne("")
-    df["_date_last_action"] = _to_date_series(df.get("Date_last_action", pd.Series([None] * len(df))))
+    df["_date_last_action"] = _to_date_series(
+        df.get("Date_last_action", pd.Series([None] * len(df)))
+    )
+    df["_conversion_date"] = _to_date_series(
+        df.get("conversion_date", pd.Series([None] * len(df)))
+    )
 
-    df["_is_treated"] = df["_has_last_action"] & df["ID_Action"].ne("1")
-
-    if filters.date_min is not None:
-        df = df[df["_date_last_action"].notna() & (df["_date_last_action"] >= filters.date_min)]
-    if filters.date_max is not None:
-        df = df[df["_date_last_action"].notna() & (df["_date_last_action"] <= filters.date_max)]
-
-    for _, col in CHANNEL_COLS:
+    treatment_counter_cols = [
+        "NB_appel",
+        "NB_mail",
+        "NB_sms",
+        "NB_message",
+        "NB_approche_commercial",
+        "NB_push",
+    ]
+    for col in treatment_counter_cols:
         if col not in df.columns:
             df[col] = 0
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
-    # s'assure que conversion existe (utile pour affichage / compat)
+    # Un client est contacté dès qu'au moins un traitement réel a été enregistré.
+    df["_is_treated"] = df[treatment_counter_cols].sum(axis=1).gt(0)
+
     if "conversion" not in df.columns:
         df["conversion"] = 0
     else:
         df["conversion"] = _to_int_series_safe(df["conversion"], default=0)
+
+    if "conversion_canal" not in df.columns:
+        df["conversion_canal"] = ""
+    df["conversion_canal"] = df["conversion_canal"].astype(str).str.strip()
+
+    if "conversion_id_action" not in df.columns:
+        df["conversion_id_action"] = ""
+    df["conversion_id_action"] = df["conversion_id_action"].astype(str).str.strip()
+
+    # Les filtres de dates restent des filtres d'activité. Les séries de
+    # conversion utilisent ensuite conversion_date, qui est immuable.
+    if filters.date_min is not None:
+        df = df[df["_date_last_action"].notna() & (df["_date_last_action"] >= filters.date_min)]
+    if filters.date_max is not None:
+        df = df[df["_date_last_action"].notna() & (df["_date_last_action"] <= filters.date_max)]
 
     return df
 
@@ -363,7 +392,7 @@ def compute_table_by_channel(df: pd.DataFrame) -> pd.DataFrame:
         traitements = int(df[col].sum())
 
         # ✅ conversion remplace closed
-        closing = int((df["_is_converted"] & df["Canal"].eq(canal)).sum())
+        closing = int((df["_is_converted"] & df["conversion_canal"].eq(canal)).sum())
 
         clients_contactes = int((df[col] > 0).sum())
 
@@ -379,7 +408,7 @@ def compute_table_by_channel(df: pd.DataFrame) -> pd.DataFrame:
         )
 
     traitements_total = int(sum(r["Traitements"] for r in rows))
-    closing_total = int(sum(r["Closing"] for r in rows))
+    closing_total = int(df["_is_converted"].sum())
     clients_contactes_any = int(df["_is_treated"].sum())
 
     rows.append(
@@ -445,23 +474,32 @@ def compute_funnel_by_id_action(df: pd.DataFrame) -> pd.DataFrame:
 def compute_daily_treatments_and_closed(df: pd.DataFrame) -> pd.DataFrame:
     """
     Retourne: Date | Traitements | Closed
-    ⚠️ (compat) "Closed" = conversions (conversion==1)
+
+    Compatibilité UI : la colonne ``Closed`` représente les conversions.
+    Les traitements sont datés par Date_last_action ; les conversions sont
+    datées par conversion_date, figée au premier objectif atteint.
     """
     if df is None or df.empty:
         return pd.DataFrame(columns=["Date", "Traitements", "Closed"])
 
-    tmp = df[df["_date_last_action"].notna()].copy()
-    if tmp.empty:
-        return pd.DataFrame(columns=["Date", "Traitements", "Closed"])
+    treated_tmp = df[df["_is_treated"] & df["_date_last_action"].notna()].copy()
+    if treated_tmp.empty:
+        tr = pd.DataFrame(columns=["Date", "Traitements"])
+    else:
+        tr = treated_tmp.groupby("_date_last_action", as_index=False).size()
+        tr = tr.rename(columns={"_date_last_action": "Date", "size": "Traitements"})
 
-    tr = tmp[tmp["_is_treated"]].groupby("_date_last_action", as_index=False).size()
-    tr = tr.rename(columns={"_date_last_action": "Date", "size": "Traitements"})
-
-    # ✅ conversions/jour (colonne conservée "Closed" pour compat UI)
-    cl = tmp[tmp["_is_converted"]].groupby("_date_last_action", as_index=False).size()
-    cl = cl.rename(columns={"_date_last_action": "Date", "size": "Closed"})
+    conv_tmp = df[df["_is_converted"] & df["_conversion_date"].notna()].copy()
+    if conv_tmp.empty:
+        cl = pd.DataFrame(columns=["Date", "Closed"])
+    else:
+        cl = conv_tmp.groupby("_conversion_date", as_index=False).size()
+        cl = cl.rename(columns={"_conversion_date": "Date", "size": "Closed"})
 
     out = tr.merge(cl, on="Date", how="outer").fillna(0)
+    if out.empty:
+        return pd.DataFrame(columns=["Date", "Traitements", "Closed"])
+
     out["Traitements"] = out["Traitements"].astype(int)
     out["Closed"] = out["Closed"].astype(int)
     return out.sort_values("Date")
@@ -556,9 +594,11 @@ def build_graph_payload_for_single_campaign(df: pd.DataFrame, campagne_id: str) 
         if not sub.empty:
             counts = sub.groupby("ID_Action").size().to_dict()
 
-            # ✅ conversions par noeud (ID_Action)
-            if "_is_converted" in sub.columns:
-                conv_counts = sub[sub["_is_converted"]].groupby("ID_Action").size().to_dict()
+            # Conversions par nœud : bloc Objectif figé au moment de la conversion.
+            if "_is_converted" in sub.columns and "conversion_id_action" in sub.columns:
+                conv_sub = sub[sub["_is_converted"]].copy()
+                conv_sub = conv_sub[conv_sub["conversion_id_action"].astype(str).str.strip().ne("")]
+                conv_counts = conv_sub.groupby("conversion_id_action").size().to_dict()
             else:
                 conv_counts = {}
 

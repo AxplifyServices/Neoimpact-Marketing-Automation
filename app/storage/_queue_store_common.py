@@ -74,6 +74,7 @@ def fill_queue_from_clients_campagnes(table: str, id_campagne: str, action: str)
             ON c.id_campagne = cc."ID_CAMPAGNE"
         WHERE cc."ID_CAMPAGNE" = %s
           AND COALESCE(cc."Etat_campagne", '') = 'En cours'
+          AND COALESCE(cc.conversion, 0) <> 1
           AND COALESCE(cc."Action", '') = %s
         ON CONFLICT ("ID_CAMPAGNE", "Radical_compte")
         DO UPDATE SET {update_set}

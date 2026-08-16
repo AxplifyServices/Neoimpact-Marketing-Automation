@@ -17,6 +17,7 @@ except Exception:
 from app.storage.runtime_db import RuntimeConnection, connect_runtime
 from app.storage.postgres_db import get_column_names
 from app.domain.canaux import resultats_for_canal
+from app.domain.conversion_service import mark_converted, record_objective_entry
 from app.domain.workflow_nav import (
     find_bloc_by_id,
     pick_next_child,
@@ -189,6 +190,7 @@ def _select_mail_candidates(conn: RuntimeConnection, limit_rows: int = 5000) -> 
         SELECT rowid AS __rid, *
         FROM {CLIENTS_CAMPAGNES_TABLE}
         WHERE COALESCE(Etat_campagne,'') = 'En cours'
+          AND COALESCE(conversion, 0) <> 1
           AND COALESCE(Canal,'') = 'Mail'
           AND COALESCE(Action,'') IN ('Message', 'Mail')
         LIMIT ?
@@ -290,19 +292,16 @@ def _advance_workflow_after_mail_by_rid(
 
         if "conversion" in cols:
             if objective_branch(current_bloc, row_after) == "Oui":
-                cur.execute(
-                    f"""
-                    UPDATE {CLIENTS_CAMPAGNES_TABLE}
-                    SET conversion=1
-                    WHERE rowid=? AND COALESCE(conversion,0) <> 1
-                    """,
-                    (int(rid),),
+                mark_converted(
+                    conn,
+                    int(rid),
+                    objective_id_action=cur_id,
                 )
+                conn.commit()
+                # Conversion terminale : aucune navigation supplémentaire.
+                return True
 
         conn.commit()
-
-        # NOTE: on ne return pas ici, car tu veux ensuite naviguer vers le next
-        # (ta logique actuelle navigue quand même après un bloc objectif)
 
     # 2) Navigation NEW
     nxt = pick_next_child(liste_action, current_bloc, row_after)
@@ -318,6 +317,12 @@ def _advance_workflow_after_mail_by_rid(
 
     # si next est objectif => Canal/Action = Objectif
     if is_objective_bloc(nxt):
+        record_objective_entry(
+            conn,
+            int(rid),
+            source_id_action=prev_id_action,
+            source_canal=prev_canal,
+        )
         new_canal = "Objectif"
         new_action = "Objectif"
     else:

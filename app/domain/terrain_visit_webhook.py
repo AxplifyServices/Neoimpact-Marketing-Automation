@@ -310,6 +310,12 @@ def send_visit_for_client(id_campagne: str, radical_compte: str) -> Dict[str, An
         if not row:
             return {"ok": False, "error": "client_campagne_not_found"}
 
+        try:
+            if int(row.get("conversion") or 0) == 1:
+                return {"ok": True, "sent": False, "skipped": True, "reason": "client_converted"}
+        except Exception:
+            pass
+
         if _norm_str(row.get("type_campagne")) != "avec_action_terrain":
             return {"ok": True, "skipped": True, "reason": "not_terrain_campaign"}
 
@@ -410,6 +416,7 @@ def dispatch_pending_visits_for_campaign(id_campagne: str) -> Dict[str, Any]:
             INNER JOIN campagnes c ON c.id_campagne = cc.ID_CAMPAGNE
             WHERE cc.ID_CAMPAGNE = ?
               AND COALESCE(cc.Etat_campagne, '') = 'En cours'
+              AND COALESCE(cc.conversion, 0) <> 1
               AND COALESCE(c.type_campagne, '') = 'avec_action_terrain'
               AND COALESCE(cc.Action, '') IN ('Directeur d''agence', 'Conseiller client')
             """,

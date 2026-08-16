@@ -30,6 +30,11 @@ COLUMNS = [
     "date_debut_campagne",
     "nb_jour_debut_campagne",
     "conversion",
+    "conversion_date",
+    "conversion_id_action",
+    "conversion_canal",
+    "objective_source_id_action",
+    "objective_source_canal",
 ]
 
 
@@ -53,6 +58,11 @@ def bulk_insert_clients(rows: List[Dict[str, Any]]) -> int:
             row["nb_jour_debut_campagne"] = 0
         if row.get("conversion") is None:
             row["conversion"] = 0
+        row.setdefault("conversion_date", None)
+        row.setdefault("conversion_id_action", None)
+        row.setdefault("conversion_canal", None)
+        row.setdefault("objective_source_id_action", None)
+        row.setdefault("objective_source_canal", None)
         values.append([row.get(column) for column in COLUMNS])
 
     query = sql.SQL("INSERT INTO {table} ({columns}) VALUES ({placeholders})").format(

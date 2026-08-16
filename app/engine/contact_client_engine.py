@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.storage.runtime_db import RuntimeConnection, connect_runtime
 from app.storage.postgres_db import get_column_names, table_exists
 from app.domain.canaux import compteur_for_canal
+from app.domain.conversion_service import record_objective_entry
 
 from app.domain.workflow_nav import (
     find_bloc_by_id,
@@ -268,6 +269,13 @@ def _send_mail_for_one_client_and_advance(id_campagne: str, radical_compte: str,
             row_cc = dict(r)
             rid = int(row_cc["__rid"])
 
+            try:
+                if int(row_cc.get("conversion") or 0) == 1:
+                    summary["stopped_reason"] = "converted"
+                    break
+            except Exception:
+                pass
+
             canal = _norm_str(row_cc.get("Canal"))
             action = _norm_str(row_cc.get("Action"))
             if not _is_mail_node(canal, action):
@@ -342,6 +350,12 @@ def _send_mail_for_one_client_and_advance(id_campagne: str, radical_compte: str,
 
             # si next est un bloc objectif -> on force Canal/Action
             if is_objective_bloc(nxt):
+                record_objective_entry(
+                    conn,
+                    rid,
+                    source_id_action=id_action,
+                    source_canal=canal,
+                )
                 new_canal = "Objectif"
                 new_action = "Objectif"
             else:
@@ -486,6 +500,37 @@ def apply_result_from_queue(row: Dict[str, Any], resultat_label: str, queue_tabl
         canal = _norm_str(cc.get("Canal"))
         action_actuelle = _norm_str(cc.get("Action"))
 
+        try:
+            already_converted = int(cc.get("conversion") or 0) == 1
+        except Exception:
+            already_converted = False
+
+        if already_converted:
+            if queue_table == "external_visit_dispatches":
+                cur.execute(
+                    """
+                    UPDATE external_visit_dispatches
+                    SET status = 'callback_ignored_converted'
+                    WHERE id_campagne = ?
+                      AND radical_compte = ?
+                      AND block_id = ?
+                      AND status = 'sent'
+                    """,
+                    (id_campagne, radical, block_id),
+                )
+            else:
+                cur.execute(
+                    f"DELETE FROM {queue_table} WHERE ID_CAMPAGNE=? AND Radical_compte=?",
+                    (id_campagne, radical),
+                )
+            conn.commit()
+            return {
+                "ok": False,
+                "error": "client_already_converted",
+                "id_campagne": id_campagne,
+                "radical_compte": radical,
+            }
+
         # compteur selon canal
         compteur_col = compteur_for_canal(canal) or ""
         incr_sql = f", {compteur_col} = COALESCE({compteur_col},0) + 1" if compteur_col else ""
@@ -527,6 +572,12 @@ def apply_result_from_queue(row: Dict[str, Any], resultat_label: str, queue_tabl
             new_id = _norm_str(nxt.get("ID"))
 
             if is_objective_bloc(nxt):
+                record_objective_entry(
+                    conn,
+                    rid,
+                    source_id_action=_norm_str(row_after.get("ID_Action")),
+                    source_canal=_norm_str(row_after.get("Canal")),
+                )
                 new_canal = "Objectif"
                 new_action = "Objectif"
             else:
@@ -608,7 +659,19 @@ def route_after_update(id_campagne: str, radical_compte: str) -> Dict[str, Any]:
         action = _norm_str(cc.get("Action"))
         type_campagne = _get_type_campagne_for_campagne(conn, id_campagne)
 
-        # NEW: un bloc objectif est une "gate" -> pas de routage queue/mail
+        try:
+            if int(cc.get("conversion") or 0) == 1:
+                return {
+                    "ok": True,
+                    "routed_to": "none",
+                    "terminal": "conversion",
+                    "action": action,
+                    "canal": canal,
+                }
+        except Exception:
+            pass
+
+        # Un bloc objectif est une gate -> pas de routage queue/mail
         if canal == "Objectif" or action == "Objectif":
             return {"ok": True, "routed_to": "none", "action": action, "canal": canal}
 
