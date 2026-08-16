@@ -24,9 +24,20 @@ jobs:
             git fetch origin
             git reset --hard origin/main
 
-            # Le même .env est utilisé en local et sur le serveur.
-            # compose.yaml surcharge seulement DATABASE_URL dans le conteneur
-            # applicatif pour joindre PostgreSQL via le réseau Docker.
+            # Transition depuis l'ancien déploiement :
+            # l'ancien conteneur marketing_app peut appartenir à un autre
+            # projet Docker Compose et ne sera donc pas supprimé par
+            # --remove-orphans du nouveau projet.
+            #
+            # On ne touche qu'au conteneur applicatif historique.
+            # Le PostgreSQL installé nativement sur le VPS n'est pas concerné.
+            if docker ps -a --format '{{.Names}}' | grep -qx 'marketing_app'; then
+              echo "Removing legacy marketing_app container..."
+              docker rm -f marketing_app
+            fi
+
+            # Build + démarrage de l'application et du PostgreSQL Docker.
+            # PostgreSQL n'expose aucun port hôte dans compose.yaml.
             docker compose -f compose.yaml up -d --build --remove-orphans
 
             echo "Waiting for PostgreSQL..."
@@ -36,10 +47,11 @@ jobs:
               sleep 2
             done
 
-            # 001_schema.sql est uniquement exécuté automatiquement par l'image
-            # PostgreSQL lors de la création initiale du volume.
-            # Les migrations suivantes sont rejouées à chaque déploiement et
-            # doivent donc rester idempotentes (IF NOT EXISTS, etc.).
+            # 001_schema.sql est exécuté automatiquement uniquement lors de
+            # l'initialisation d'un volume PostgreSQL neuf.
+            #
+            # Les migrations suivantes doivent rester idempotentes car elles
+            # sont rejouées à chaque déploiement.
             for migration in database/init/*.sql; do
               [ -f "$migration" ] || continue
 
@@ -48,9 +60,11 @@ jobs:
               fi
 
               echo "Applying migration: $migration"
+
               docker compose -f compose.yaml exec -T postgres sh -lc \
                 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
                 < "$migration"
             done
 
+            echo "Deployment status:"
             docker compose -f compose.yaml ps
