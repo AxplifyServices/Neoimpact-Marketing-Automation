@@ -433,8 +433,6 @@ def create_campagne(
         # être à échéance opérationnelle.
         if _norm_str(row_cc.get("Etat_campagne")) != "En cours":
             row_cc["arriv_eche"] = "Non"
-        elif _norm_str(row_cc.get("Action")) == "Closed":
-            row_cc["arriv_eche"] = "Non"
         else:
             row_cc["arriv_eche"] = arrive_echeance(
                 liste_action,
@@ -582,8 +580,8 @@ def annuler_campagne(id_campagne: str) -> Dict[str, Any]:
 
 def _campagne_has_mail_action(id_campagne: str) -> bool:
     """
-    True si au moins un client de la campagne a un bloc courant Mail (action Message/Mail),
-    non Closed. (On ne vérifie pas l'envoi, juste la présence d'un besoin.)
+    True si au moins un client de la campagne a un bloc courant Mail (action Message/Mail).
+    On ne vérifie pas l'envoi, seulement la présence d'un besoin.
     """
     conn = connect_runtime()
     try:
@@ -593,7 +591,6 @@ def _campagne_has_mail_action(id_campagne: str) -> bool:
             SELECT 1
             FROM clients_campagnes
             WHERE ID_CAMPAGNE = ?
-              AND COALESCE(Action,'') <> 'Closed'
               AND COALESCE(Canal,'') = 'Mail'
               AND COALESCE(Action,'') IN ('Message','Mail')
             LIMIT 1
@@ -967,11 +964,12 @@ def sync_new_clients_from_cible_for_campaign(conn: RuntimeConnection, id_campagn
             "conversion": 0,
         }
 
-        # arriv_eche selon ton workflow_nav
-        if _norm_str(row_cc.get("Action")) == "Closed":
-            row_cc["arriv_eche"] = "Non"
-        else:
-            row_cc["arriv_eche"] = arrive_echeance(liste_action, current_bloc_init, row_cc)
+        # arriv_eche selon le workflow courant
+        row_cc["arriv_eche"] = arrive_echeance(
+            liste_action,
+            current_bloc_init,
+            row_cc,
+        )
 
         rows.append(row_cc)
 

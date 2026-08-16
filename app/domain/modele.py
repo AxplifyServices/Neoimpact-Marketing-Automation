@@ -350,7 +350,12 @@ def validate_blocs_schema(
                 f"Bloc #{block_id}: clé 'objectif' manquante"
             )
 
-        is_objective = bool(bloc.get("objectif"))
+        if not isinstance(bloc.get("objectif"), bool):
+            raise ValueError(
+                f"Bloc #{block_id}: 'objectif' doit être un booléen true/false"
+            )
+
+        is_objective = bloc.get("objectif") is True
 
         conditions = bloc.get("Conditions", None)
         conditions_by_parent = bloc.get(
@@ -435,6 +440,12 @@ def validate_blocs_schema(
             if not bloc.get("Action"):
                 raise ValueError(
                     f"Bloc normal #{block_id}: Action obligatoire"
+                )
+
+            if _norm_id(bloc.get("Action")).lower() == "closed":
+                raise ValueError(
+                    f"Bloc normal #{block_id}: Action='Closed' est obsolète. "
+                    "Utiliser un bloc Objectif ; la conversion est portée par conversion=1."
                 )
 
             if objective_conditions is not None:

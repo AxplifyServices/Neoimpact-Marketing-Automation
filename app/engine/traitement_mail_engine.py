@@ -108,6 +108,34 @@ def _get_client_context(conn: RuntimeConnection, radical_compte: str) -> Dict[st
     return dict(r)
 
 
+def _enrich_row_with_client_fields(
+    conn: RuntimeConnection,
+    row_cc: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Ajoute clients.* et client.<colonne> au contexte de navigation."""
+    radical = _norm_str(
+        row_cc.get("Radical_compte")
+        or row_cc.get("radical_compte")
+    )
+    if not radical:
+        return row_cc
+
+    cur = conn.cursor()
+    cur.execute(
+        f"SELECT * FROM {CLIENTS_TABLE} WHERE radical_compte = ? LIMIT 1",
+        (radical,),
+    )
+    client = cur.fetchone()
+    if not client:
+        return row_cc
+
+    for key, value in dict(client).items():
+        row_cc.setdefault(str(key), value)
+        row_cc.setdefault(f"client.{key}", value)
+
+    return row_cc
+
+
 def _render_template(text: str, ctx: Dict[str, str]) -> str:
     out = text or ""
     for k, v in (ctx or {}).items():
@@ -161,7 +189,6 @@ def _select_mail_candidates(conn: RuntimeConnection, limit_rows: int = 5000) -> 
         SELECT rowid AS __rid, *
         FROM {CLIENTS_CAMPAGNES_TABLE}
         WHERE COALESCE(Etat_campagne,'') = 'En cours'
-          AND COALESCE(Action,'') <> 'Closed'
           AND COALESCE(Canal,'') = 'Mail'
           AND COALESCE(Action,'') IN ('Message', 'Mail')
         LIMIT ?
@@ -226,6 +253,8 @@ def _advance_workflow_after_mail_by_rid(
         * si branche Oui => conversion=1 (si colonne existe)
     - Si aucun next => Action='En attente'
     """
+    row_after = _enrich_row_with_client_fields(conn, row_after)
+
     prev_action = _norm_str(row_after.get("Action"))
     prev_canal = _norm_str(row_after.get("Canal"))
     prev_id_action = _norm_str(row_after.get("ID_Action"))

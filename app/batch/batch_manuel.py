@@ -672,17 +672,13 @@ def _update_arriv_eche_for_campaign(
         if rid <= 0:
             continue
 
-        action = _norm_str(row.get("Action"))
-        if action == "Closed":
-            new_flag = "Non"
-        else:
-            id_action = _norm_str(row.get("ID_Action"))
-            current = find_bloc_by_id(liste_action, id_action)
-            new_flag = (
-                "Non"
-                if not current
-                else arrive_echeance(liste_action, current, row)
-            )
+        id_action = _norm_str(row.get("ID_Action"))
+        current = find_bloc_by_id(liste_action, id_action)
+        new_flag = (
+            "Non"
+            if not current
+            else arrive_echeance(liste_action, current, row)
+        )
 
         if _norm_str(row.get("arriv_eche")) != _norm_str(new_flag):
             cur.execute(
@@ -790,7 +786,6 @@ def run_batch_manuel() -> Dict[str, Any]:
         "nb_jour_debut_campagne_updated": 0,
         "arriv_eche_updated": 0,
         "en_attente_advanced": 0,
-        "closed_objectif": 0,
         "new_clients_added_from_cibles": 0,
         "new_cible_members": 0,
         "target_sync": {

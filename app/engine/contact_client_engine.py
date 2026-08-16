@@ -52,6 +52,34 @@ def _norm_str(x: Any) -> str:
     return "" if x is None else str(x).strip()
 
 
+def _enrich_row_with_client_fields(
+    conn: RuntimeConnection,
+    row_cc: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Ajoute clients.* et client.<colonne> au contexte de navigation."""
+    radical = _norm_str(
+        row_cc.get("Radical_compte")
+        or row_cc.get("radical_compte")
+    )
+    if not radical:
+        return row_cc
+
+    cur = conn.cursor()
+    cur.execute(
+        f"SELECT * FROM {CLIENTS_TABLE} WHERE radical_compte = ? LIMIT 1",
+        (radical,),
+    )
+    client = cur.fetchone()
+    if not client:
+        return row_cc
+
+    for key, value in dict(client).items():
+        row_cc.setdefault(str(key), value)
+        row_cc.setdefault(f"client.{key}", value)
+
+    return row_cc
+
+
 # =========================
 # Modèle : fetch liste_action + meta
 # =========================
@@ -294,7 +322,7 @@ def _send_mail_for_one_client_and_advance(id_campagne: str, radical_compte: str,
             if not r2:
                 summary["stopped_reason"] = "row_missing_after_update"
                 break
-            row_after = dict(r2)
+            row_after = _enrich_row_with_client_fields(conn, dict(r2))
 
             current = find_bloc_by_id(liste_action, _norm_str(row_after.get("ID_Action")))
             if not current:
@@ -357,7 +385,7 @@ def apply_result_from_queue(row: Dict[str, Any], resultat_label: str, queue_tabl
         Last_action = Action actuelle (avant changement)
         Date_last_action = now
         incr compteur selon Canal
-    - si objectif atteint -> Closed
+    - un objectif atteint positionne conversion=1 lors de son évaluation
     - navigation graphe (fils):
         si condition ok -> ID_Action/Canal/Action = noeud fils
         sinon -> Action='En attente'
@@ -486,9 +514,9 @@ def apply_result_from_queue(row: Dict[str, Any], resultat_label: str, queue_tabl
         r2 = cur.fetchone()
         if not r2:
             return {"ok": False, "error": "row_missing_after_update"}
-        row_after = dict(r2)
+        row_after = _enrich_row_with_client_fields(conn, dict(r2))
 
-        # navigation fils (NEW)
+        # navigation fils
         current = find_bloc_by_id(liste_action, _norm_str(row_after.get("ID_Action")))
         nxt = pick_next_child(liste_action, current, row_after) if current else None
 

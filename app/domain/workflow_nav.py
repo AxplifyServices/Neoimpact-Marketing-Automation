@@ -406,7 +406,6 @@ def pick_next_child(
           - calcule branche Oui/Non via ObjectiveConditions
           - ne considère que les fils avec valide_objectif == 'Oui'/'Non' correspondant
           - puis applique les conditions de navigation (Conditions + ConditionsByParent[current_id])
-      - Ignore Action='Closed' (legacy)
     """
     current_id = _norm_str(current_bloc.get("ID"))
     if not current_id:
@@ -427,10 +426,6 @@ def pick_next_child(
 
     for child in children:
         if not isinstance(child, dict):
-            continue
-
-        # legacy ignore
-        if _norm_str(child.get("Action")) == "Closed":
             continue
 
         # Filtrage Oui/Non si parent objectif
@@ -486,9 +481,6 @@ def arrive_echeance(
     for child in children:
         if not isinstance(child, dict):
             continue
-        if _norm_str(child.get("Action")) == "Closed":
-            continue
-
         # on récupère les conditions "effectives" (global + by parent)
         conds_global = child.get("Conditions") or []
         if not isinstance(conds_global, list):
