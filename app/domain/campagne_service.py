@@ -673,6 +673,32 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
     update_etat(id_campagne, new_etat)
     set_clients_etat_for_campagne(id_campagne, new_etat)
 
+    if new_etat == "En cours":
+        conn = connect_runtime()
+
+        try:
+            cur = conn.cursor()
+
+            cur.execute(
+                """
+                UPDATE clients_campagnes
+                SET Date_last_action =
+                    (
+                        CURRENT_DATE
+                        - COALESCE(NB_jour_last_action, 0)
+                    )::text
+                WHERE ID_CAMPAGNE = ?
+                """,
+                (
+                    id_campagne,
+                ),
+            )
+
+            conn.commit()
+
+        finally:
+            conn.close()    
+
     # nettoyer queues associées avant décision
     deleted = {"crc": 0, "cc": 0, "da": 0, "cc_terrain": 0, "da_terrain": 0}
     try:

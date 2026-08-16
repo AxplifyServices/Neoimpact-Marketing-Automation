@@ -43,7 +43,10 @@ from app.domain.workflow_nav import (
     objective_branch,
 )
 
-from app.domain.terrain_visit_webhook import dispatch_pending_visits_for_campaign
+from app.domain.terrain_visit_webhook import (
+    cancel_visits_for_campaign,
+    dispatch_pending_visits_for_campaign,
+)
 
 CLIENTS_CAMPAGNES_TABLE = "clients_campagnes"
 CAMPAGNES_TABLE = "campagnes"
@@ -344,7 +347,55 @@ def _cancel_if_rupture_relation(conn: RuntimeConnection, id_campagne: str) -> in
     )
     return int(cur.rowcount or 0)
 
+def _delete_outputs_for_campagne(
+    id_campagne: str,
+) -> None:
+    """
+    Supprime les sorties opérationnelles d'une campagne
+    devenue inactive ou terminée.
+    """
 
+    id_campagne = _norm_str(
+        id_campagne
+    )
+
+    if not id_campagne:
+        return
+
+    conn = _connect()
+
+    try:
+        cur = conn.cursor()
+
+        tables = (
+            "crc_input",
+            "vers_cc",
+            "vers_da",
+            "vers_cc_terrain",
+            "vers_da_terrain",
+        )
+
+        for table_name in tables:
+            if not _table_exists(
+                conn,
+                table_name,
+            ):
+                continue
+
+            cur.execute(
+                f"""
+                DELETE FROM {table_name}
+                WHERE ID_CAMPAGNE = ?
+                """,
+                (
+                    id_campagne,
+                ),
+            )
+
+        conn.commit()
+
+    finally:
+        conn.close()
 
 def _update_campaigns_status_from_dates(
     campagnes: List[Dict[str, Any]],
@@ -430,8 +481,31 @@ def _update_campaigns_status_from_dates(
             continue    
 
         if etat == "En cours" and date_fin < today:
-            update_etat(id_campagne, "Terminée")
-            set_clients_etat_for_campagne(id_campagne, "Terminée")
+            try:
+                cancel_visits_for_campaign(
+                    id_campagne,
+                    local_status="cancelled_on_campaign_end",
+                )
+            except Exception:
+                pass
+
+            update_etat(
+                id_campagne,
+                "Terminée",
+            )
+
+            set_clients_etat_for_campagne(
+                id_campagne,
+                "Terminée",
+            )
+
+            try:
+                _delete_outputs_for_campagne(
+                    id_campagne
+                )
+            except Exception:
+                pass
+
             counts["to_terminee"] += 1
 
     return counts
