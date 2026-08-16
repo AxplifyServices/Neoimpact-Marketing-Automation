@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from app.storage.db import DB_PATH
+from app.storage.runtime_db import RuntimeConnection, connect_runtime
+from app.storage.postgres_db import get_table_columns
 
 # ✅ Nouveau Modele (sans objectif, sans variable_cible)
 from app.domain.modele import Modele
@@ -55,18 +55,12 @@ def _is_numeric_sqltype(t: str) -> bool:
 # =========================================================
 def get_clients_columns_with_types_for_ui() -> Dict[str, str]:
     """
-    Retourne {col: type} depuis PRAGMA table_info(clients)
+    Retourne {col: type} depuis le schéma PostgreSQL.
     """
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    try:
-        rows = conn.execute("PRAGMA table_info(clients)").fetchall()
-        out: Dict[str, str] = {}
-        for r in rows:
-            out[str(r["name"])] = str(r["type"] or "")
-        return out
-    finally:
-        conn.close()
+    return {
+        str(name): str(sql_type or "")
+        for name, sql_type in get_table_columns("clients")
+    }
 
 
 def get_variable_choices_for_ui() -> Tuple[List[str], List[str], List[str]]:
@@ -162,35 +156,30 @@ def get_clients_campagnes_condition_fields_for_ui() -> List[Dict[str, str]]:
     Champs utilisables dans les conditions basées sur la table clients_campagnes.
     On expose ici uniquement ce dont tu as besoin.
     """
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    try:
-        rows = conn.execute("PRAGMA table_info(clients_campagnes)").fetchall()
-        cols_types: Dict[str, str] = {}
-        for r in rows:
-            cols_types[str(r["name"])] = str(r["type"] or "")
+    cols_types = {
+        str(name): str(sql_type or "")
+        for name, sql_type in get_table_columns("clients_campagnes")
+    }
 
-        wanted = [
-            "nb_jour_debut_campagne",
-        ]
+    wanted = [
+        "nb_jour_debut_campagne",
+    ]
 
-        out: List[Dict[str, str]] = []
-        for col in wanted:
-            if col not in cols_types:
-                continue
-            t = cols_types[col]
-            out.append(
-                {
-                    "col": col,
-                    "type": t,
-                    "is_numeric": "1" if _is_numeric_sqltype(t or "") else "0",
-                }
-            )
+    out: List[Dict[str, str]] = []
+    for col in wanted:
+        if col not in cols_types:
+            continue
+        t = cols_types[col]
+        out.append(
+            {
+                "col": col,
+                "type": t,
+                "is_numeric": "1" if _is_numeric_sqltype(t or "") else "0",
+            }
+        )
 
-        out.sort(key=lambda d: (d.get("is_numeric") != "0", d.get("col", "").lower()))
-        return out
-    finally:
-        conn.close()
+    out.sort(key=lambda d: (d.get("is_numeric") != "0", d.get("col", "").lower()))
+    return out
 
 
 # =========================================================

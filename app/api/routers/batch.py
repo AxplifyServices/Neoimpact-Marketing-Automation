@@ -1,6 +1,6 @@
-# app/api/routers/batch.py
 from __future__ import annotations
 
+import inspect
 from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Query
@@ -16,30 +16,30 @@ def run_batch(
     dry_run: bool = Query(default=False),
 ) -> Dict[str, Any]:
     """
-    Compat front:
-    - garde /batch/run
-    - renvoie toujours {"ok": True/False, "result": ...}
+    Lance le batch manuel.
 
-    Ajouts non cassants:
-    - limit (0 => pas de limite)
-    - dry_run (false par défaut)
-
-    Compat back:
-    - si run_batch_manuel() ne supporte pas (limit, dry_run), fallback automatique.
+    Le contrat HTTP historique est conservé. Les paramètres ``limit`` et
+    ``dry_run`` ne sont transmis que si la version courante du batch les
+    déclare réellement. On évite ainsi de relancer le batch après un
+    ``TypeError`` interne à sa logique métier.
     """
     try:
-        # NEW (si ta fonction accepte des params)
-        try:
-            res = run_batch_manuel(limit=limit, dry_run=dry_run)
-        except TypeError:
-            # compat: ancienne signature
-            res = run_batch_manuel()
+        signature = inspect.signature(run_batch_manuel)
+        kwargs: Dict[str, Any] = {}
 
-        return {"ok": True, "result": res}
+        if "limit" in signature.parameters:
+            kwargs["limit"] = limit
+        if "dry_run" in signature.parameters:
+            kwargs["dry_run"] = dry_run
 
-    except Exception as e:
-        # Ne jamais exposer une stacktrace au front, on renvoie une 500 propre
+        result = run_batch_manuel(**kwargs)
+        return {"ok": True, "result": result}
+
+    except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail={"error": "BATCH_RUN_FAILED", "message": str(e)},
-        )
+            detail={
+                "error": "BATCH_RUN_FAILED",
+                "message": str(exc),
+            },
+        ) from exc

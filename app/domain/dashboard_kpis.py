@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from app.storage.db import DB_PATH
+from app.storage.runtime_db import RuntimeConnection, connect_runtime, read_dataframe
 
 # =========================================================
 # Constantes / tables
@@ -33,8 +32,8 @@ CHANNEL_COLS = [
 # =========================================================
 # Helpers
 # =========================================================
-def _connect() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH)
+def _connect() -> RuntimeConnection:
+    return connect_runtime()
 
 
 def _norm_str(x: object) -> str:
@@ -114,11 +113,9 @@ class DashboardFilters:
 # Dynamic filters (campagnes <-> états)
 # =========================================================
 def list_campagnes_df() -> pd.DataFrame:
-    conn = _connect()
-    try:
-        return pd.read_sql_query(f"SELECT * FROM {CAMPAGNES_TABLE}", conn)
-    finally:
-        conn.close()
+    return read_dataframe(
+        f"SELECT * FROM {CAMPAGNES_TABLE}"
+    )
 
 
 def get_dynamic_filter_options(
@@ -204,11 +201,10 @@ def load_clients_campagnes_df(filters: DashboardFilters) -> pd.DataFrame:
     if where:
         sql += " WHERE " + " AND ".join(where)
 
-    conn = _connect()
-    try:
-        df = pd.read_sql_query(sql, conn, params=params)
-    finally:
-        conn.close()
+    df = read_dataframe(
+        sql,
+        params=params,
+    )
 
     if df.empty:
         return df
@@ -257,11 +253,9 @@ def load_clients_dim_regions() -> pd.DataFrame:
       - Region (normalisée)
     Détecte automatiquement la colonne région si elle n'est pas exactement 'Region'.
     """
-    conn = _connect()
-    try:
-        df = pd.read_sql_query(f"SELECT * FROM {CLIENTS_DIM_TABLE}", conn)
-    finally:
-        conn.close()
+    df = read_dataframe(
+        f"SELECT * FROM {CLIENTS_DIM_TABLE}"
+    )
 
     if df.empty:
         return pd.DataFrame(columns=["radical_compte", "Region"])
@@ -514,31 +508,25 @@ def _compute_payload_isolated_for_campaign(df_all: pd.DataFrame, cid: str) -> Di
 # Single-campaign graph payload (enrich node canal from modele)
 # =========================================================
 def _load_modele_for_campagne(campagne_id: str) -> Optional[Dict[str, Any]]:
-    conn = _connect()
-    try:
-        camp = pd.read_sql_query(
-            f"SELECT id_modele FROM {CAMPAGNES_TABLE} WHERE id_campagne = ?",
-            conn,
-            params=[str(campagne_id).strip()],
-        )
-        if camp.empty:
-            return None
+    camp = read_dataframe(
+        f"SELECT id_modele FROM {CAMPAGNES_TABLE} WHERE id_campagne = ?",
+        params=[str(campagne_id).strip()],
+    )
+    if camp.empty:
+        return None
 
-        id_modele = _norm_str(camp.iloc[0]["id_modele"])
-        if not id_modele:
-            return None
+    id_modele = _norm_str(camp.iloc[0]["id_modele"])
+    if not id_modele:
+        return None
 
-        mod = pd.read_sql_query(
-            f"SELECT id_modele, nom_modele, liste_action, graphe_json FROM {MODELES_TABLE} WHERE id_modele = ?",
-            conn,
-            params=[id_modele],
-        )
-        if mod.empty:
-            return None
+    mod = read_dataframe(
+        f"SELECT id_modele, nom_modele, liste_action, graphe_json FROM {MODELES_TABLE} WHERE id_modele = ?",
+        params=[id_modele],
+    )
+    if mod.empty:
+        return None
 
-        return mod.iloc[0].to_dict()
-    finally:
-        conn.close()
+    return mod.iloc[0].to_dict()
 
 
 def build_graph_payload_for_single_campaign(df: pd.DataFrame, campagne_id: str) -> Dict[str, Any]:

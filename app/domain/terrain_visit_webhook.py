@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import urllib.request
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from app.storage.db import DB_PATH
+from app.storage.runtime_db import RuntimeConnection, connect_runtime
+from app.storage.postgres_db import table_exists
 from app.domain.workflow_nav import find_bloc_by_id
 
 
@@ -22,8 +22,8 @@ WEBHOOK_URL = (
 ).strip()
 
 
-def _connect() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH)
+def _connect() -> RuntimeConnection:
+    return connect_runtime()
 
 
 def _norm_str(x: Any) -> str:
@@ -34,25 +34,12 @@ def _now_iso() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _ensure_dispatch_table(conn: sqlite3.Connection) -> None:
-    cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS external_visit_dispatches (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            id_campagne TEXT NOT NULL,
-            radical_compte TEXT NOT NULL,
-            block_id TEXT NOT NULL,
-            queue TEXT,
-            payload_json TEXT,
-            status TEXT NOT NULL DEFAULT 'sent',
-            error TEXT,
-            sent_at TEXT,
-            UNIQUE(id_campagne, radical_compte, block_id)
+def _ensure_dispatch_table(conn: RuntimeConnection) -> None:
+    if not table_exists("external_visit_dispatches"):
+        raise RuntimeError(
+            "La table PostgreSQL 'external_visit_dispatches' est absente. "
+            "Le schéma doit être appliqué via les migrations SQL."
         )
-        """
-    )
-    conn.commit()
 
 
 def _get_col(row: Dict[str, Any], *names: str) -> str:
@@ -79,8 +66,7 @@ def _get_full_name(row: Dict[str, Any]) -> str:
 
     return " ".join([x for x in [prenom, nom] if x]).strip()
 
-def _load_row(conn: sqlite3.Connection, id_campagne: str, radical_compte: str) -> Optional[Dict[str, Any]]:
-    conn.row_factory = sqlite3.Row
+def _load_row(conn: RuntimeConnection, id_campagne: str, radical_compte: str) -> Optional[Dict[str, Any]]:
     cur = conn.cursor()
     cur.execute(
         """
@@ -104,11 +90,9 @@ def _load_row(conn: sqlite3.Connection, id_campagne: str, radical_compte: str) -
     return dict(row) if row else None
 
 
-def _load_block_description(conn: sqlite3.Connection, id_modele: str, block_id: str) -> str:
+def _load_block_description(conn: RuntimeConnection, id_modele: str, block_id: str) -> str:
     if not id_modele or not block_id:
         return ""
-
-    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT liste_action FROM modeles WHERE id_modele = ? LIMIT 1", (id_modele,))
     row = cur.fetchone()
@@ -134,7 +118,7 @@ def _load_block_description(conn: sqlite3.Connection, id_modele: str, block_id: 
     )
 
 
-def _already_sent(conn: sqlite3.Connection, id_campagne: str, radical_compte: str, block_id: str) -> bool:
+def _already_sent(conn: RuntimeConnection, id_campagne: str, radical_compte: str, block_id: str) -> bool:
     _ensure_dispatch_table(conn)
     cur = conn.cursor()
     cur.execute(
@@ -153,7 +137,7 @@ def _already_sent(conn: sqlite3.Connection, id_campagne: str, radical_compte: st
 
 
 def _insert_dispatch_log(
-    conn: sqlite3.Connection,
+    conn: RuntimeConnection,
     *,
     id_campagne: str,
     radical_compte: str,
@@ -167,7 +151,7 @@ def _insert_dispatch_log(
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT OR REPLACE INTO external_visit_dispatches (
+        INSERT INTO external_visit_dispatches (
             id_campagne,
             radical_compte,
             block_id,
@@ -178,6 +162,13 @@ def _insert_dispatch_log(
             sent_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (id_campagne, radical_compte, block_id)
+        DO UPDATE SET
+            queue = EXCLUDED.queue,
+            payload_json = EXCLUDED.payload_json,
+            status = EXCLUDED.status,
+            error = EXCLUDED.error,
+            sent_at = EXCLUDED.sent_at
         """,
         (
             _norm_str(id_campagne),
@@ -210,7 +201,6 @@ def cancel_visits_for_campaign(id_campagne: str, *, local_status: str = "cancell
 
     conn = _connect()
     try:
-        conn.row_factory = sqlite3.Row
         cur = conn.cursor()
 
         cur.execute(
@@ -412,7 +402,6 @@ def send_visit_for_client(id_campagne: str, radical_compte: str) -> Dict[str, An
 def dispatch_pending_visits_for_campaign(id_campagne: str) -> Dict[str, Any]:
     conn = _connect()
     try:
-        conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute(
             """

@@ -5,11 +5,11 @@ from typing import Any, Dict, List, Tuple
 import json
 import re
 import unicodedata
-import sqlite3
 
 import pandas as pd
 
-from app.storage.db import DB_PATH
+from app.storage.runtime_db import RuntimeConnection, connect_runtime
+from app.storage.postgres_db import table_exists
 from app.storage.campagnes_store_sqlite import insert_campagne, update_etat
 from app.storage.clients_campagnes_store_sqlite import (
     ensure_table as ensure_clients_campagnes_table,
@@ -156,10 +156,8 @@ def _is_first_action_mail(canal_init: str, action_init: str) -> bool:
     return (c == "Mail") and (a in ("Message", "Mail"))
 
 
-def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
-    cur = conn.cursor()
-    cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,))
-    return cur.fetchone() is not None
+def _table_exists(conn: RuntimeConnection, table: str) -> bool:
+    return table_exists(str(table or "").strip())
 
 
 def _delete_outputs_for_campagne(id_campagne: str) -> Dict[str, int]:
@@ -177,7 +175,7 @@ def _delete_outputs_for_campagne(id_campagne: str) -> Dict[str, int]:
 
     deleted = {"crc": 0, "cc": 0, "da": 0, "cc_terrain": 0, "da_terrain": 0}
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect_runtime()
     try:
         cur = conn.cursor()
         for k, t in tables.items():
@@ -221,9 +219,8 @@ def _route_initial_queues_for_campaign(id_campagne: str) -> Dict[str, int]:
     _delete_outputs_for_campagne(id_campagne)
 
     # liste des clients
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect_runtime()
     try:
-        conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute(
             """
@@ -551,7 +548,7 @@ def _campagne_has_mail_action(id_campagne: str) -> bool:
     True si au moins un client de la campagne a un bloc courant Mail (action Message/Mail),
     non Closed. (On ne vérifie pas l'envoi, juste la présence d'un besoin.)
     """
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect_runtime()
     try:
         cur = conn.cursor()
         cur.execute(
@@ -694,7 +691,7 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
             if id_cible:
                 from app.batch.batch_manuel import sync_new_clients_from_cible_insert_only
 
-                conn = sqlite3.connect(DB_PATH)
+                conn = connect_runtime()
                 try:
                     new_clients_added = sync_new_clients_from_cible_insert_only(
                         conn,
@@ -765,7 +762,7 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
         "external_dispatch_after_activation": external_dispatch_after_activation,
     }
 
-def sync_new_clients_from_cible_for_campaign(conn: sqlite3.Connection, id_campagne: str) -> Dict[str, Any]:
+def sync_new_clients_from_cible_for_campaign(conn: RuntimeConnection, id_campagne: str) -> Dict[str, Any]:
 
     """
     Insert-only :

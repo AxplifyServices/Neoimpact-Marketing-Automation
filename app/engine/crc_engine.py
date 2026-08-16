@@ -3,10 +3,10 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Dict, Optional, List, Tuple
 
-import sqlite3
 import requests
 
-from app.storage.db import DB_PATH
+from app.storage.runtime_db import RuntimeConnection, connect_runtime
+from app.storage.postgres_db import table_exists
 from app.engine.contact_client_engine import apply_result_from_queue
 
 
@@ -16,13 +16,14 @@ CRC_INPUT_TABLE = "crc_input"
 # =========================================================
 # DB helpers
 # =========================================================
-def _connect() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH)
+def _connect() -> RuntimeConnection:
+    return connect_runtime()
 
 
-def _table_exists(cur: sqlite3.Cursor, table: str) -> bool:
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
-    return cur.fetchone() is not None
+def _table_exists(cur: Any, table: str) -> bool:
+    # `cur` est conservé dans la signature pour compatibilité avec les appels
+    # existants, mais l'introspection est centralisée côté PostgreSQL.
+    return table_exists(str(table or "").strip())
 
 
 def _today_iso() -> str:
@@ -41,7 +42,6 @@ def list_campaigns_in_queue(queue_table: str) -> List[Tuple[str, str]]:
     Retourne [(ID_CAMPAGNE, nom_campagne)] présents dans une queue donnée (vers_da / vers_cc / crc_input si besoin).
     """
     conn = _connect()
-    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
     if not _table_exists(cur, queue_table):
@@ -90,7 +90,6 @@ def get_next_row_from_queue(
     Si gestionnaire_filter est fourni => prochaine ligne du gestionnaire (optionnellement dans la campagne).
     """
     conn = _connect()
-    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
     if not _table_exists(cur, table):
@@ -189,7 +188,6 @@ def move_row_to_end_of_queue(table: str, id_campagne: str, radical_compte: str) 
 
 def get_arrive_eche_flag(id_campagne: str, radical_compte: str) -> bool:
     conn = _connect()
-    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     try:
         cur.execute(
@@ -323,7 +321,6 @@ def prioritize_echeance_in_queue(queue_table: str, id_campagne_filter: Optional[
 
 def list_gestionnaires_in_queue(queue_table: str, id_campagne_filter: Optional[str] = None) -> List[str]:
     conn = _connect()
-    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
     if not _table_exists(cur, queue_table):
@@ -355,7 +352,6 @@ def list_gestionnaires_in_queue(queue_table: str, id_campagne_filter: Optional[s
 
 def get_queue_counts_by_gestionnaire(queue_table: str, id_campagne_filter: Optional[str] = None) -> List[Dict[str, Any]]:
     conn = _connect()
-    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
     if not _table_exists(cur, queue_table):
@@ -392,7 +388,6 @@ def get_ordered_rows_from_queue(
     gestionnaire_filter: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     conn = _connect()
-    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
     if not _table_exists(cur, table):

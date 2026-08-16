@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import smtplib
 from datetime import datetime
 from email.message import EmailMessage
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.storage.db import DB_PATH
+from app.storage.runtime_db import RuntimeConnection, connect_runtime
+from app.storage.postgres_db import get_column_names, table_exists
 from app.domain.canaux import compteur_for_canal
 
 from app.domain.workflow_nav import (
@@ -29,14 +29,12 @@ CLIENTS_TABLE = "clients"
 # =========================
 # DB helpers
 # =========================
-def _connect() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH)
+def _connect() -> RuntimeConnection:
+    return connect_runtime()
 
 
-def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
-    cur = conn.cursor()
-    cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,))
-    return cur.fetchone() is not None
+def _table_exists(conn: RuntimeConnection, table: str) -> bool:
+    return table_exists(str(table or "").strip())
 
 
 def _safe_json_loads(s: str, default: Any) -> Any:
@@ -57,15 +55,13 @@ def _norm_str(x: Any) -> str:
 # =========================
 # Modèle : fetch liste_action + meta
 # =========================
-def _get_id_modele_for_campagne(conn: sqlite3.Connection, id_campagne: str) -> Optional[str]:
-    conn.row_factory = sqlite3.Row
+def _get_id_modele_for_campagne(conn: RuntimeConnection, id_campagne: str) -> Optional[str]:
     cur = conn.cursor()
     cur.execute(f"SELECT id_modele FROM {CAMPAGNES_TABLE} WHERE id_campagne = ?", (id_campagne,))
     r = cur.fetchone()
     return _norm_str(r["id_modele"]) if r else None
 
-def _get_type_campagne_for_campagne(conn: sqlite3.Connection, id_campagne: str) -> str:
-    conn.row_factory = sqlite3.Row
+def _get_type_campagne_for_campagne(conn: RuntimeConnection, id_campagne: str) -> str:
     cur = conn.cursor()
     cur.execute(
         f"SELECT type_campagne FROM {CAMPAGNES_TABLE} WHERE id_campagne = ?",
@@ -76,12 +72,10 @@ def _get_type_campagne_for_campagne(conn: sqlite3.Connection, id_campagne: str) 
     return val or "sans_action_terrain"
 
 
-def _get_liste_action_for_modele(conn: sqlite3.Connection, id_modele: str) -> List[Dict[str, Any]]:
-    conn.row_factory = sqlite3.Row
+def _get_liste_action_for_modele(conn: RuntimeConnection, id_modele: str) -> List[Dict[str, Any]]:
     cur = conn.cursor()
 
-    cur.execute(f"PRAGMA table_info({MODELES_TABLE})")
-    cols = [str(x[1]) for x in cur.fetchall()]
+    cols = get_column_names(MODELES_TABLE)
     id_col = "id_modele" if "id_modele" in cols else ("ID_MODELE" if "ID_MODELE" in cols else "id_modele")
 
     cur.execute(f"SELECT liste_action FROM {MODELES_TABLE} WHERE {id_col} = ?", (id_modele,))
@@ -111,8 +105,7 @@ def _append_one_to_queue(queue_table: str, id_campagne: str, radical_compte: str
         cur = conn.cursor()
 
         # colonnes réelles de la queue
-        cur.execute(f"PRAGMA table_info({queue_table})")
-        qcols = [str(r[1]) for r in cur.fetchall()]
+        qcols = get_column_names(queue_table)
         qset = set(qcols)
 
         # mapping colonne -> expression SQL SELECT
@@ -143,15 +136,30 @@ def _append_one_to_queue(queue_table: str, id_campagne: str, radical_compte: str
         insert_sql_cols = ", ".join(insert_cols)
         select_sql_cols = ", ".join([select_map[c] for c in insert_cols])
 
+        update_cols = [
+            c
+            for c in insert_cols
+            if c not in {"ID_CAMPAGNE", "Radical_compte"}
+        ]
+        if update_cols:
+            conflict_sql = "DO UPDATE SET " + ", ".join(
+                f"{c} = EXCLUDED.{c}"
+                for c in update_cols
+            )
+        else:
+            conflict_sql = "DO NOTHING"
+
         cur.execute(
             f"""
-            INSERT OR REPLACE INTO {queue_table} ({insert_sql_cols})
+            INSERT INTO {queue_table} ({insert_sql_cols})
             SELECT
                 {select_sql_cols}
             FROM {CLIENTS_CAMPAGNES_TABLE} cc
             LEFT JOIN {CLIENTS_TABLE} cl ON cl.radical_compte = cc.Radical_compte
             LEFT JOIN {CAMPAGNES_TABLE} c ON c.id_campagne = cc.ID_CAMPAGNE
             WHERE cc.ID_CAMPAGNE = ? AND cc.Radical_compte = ?
+            ON CONFLICT (ID_CAMPAGNE, Radical_compte)
+            {conflict_sql}
             """,
             (id_campagne, radical_compte),
         )
@@ -190,8 +198,7 @@ def _send_mail(sender: str, password: str, to_email: str, subject: str, body: st
     return True
 
 
-def _get_client_email(conn: sqlite3.Connection, radical_compte: str) -> str:
-    conn.row_factory = sqlite3.Row
+def _get_client_email(conn: RuntimeConnection, radical_compte: str) -> str:
     cur = conn.cursor()
     cur.execute(f"SELECT Mail FROM {CLIENTS_TABLE} WHERE radical_compte = ?", (radical_compte,))
     r = cur.fetchone()
@@ -215,7 +222,6 @@ def _send_mail_for_one_client_and_advance(id_campagne: str, radical_compte: str,
 
     conn = _connect()
     try:
-        conn.row_factory = sqlite3.Row
         cur = conn.cursor()
 
         id_modele = _get_id_modele_for_campagne(conn, id_campagne) or ""
@@ -366,7 +372,6 @@ def apply_result_from_queue(row: Dict[str, Any], resultat_label: str, queue_tabl
 
     conn = _connect()
     try:
-        conn.row_factory = sqlite3.Row
         cur = conn.cursor()
 
         block_id = _norm_str(row.get("ID_Action"))
@@ -522,7 +527,6 @@ def route_after_update(id_campagne: str, radical_compte: str) -> Dict[str, Any]:
     """
     conn = _connect()
     try:
-        conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute(
             f"SELECT * FROM {CLIENTS_CAMPAGNES_TABLE} WHERE ID_CAMPAGNE=? AND Radical_compte=?",

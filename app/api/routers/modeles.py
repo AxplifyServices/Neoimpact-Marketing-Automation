@@ -117,6 +117,12 @@ def list_modeles(
     }
 
 
+@router.get("/modeles/locked")
+def locked_modeles():
+    locked = sorted(list(set(str(x).strip() for x in (get_locked_modele_ids_for_ui() or []))))
+    return {"locked_ids": locked}
+
+
 @router.get("/modeles/{id_modele}")
 def get_modele(id_modele: str):
     return get_modele_by_id_for_ui(id_modele)
@@ -125,12 +131,6 @@ def get_modele(id_modele: str):
 @router.get("/modeles/{id_modele}/edit-payload")
 def edit_payload(id_modele: str):
     return get_modele_edit_payload_for_ui(id_modele)
-
-
-@router.get("/modeles/locked")
-def locked_modeles():
-    locked = sorted(list(set(str(x).strip() for x in (get_locked_modele_ids_for_ui() or []))))
-    return {"locked_ids": locked}
 
 
 @router.delete("/modeles/{id_modele}")

@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import json
 import re
-import sqlite3
 import unicodedata
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.storage.db import DB_PATH
+from app.storage.runtime_db import RuntimeConnection, connect_runtime
+from app.storage.postgres_db import get_column_names, table_exists
 from app.storage.campagnes_store_sqlite import list_all_campagnes, update_etat
 from app.storage.clients_campagnes_store_sqlite import (
     ensure_table as ensure_clients_campagnes,
@@ -54,8 +54,8 @@ CLIENTS_TABLE = "clients"
 # =========================================================
 # Helpers
 # =========================================================
-def _connect() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH)
+def _connect() -> RuntimeConnection:
+    return connect_runtime()
 
 
 def _norm_str(x: Any) -> str:
@@ -109,51 +109,28 @@ def _now_iso() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _clients_columns(conn: sqlite3.Connection) -> List[str]:
-    cur = conn.cursor()
-    cur.execute(f"PRAGMA table_info({CLIENTS_TABLE})")
-    return [r[1] for r in cur.fetchall()]
+def _clients_columns(conn: RuntimeConnection) -> List[str]:
+    return get_column_names(CLIENTS_TABLE)
 
 
-def _cc_columns(conn: sqlite3.Connection) -> List[str]:
-    cur = conn.cursor()
-    cur.execute(f"PRAGMA table_info({CLIENTS_CAMPAGNES_TABLE})")
-    return [r[1] for r in cur.fetchall()]
+def _cc_columns(conn: RuntimeConnection) -> List[str]:
+    return get_column_names(CLIENTS_CAMPAGNES_TABLE)
 
 
-def _cc_has_col(conn: sqlite3.Connection, col: str) -> bool:
+def _cc_has_col(conn: RuntimeConnection, col: str) -> bool:
     return col in set(_cc_columns(conn))
 
 def _table_exists(
-    conn: sqlite3.Connection,
+    conn: RuntimeConnection,
     table_name: str,
 ) -> bool:
-    """
-    Vérifie qu'une table SQLite existe avant de l'utiliser.
-
-    Le nom de table n'est jamais injecté directement dans une requête
-    métier. Il est recherché dans sqlite_master via un paramètre SQL.
-    """
     normalized_table_name = _norm_str(table_name)
-
-    if not normalized_table_name:
-        return False
-
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT 1
-        FROM sqlite_master
-        WHERE type = 'table'
-          AND name = ?
-        LIMIT 1
-        """,
-        (normalized_table_name,),
+    return bool(
+        normalized_table_name
+        and table_exists(normalized_table_name)
     )
 
-    return cur.fetchone() is not None
-
-def _recompute_nb_jour_debut_campagne(conn: sqlite3.Connection) -> int:
+def _recompute_nb_jour_debut_campagne(conn: RuntimeConnection) -> int:
     """
     Met à jour nb_jour_debut_campagne = today - date_debut_campagne (en jours).
     - Ne casse pas si colonnes absentes.
@@ -169,7 +146,7 @@ def _recompute_nb_jour_debut_campagne(conn: sqlite3.Connection) -> int:
         UPDATE {CLIENTS_CAMPAGNES_TABLE}
         SET nb_jour_debut_campagne = CASE
             WHEN COALESCE(date_debut_campagne,'') = '' THEN nb_jour_debut_campagne
-            ELSE CAST((julianday(?) - julianday(substr(date_debut_campagne,1,10))) AS INTEGER)
+            ELSE (?::date - SUBSTRING(date_debut_campagne FROM 1 FOR 10)::date)
         END
         WHERE COALESCE(Etat_campagne,'') IN ('En cours','Planifiée','En pause')
         """,
@@ -178,7 +155,7 @@ def _recompute_nb_jour_debut_campagne(conn: sqlite3.Connection) -> int:
     return int(cur.rowcount or 0)
 
 
-def _resolve_clients_col(conn: sqlite3.Connection, requested_col: str) -> Optional[str]:
+def _resolve_clients_col(conn: RuntimeConnection, requested_col: str) -> Optional[str]:
     """
     Résout une colonne de la table clients de manière robuste:
     - match exact
@@ -201,10 +178,8 @@ def _resolve_clients_col(conn: sqlite3.Connection, requested_col: str) -> Option
     return None
 
 
-def _modeles_id_col(conn: sqlite3.Connection) -> str:
-    cur = conn.cursor()
-    cur.execute(f"PRAGMA table_info({MODELES_TABLE})")
-    cols = [r[1] for r in cur.fetchall()]
+def _modeles_id_col(conn: RuntimeConnection) -> str:
+    cols = get_column_names(MODELES_TABLE)
     if "id_modele" in cols:
         return "id_modele"
     if "ID_MODELE" in cols:
@@ -212,19 +187,15 @@ def _modeles_id_col(conn: sqlite3.Connection) -> str:
     return "id_modele"
 
 
-def _modeles_cols(conn: sqlite3.Connection) -> List[str]:
-    cur = conn.cursor()
-    cur.execute(f"PRAGMA table_info({MODELES_TABLE})")
-    return [r[1] for r in cur.fetchall()]
+def _modeles_cols(conn: RuntimeConnection) -> List[str]:
+    return get_column_names(MODELES_TABLE)
 
 
-def _load_client_row_by_radical(conn: sqlite3.Connection, radical_compte: str) -> Dict[str, Any]:
+def _load_client_row_by_radical(conn: RuntimeConnection, radical_compte: str) -> Dict[str, Any]:
     """Charge la ligne clients.* pour un radical_compte. Retourne {} si introuvable."""
     rc = _norm_str(radical_compte)
     if not rc:
         return {}
-
-    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
     resolved = _resolve_clients_col(conn, "radical_compte") or "radical_compte"
@@ -289,7 +260,7 @@ def _list_active_campaigns(
     return active_campaigns
 
 
-def _load_modele_meta(conn: sqlite3.Connection, id_modele: str) -> Tuple[List[Dict[str, Any]]]:
+def _load_modele_meta(conn: RuntimeConnection, id_modele: str) -> Tuple[List[Dict[str, Any]]]:
     """
     ✅ Robustesse: variable_cible et objectif peuvent ne plus exister.
     Retourne toujours (variable_cible, objectif, liste_action) mais variable_cible/objectif peuvent être ''.
@@ -304,8 +275,6 @@ def _load_modele_meta(conn: sqlite3.Connection, id_modele: str) -> Tuple[List[Di
 
     if "liste_action" not in cols:
         return  []
-
-    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute(
         f"SELECT {', '.join(select_cols)} FROM {MODELES_TABLE} WHERE {id_col} = ?",
@@ -326,7 +295,7 @@ def _load_modele_meta(conn: sqlite3.Connection, id_modele: str) -> Tuple[List[Di
     return liste_action
 
 
-def _cancel_if_rupture_relation(conn: sqlite3.Connection, id_campagne: str) -> int:
+def _cancel_if_rupture_relation(conn: RuntimeConnection, id_campagne: str) -> int:
     """
     Si un client est en 'Rupture de relation' (dans clients),
     on le sort de la campagne :
@@ -439,7 +408,7 @@ def _update_campaigns_status_from_dates(
     return counts
 
 
-def _recompute_nb_jour_last_action(conn: sqlite3.Connection) -> int:
+def _recompute_nb_jour_last_action(conn: RuntimeConnection) -> int:
     today_iso = date.today().isoformat()
     cur = conn.cursor()
     cur.execute(
@@ -447,7 +416,7 @@ def _recompute_nb_jour_last_action(conn: sqlite3.Connection) -> int:
         UPDATE {CLIENTS_CAMPAGNES_TABLE}
         SET NB_jour_last_action = CASE
             WHEN COALESCE(Date_last_action,'') = '' THEN 0
-            ELSE CAST((julianday(?) - julianday(substr(Date_last_action,1,10))) AS INTEGER)
+            ELSE (?::date - SUBSTRING(Date_last_action FROM 1 FOR 10)::date)
         END
         WHERE COALESCE(Etat_campagne,'') IN ('En cours','Planifiée', 'En pause')
         """,
@@ -456,7 +425,7 @@ def _recompute_nb_jour_last_action(conn: sqlite3.Connection) -> int:
     return int(cur.rowcount or 0)
 
 
-def _advance_en_attente_rows(conn: sqlite3.Connection, id_campagne: str, liste_action: List[Dict[str, Any]]) -> int:
+def _advance_en_attente_rows(conn: RuntimeConnection, id_campagne: str, liste_action: List[Dict[str, Any]]) -> int:
     """
     ✅ NEW:
     - Traite Action IN ('En attente', 'Objectif') pour re-tester les blocs objectifs
@@ -470,7 +439,6 @@ def _advance_en_attente_rows(conn: sqlite3.Connection, id_campagne: str, liste_a
         return 0
 
     has_conversion = _cc_has_col(conn, "conversion")
-    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
     # ✅ NEW: inclure Objectif
@@ -594,7 +562,7 @@ def _advance_en_attente_rows(conn: sqlite3.Connection, id_campagne: str, liste_a
 
 
 def _update_arriv_eche_for_campaign(
-    conn: sqlite3.Connection,
+    conn: RuntimeConnection,
     id_campagne: str,
     liste_action: List[Dict[str, Any]],
 ) -> int:
@@ -605,8 +573,6 @@ def _update_arriv_eche_for_campaign(
     """
     if not id_campagne or not isinstance(liste_action, list) or len(liste_action) == 0:
         return 0
-
-    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
     cur.execute(
@@ -647,7 +613,7 @@ def _update_arriv_eche_for_campaign(
     return int(changed)
 
 
-def _rebuild_outputs_for_all_en_cours(conn: sqlite3.Connection, campagnes: List[Dict[str, Any]]) -> Dict[str, int]:
+def _rebuild_outputs_for_all_en_cours(conn: RuntimeConnection, campagnes: List[Dict[str, Any]]) -> Dict[str, int]:
     ensure_crc_input_table()
     ensure_vers_da_table()
     ensure_vers_cc_table()

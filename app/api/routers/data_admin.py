@@ -58,16 +58,16 @@ USECASE_COLUMNS = {
 
 "Eligible_credit" ,
 
-"Compte CIH Mobile active" ,
+"Compte_CIH_Mobile_active" ,
 
-"Compte MAD convertible" ,
+"Compte_MAD_convertible" ,
 
-"Compte MAD convertible active" ,
+"Compte_MAD_convertible_active" ,
 
-"Carte viertuelle active" ,
+"Carte_virtuelle_active" ,
 
-"Nb Operation" ,
-"Vol Operation" ,
+"Nb_Operation" ,
+"Vol_Operation" ,
     ],
 
     "cible": [
@@ -111,16 +111,16 @@ USECASE_COLUMNS = {
 
 "Eligible_credit" ,
 
-"Compte CIH Mobile active" ,
+"Compte_CIH_Mobile_active" ,
 
-"Compte MAD convertible" ,
+"Compte_MAD_convertible" ,
 
-"Compte MAD convertible active" ,
+"Compte_MAD_convertible_active" ,
 
-"Carte viertuelle active" ,
+"Carte_virtuelle_active" ,
 
-"Nb Operation" ,
-"Vol Operation" ,
+"Nb_Operation" ,
+"Vol_Operation" ,
     ],
 
     "objectif": [
@@ -161,16 +161,16 @@ USECASE_COLUMNS = {
 
 "Eligible_credit" ,
 
-"Compte CIH Mobile active" ,
+"Compte_CIH_Mobile_active" ,
 
-"Compte MAD convertible" ,
+"Compte_MAD_convertible" ,
 
-"Compte MAD convertible active" ,
+"Compte_MAD_convertible_active" ,
 
-"Carte viertuelle active" ,
+"Carte_virtuelle_active" ,
 
-"Nb Operation" ,
-"Vol Operation" ,
+"Nb_Operation" ,
+"Vol_Operation" ,
     ],
 
     "condition": [
@@ -212,16 +212,16 @@ USECASE_COLUMNS = {
 
 "Eligible_credit" ,
 
-"Compte CIH Mobile active" ,
+"Compte_CIH_Mobile_active" ,
 
-"Compte MAD convertible" ,
+"Compte_MAD_convertible" ,
 
-"Compte MAD convertible active" ,
+"Compte_MAD_convertible_active" ,
 
-"Carte viertuelle active" ,
+"Carte_virtuelle_active" ,
 
-"Nb Operation" ,
-"Vol Operation" ,
+"Nb_Operation" ,
+"Vol_Operation" ,
     ],
 }
 
@@ -235,8 +235,8 @@ YES_NO = ["Oui", "Non"]
 
 # Colonnes que tu veux FORCER en "Numérique" (même si le type SQL est mal déclaré)
 FORCE_NUMERIC = {
-    "Nb Operation",
-    "Vol Operation",
+    "Nb_Operation",
+    "Vol_Operation",
     "Nb_Operation",
     "Vol_Operation",
 }
@@ -262,16 +262,16 @@ CATEGORICAL_MAPPING: Dict[str, List[str]] = {
 
     # Attention: je mets des variantes probables (underscore) pour éviter mismatch
     "Compte_CIH_Mobile_active": YES_NO,
-    "Compte CIH Mobile active": YES_NO,
+    "Compte_CIH_Mobile_active": YES_NO,
 
     "Compte_MAD_convertible": YES_NO,  # déjà existant, on fixe aussi ici
-    "Compte MAD convertible": YES_NO,
+    "Compte_MAD_convertible": YES_NO,
 
     "Compte_MAD_convertible_active": YES_NO,
-    "Compte MAD convertible active": YES_NO,
+    "Compte_MAD_convertible_active": YES_NO,
 
     "Carte_virtuelle_active": YES_NO,
-    "Carte viertuelle active": YES_NO,  # tel que fourni (typo "viertuelle")
+    "Carte_virtuelle_active": YES_NO,  # tel que fourni (typo "viertuelle")
 
     # --- Colonnes à modifier ---
     "Epargne": YES_NO,

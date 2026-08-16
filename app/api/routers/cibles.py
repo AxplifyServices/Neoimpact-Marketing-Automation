@@ -164,6 +164,12 @@ def list_objective_campaigns_for_cible_filter():
         "items": list_campaigns_for_objective_filter_ui()
     }
 
+@router.get("/cibles/locked")
+def locked_cibles():
+    locked_ids, reasons = get_locked_cibles_for_ui()
+    return {"locked_ids": sorted(list(locked_ids or [])), "reasons": reasons or {}}
+
+
 @router.get("/cibles/{id_cible}")
 def get_cible(id_cible: str):
     return get_cible_for_ui(id_cible)
@@ -175,12 +181,6 @@ def get_cible_filtre(id_cible: str):
     if not row:
         return {"filtre": {}}
     return {"filtre": get_cible_filtre_dict_for_ui(row)}
-
-
-@router.get("/cibles/locked")
-def locked_cibles():
-    locked_ids, reasons = get_locked_cibles_for_ui()
-    return {"locked_ids": sorted(list(locked_ids or [])), "reasons": reasons or {}}
 
 
 @router.post("/cibles/db")

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import smtplib
 from datetime import datetime
 from email.message import EmailMessage
@@ -15,7 +14,8 @@ try:
 except Exception:
     pass
 
-from app.storage.db import DB_PATH
+from app.storage.runtime_db import RuntimeConnection, connect_runtime
+from app.storage.postgres_db import get_column_names
 from app.domain.canaux import resultats_for_canal
 from app.domain.workflow_nav import (
     find_bloc_by_id,
@@ -37,8 +37,8 @@ CLIENTS_TABLE = "clients"
 # =========================================================
 # Helpers DB / JSON / time
 # =========================================================
-def _connect() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH)
+def _connect() -> RuntimeConnection:
+    return connect_runtime()
 
 
 def _safe_json_loads(s: str, default: Any) -> Any:
@@ -92,8 +92,7 @@ def _send_email(sender: str, password: str, to_email: str, subject: str, body: s
 # =========================================================
 # Lecture contexte client + rendu
 # =========================================================
-def _get_client_context(conn: sqlite3.Connection, radical_compte: str) -> Dict[str, str]:
-    conn.row_factory = sqlite3.Row
+def _get_client_context(conn: RuntimeConnection, radical_compte: str) -> Dict[str, str]:
     cur = conn.cursor()
     cur.execute(
         f"""
@@ -119,8 +118,7 @@ def _render_template(text: str, ctx: Dict[str, str]) -> str:
 # =========================================================
 # Récupération modèle pour une campagne
 # =========================================================
-def _get_id_modele_for_campagne(conn: sqlite3.Connection, id_campagne: str) -> Optional[str]:
-    conn.row_factory = sqlite3.Row
+def _get_id_modele_for_campagne(conn: RuntimeConnection, id_campagne: str) -> Optional[str]:
     cur = conn.cursor()
     cur.execute(
         f"SELECT id_modele FROM {CAMPAGNES_TABLE} WHERE id_campagne = ?",
@@ -132,12 +130,10 @@ def _get_id_modele_for_campagne(conn: sqlite3.Connection, id_campagne: str) -> O
     return str(r["id_modele"])
 
 
-def _get_liste_action_for_modele(conn: sqlite3.Connection, id_modele: str) -> List[Dict[str, Any]]:
-    conn.row_factory = sqlite3.Row
+def _get_liste_action_for_modele(conn: RuntimeConnection, id_modele: str) -> List[Dict[str, Any]]:
     cur = conn.cursor()
 
-    cur.execute(f"PRAGMA table_info({MODELES_TABLE})")
-    cols = [str(x[1]) for x in cur.fetchall()]
+    cols = get_column_names(MODELES_TABLE)
     id_col = "id_modele" if "id_modele" in cols else ("ID_MODELE" if "ID_MODELE" in cols else "id_modele")
 
     cur.execute(
@@ -158,8 +154,7 @@ def _get_liste_action_for_modele(conn: sqlite3.Connection, id_modele: str) -> Li
 # =========================================================
 # Sous-action 1 : sélectionner les lignes candidates Mail (avec rowid unique)
 # =========================================================
-def _select_mail_candidates(conn: sqlite3.Connection, limit_rows: int = 5000) -> List[Dict[str, Any]]:
-    conn.row_factory = sqlite3.Row
+def _select_mail_candidates(conn: RuntimeConnection, limit_rows: int = 5000) -> List[Dict[str, Any]]:
     cur = conn.cursor()
     cur.execute(
         f"""
@@ -179,7 +174,7 @@ def _select_mail_candidates(conn: sqlite3.Connection, limit_rows: int = 5000) ->
 # =========================================================
 # Sous-action 2 : construire le mail depuis le modèle (id_action)
 # =========================================================
-def _build_mail_for_row(conn: sqlite3.Connection, row_cc: Dict[str, Any], liste_action: List[Dict[str, Any]]) -> Tuple[str, str, str]:
+def _build_mail_for_row(conn: RuntimeConnection, row_cc: Dict[str, Any], liste_action: List[Dict[str, Any]]) -> Tuple[str, str, str]:
     radical = str(row_cc.get("Radical_compte") or "").strip()
     ctx = _get_client_context(conn, radical)
     to_email = (ctx.get("Mail") or "").strip()
@@ -196,7 +191,7 @@ def _build_mail_for_row(conn: sqlite3.Connection, row_cc: Dict[str, Any], liste_
 # =========================================================
 # Sous-action 3 : MAJ après mail (par rowid)
 # =========================================================
-def _update_after_mail_by_rid(conn: sqlite3.Connection, rid: int, resultat: str, incr_mail: int, now_iso: str) -> None:
+def _update_after_mail_by_rid(conn: RuntimeConnection, rid: int, resultat: str, incr_mail: int, now_iso: str) -> None:
     cur = conn.cursor()
     cur.execute(
         f"""
@@ -216,7 +211,7 @@ def _update_after_mail_by_rid(conn: sqlite3.Connection, rid: int, resultat: str,
 # Sous-action 4 : avancer workflow (fils ou En attente) par rowid
 # =========================================================
 def _advance_workflow_after_mail_by_rid(
-    conn: sqlite3.Connection,
+    conn: RuntimeConnection,
     rid: int,
     row_after: Dict[str, Any],
     liste_action: List[Dict[str, Any]],
@@ -258,8 +253,7 @@ def _advance_workflow_after_mail_by_rid(
 
         # conversion=1 si branche Oui (si colonne existe)
         try:
-            cur.execute(f"PRAGMA table_info({CLIENTS_CAMPAGNES_TABLE})")
-            cols = {r[1] for r in cur.fetchall()}
+            cols = set(get_column_names(CLIENTS_CAMPAGNES_TABLE))
         except Exception:
             cols = set()
 
@@ -347,7 +341,6 @@ def run_mail_pass(limit_rows: int = 5000, seen_payloads: Optional[Set[Tuple[str,
 
     conn = _connect()
     try:
-        conn.row_factory = sqlite3.Row
         cur = conn.cursor()
 
         candidates = _select_mail_candidates(conn, limit_rows=limit_rows)

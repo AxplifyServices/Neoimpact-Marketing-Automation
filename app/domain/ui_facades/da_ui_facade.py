@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import sqlite3
 from typing import Any, Dict
 
-from app.storage.db import DB_PATH
+from app.storage.runtime_db import RuntimeConnection, connect_runtime
 
 
 def _safe_str(x: Any) -> str:
@@ -27,8 +26,7 @@ def get_da_context_from_db(id_campagne: str, radical_compte: str) -> Dict[str, A
         "nom_campagne": "",
     }
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = connect_runtime()
     cur = conn.cursor()
 
     cur.execute(
