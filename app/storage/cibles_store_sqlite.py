@@ -3,609 +3,1774 @@ from __future__ import annotations
 import json
 import os
 import re
-import sqlite3
+import shutil
+import time
 from typing import Any, Dict, List, Tuple
 
 import pandas as pd
-import time
+from psycopg import sql
+from psycopg.rows import dict_row
 
 from app.domain.cible import Cible
-from app.storage.db import DB_PATH
+from app.storage.postgres_db import (
+    connection,
+    get_column_names,
+    table_exists,
+)
 
-# =========================================================
+
+# ============================================================
 # CONFIG
-# =========================================================
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+# ============================================================
 
-# Uploads cibles (fichiers plats)
-UPLOAD_DIR = os.path.join(PROJECT_ROOT, "uploads", "cibles")
-
-
-# =========================================================
-# CONNEXION
-# =========================================================
-def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-# =========================================================
-# TABLE
-# =========================================================
-def ensure_cibles_table() -> None:
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS cibles (
-            id_cible TEXT PRIMARY KEY,
-            nom_cible TEXT NOT NULL,
-            date_creation TEXT,
-            source TEXT,
-            filtre TEXT,
-            chemin TEXT
-        )
-        """
+PROJECT_ROOT = os.path.abspath(
+    os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "..",
     )
-    conn.commit()
-    conn.close()
+)
 
-def count_clients_for_cible(id_cible: str) -> int:
+UPLOAD_DIR = os.path.join(
+    PROJECT_ROOT,
+    "uploads",
+    "cibles",
+)
+
+CIBLES_TABLE = "cibles"
+CLIENTS_TABLE = "clients"
+CLIENTS_CAMPAGNES_TABLE = "clients_campagnes"
+
+STRICT_REQUIRED_COLS = [
+    "ID_Client",
+    "Numero_Tel",
+    "Mail",
+]
+
+STRICT_KEY_COL = "ID_Client"
+RADICAL_COL = "radical_compte"
+
+OBJECTIF_CAMPAGNES_FILTER_KEY = "__objectif_campagnes__"
+
+
+# ============================================================
+# SCHEMA VALIDATION
+# ============================================================
+
+def ensure_cibles_table() -> None:
+    """
+    Vérifie que la table PostgreSQL cibles possède le schéma
+    attendu.
+
+    Le code applicatif ne crée plus automatiquement les tables.
+    Toute modification du schéma doit passer par un fichier SQL.
+    """
+
+    if not table_exists(CIBLES_TABLE):
+        raise RuntimeError(
+            "La table PostgreSQL 'cibles' est absente."
+        )
+
+    columns = set(
+        get_column_names(CIBLES_TABLE)
+    )
+
+    expected = {
+        "id_cible",
+        "nom_cible",
+        "date_creation",
+        "source",
+        "filtre",
+        "chemin",
+    }
+
+    missing = expected - columns
+
+    if missing:
+        raise RuntimeError(
+            "Schéma PostgreSQL invalide pour 'cibles'. "
+            f"Colonnes absentes : {', '.join(sorted(missing))}"
+        )
+
+
+# ============================================================
+# COUNT CLIENTS
+# ============================================================
+
+def count_clients_for_cible(
+    id_cible: str,
+) -> int:
     try:
-        df = load_clients_df_for_cible(id_cible)
-        return int(len(df))
+        df = load_clients_df_for_cible(
+            id_cible
+        )
+
+        return int(
+            len(df)
+        )
+
     except Exception:
+        # Conservation du comportement historique.
         return 0
 
-# =========================================================
+
+# ============================================================
 # IDS
-# =========================================================
-def _new_id_cible(cur: sqlite3.Cursor) -> str:
-    cur.execute("SELECT id_cible FROM cibles ORDER BY id_cible DESC LIMIT 1")
+# ============================================================
+
+def _new_id_cible(cur) -> str:
+    """
+    Génère :
+        C000001
+        C000002
+        ...
+
+    L'appelant doit être dans une transaction ayant acquis
+    le verrou advisory utilisé dans insert_cible().
+    """
+
+    cur.execute(
+        """
+        SELECT id_cible
+        FROM cibles
+        WHERE id_cible ~ '^C[0-9]+$'
+        ORDER BY
+            CAST(
+                SUBSTRING(id_cible FROM 2)
+                AS BIGINT
+            ) DESC
+        LIMIT 1
+        """
+    )
+
     row = cur.fetchone()
+
     if not row:
         return "C000001"
-    last = str(row[0])
-    m = re.search(r"(\d+)$", last)
-    n = int(m.group(1)) if m else 0
-    return f"C{n+1:06d}"
+
+    last = str(
+        row[0] or ""
+    )
+
+    match = re.search(
+        r"(\d+)$",
+        last,
+    )
+
+    number = (
+        int(match.group(1))
+        if match
+        else 0
+    )
+
+    return f"C{number + 1:06d}"
 
 
-# =========================================================
-# CRUD
-# =========================================================
-def insert_cible(cible: Cible) -> str:
+# ============================================================
+# CRUD CIBLES
+# ============================================================
+
+def insert_cible(
+    cible: Cible,
+) -> str:
     """
-    Insert cible dans sqlite.
-    - Génère un id si vide
+    Insère une cible dans PostgreSQL.
+
+    Si id_cible est vide, un identifiant est généré.
     """
+
     ensure_cibles_table()
-    conn = _connect()
-    cur = conn.cursor()
-
-    if not cible.id_cible:
-        cible.id_cible = _new_id_cible(cur)
 
     cible.validate()
 
-    filtre_str = json.dumps(cible.filtre, ensure_ascii=False) if cible.source == "DB" else ""
-    chemin = cible.chemin if cible.source == "Fichier plat" else ""
-
-    cur.execute(
-        """
-        INSERT INTO cibles (id_cible, nom_cible, date_creation, source, filtre, chemin)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (cible.id_cible, cible.nom_cible, cible.date_creation, cible.source, filtre_str, chemin),
+    filtre_str = (
+        json.dumps(
+            cible.filtre,
+            ensure_ascii=False,
+        )
+        if cible.source == "DB"
+        else ""
     )
 
-    conn.commit()
-    conn.close()
-    return str(cible.id_cible)
+    chemin = (
+        cible.chemin
+        if cible.source == "Fichier plat"
+        else ""
+    )
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+
+            # Empêche deux créations simultanées de générer
+            # le même C000xxx.
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (610001,),
+            )
+
+            if not cible.id_cible:
+                cible.id_cible = _new_id_cible(
+                    cur
+                )
+
+            cur.execute(
+                """
+                INSERT INTO cibles (
+                    id_cible,
+                    nom_cible,
+                    date_creation,
+                    source,
+                    filtre,
+                    chemin
+                )
+                VALUES (
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s
+                )
+                """,
+                (
+                    cible.id_cible,
+                    cible.nom_cible,
+                    cible.date_creation,
+                    cible.source,
+                    filtre_str,
+                    chemin,
+                ),
+            )
+
+    return str(
+        cible.id_cible
+    )
 
 
 def list_cibles() -> List[Dict[str, Any]]:
     ensure_cibles_table()
-    conn = _connect()
-    cur = conn.cursor()
-    rows = cur.execute("SELECT * FROM cibles ORDER BY date_creation DESC").fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+
+    with connection(
+        dict_rows=True
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM cibles
+                ORDER BY date_creation DESC
+                """
+            )
+
+            rows = cur.fetchall()
+
+    return [
+        dict(row)
+        for row in rows
+    ]
 
 
-def _campagne_use_cible(conn: sqlite3.Connection, id_cible: str) -> Dict[str, Any] | None:
+def _campagne_use_cible(
+    conn,
+    id_cible: str,
+) -> Dict[str, Any] | None:
     """
-    Retourne la campagne active (en cours / planifiée) si elle utilise la cible.
+    Retourne une campagne active ou planifiée utilisant
+    la cible.
+
+    IMPORTANT :
+    la vraie colonne du schéma est etat_campagne.
+
+    L'ancienne implémentation utilisait "etat", colonne
+    inexistante, puis absorbait silencieusement l'erreur.
     """
-    try:
-        r = conn.execute(
+
+    with conn.cursor(
+        row_factory=dict_row
+    ) as cur:
+        cur.execute(
             """
-            SELECT id_campagne, nom_campagne, etat
-              FROM campagnes
-             WHERE id_cible = ?
-               AND (etat = 'En cours' OR etat = 'Planifiée')
-             LIMIT 1
+            SELECT
+                id_campagne,
+                nom_campagne,
+                etat_campagne
+            FROM campagnes
+            WHERE id_cible = %s
+              AND etat_campagne IN (
+                  'En cours',
+                  'Planifiée'
+              )
+            LIMIT 1
             """,
-            (id_cible,),
-        ).fetchone()
-        if not r:
-            return None
-        return {"id_campagne": r[0], "nom_campagne": r[1], "etat": r[2]}
-    except Exception:
-        return None
-
-
-def delete_cible(id_cible: str) -> None:
-    """
-    Supprime une cible SI elle n'est pas utilisée par une campagne active (En cours/Planifiée).
-    - Si source = fichier plat => supprime aussi le fichier du disque
-    - ❌ Ne touche PAS aux clients
-    """
-    ensure_cibles_table()
-    conn = _connect()
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-
-    # Lock : campagne active / planifiée
-    used = _campagne_use_cible(conn, id_cible)
-    if used:
-        conn.close()
-        raise ValueError(
-            f"Impossible de supprimer: cible utilisée par campagne active/planifiée "
-            f"'{used.get('nom_campagne')}' ({used.get('etat')})."
+            (
+                id_cible,
+            ),
         )
 
-    # Récupérer cible
-    cur.execute("SELECT * FROM cibles WHERE id_cible = ?", (id_cible,))
-    r = cur.fetchone()
-    if not r:
-        conn.close()
-        return
+        row = cur.fetchone()
 
-    source = (r["source"] or "").strip()
-    chemin = (r["chemin"] or "").strip()
+    if row is None:
+        return None
 
-    # Delete row
-    cur.execute("DELETE FROM cibles WHERE id_cible = ?", (id_cible,))
-    conn.commit()
-    conn.close()
+    return {
+        "id_campagne": row.get(
+            "id_campagne"
+        ),
+        "nom_campagne": row.get(
+            "nom_campagne"
+        ),
+        "etat": row.get(
+            "etat_campagne"
+        ),
+    }
 
-    # Delete file if needed
-    if source == "Fichier plat" and chemin and os.path.exists(chemin):
+
+def delete_cible(
+    id_cible: str,
+) -> None:
+    """
+    Supprime une cible uniquement si elle n'est utilisée
+    par aucune campagne En cours / Planifiée.
+
+    Si la cible vient d'un fichier plat, le fichier associé
+    est ensuite supprimé du disque.
+
+    Les clients eux-mêmes ne sont jamais supprimés.
+    """
+
+    ensure_cibles_table()
+
+    source = ""
+    chemin = ""
+
+    with connection(
+        dict_rows=True
+    ) as conn:
+
+        used = _campagne_use_cible(
+            conn,
+            id_cible,
+        )
+
+        if used:
+            raise ValueError(
+                "Impossible de supprimer : cible utilisée "
+                "par campagne active/planifiée "
+                f"'{used.get('nom_campagne')}' "
+                f"({used.get('etat')})."
+            )
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM cibles
+                WHERE id_cible = %s
+                """,
+                (
+                    id_cible,
+                ),
+            )
+
+            row = cur.fetchone()
+
+            if row is None:
+                return
+
+            source = str(
+                row.get("source") or ""
+            ).strip()
+
+            chemin = str(
+                row.get("chemin") or ""
+            ).strip()
+
+            cur.execute(
+                """
+                DELETE FROM cibles
+                WHERE id_cible = %s
+                """,
+                (
+                    id_cible,
+                ),
+            )
+
+    if (
+        source == "Fichier plat"
+        and chemin
+        and os.path.exists(chemin)
+    ):
         try:
-            os.remove(chemin)
+            os.remove(
+                chemin
+            )
         except Exception:
+            # Conservation du comportement existant :
+            # une erreur filesystem ne réinjecte pas la cible
+            # supprimée en base.
             pass
 
 
 def get_cibles_count() -> int:
     ensure_cibles_table()
-    conn = _connect()
-    cur = conn.cursor()
-    r = cur.execute("SELECT COUNT(*) FROM cibles").fetchone()
-    conn.close()
-    return int(r[0] if r else 0)
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM cibles
+                """
+            )
+
+            row = cur.fetchone()
+
+    return int(
+        row[0]
+        if row
+        else 0
+    )
 
 
-def get_cible(id_cible: str) -> Dict[str, Any] | None:
+def get_cible(
+    id_cible: str,
+) -> Dict[str, Any] | None:
     ensure_cibles_table()
-    conn = _connect()
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM cibles WHERE id_cible = ?", (id_cible,))
-    r = cur.fetchone()
-    conn.close()
-    return dict(r) if r else None
+
+    with connection(
+        dict_rows=True
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM cibles
+                WHERE id_cible = %s
+                """,
+                (
+                    id_cible,
+                ),
+            )
+
+            row = cur.fetchone()
+
+    if row is None:
+        return None
+
+    return dict(
+        row
+    )
 
 
-def update_cible(cible: Cible) -> None:
-    """Met à jour une cible existante (même id_cible)."""
+def update_cible(
+    cible: Cible,
+) -> None:
+    """
+    Met à jour une cible existante.
+    """
+
     ensure_cibles_table()
-    conn = _connect()
-    cur = conn.cursor()
 
     cible.validate()
 
-    filtre_str = json.dumps(cible.filtre, ensure_ascii=False) if cible.source == "DB" else ""
-    chemin = cible.chemin if cible.source == "Fichier plat" else ""
-
-    cur.execute(
-        """
-        UPDATE cibles
-           SET nom_cible = ?,
-               date_creation = ?,
-               source = ?,
-               filtre = ?,
-               chemin = ?
-         WHERE id_cible = ?
-        """,
-        (
-            cible.nom_cible,
-            cible.date_creation,
-            cible.source,
-            filtre_str,
-            chemin,
-            cible.id_cible,
-        ),
+    filtre_str = (
+        json.dumps(
+            cible.filtre,
+            ensure_ascii=False,
+        )
+        if cible.source == "DB"
+        else ""
     )
-    conn.commit()
-    conn.close()
+
+    chemin = (
+        cible.chemin
+        if cible.source == "Fichier plat"
+        else ""
+    )
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE cibles
+                SET
+                    nom_cible = %s,
+                    date_creation = %s,
+                    source = %s,
+                    filtre = %s,
+                    chemin = %s
+                WHERE id_cible = %s
+                """,
+                (
+                    cible.nom_cible,
+                    cible.date_creation,
+                    cible.source,
+                    filtre_str,
+                    chemin,
+                    cible.id_cible,
+                ),
+            )
 
 
-def update_nom_cible(id_cible: str, nom_cible: str) -> None:
+def update_nom_cible(
+    id_cible: str,
+    nom_cible: str,
+) -> None:
     ensure_cibles_table()
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE cibles SET nom_cible = ? WHERE id_cible = ?",
-        (nom_cible, id_cible),
-    )
-    conn.commit()
-    conn.close()
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE cibles
+                SET nom_cible = %s
+                WHERE id_cible = %s
+                """,
+                (
+                    nom_cible,
+                    id_cible,
+                ),
+            )
 
 
-def update_cible_chemin(id_cible: str, chemin: str) -> None:
+def update_cible_chemin(
+    id_cible: str,
+    chemin: str,
+) -> None:
     ensure_cibles_table()
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE cibles SET chemin = ? WHERE id_cible = ?",
-        (chemin, id_cible),
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE cibles
+                SET chemin = %s
+                WHERE id_cible = %s
+                """,
+                (
+                    chemin,
+                    id_cible,
+                ),
+            )
+
+
+# ============================================================
+# UPLOAD FILE
+# Streamlit & FastAPI
+# ============================================================
+
+def save_uploaded_file(
+    uploaded_file,
+) -> str:
+    """
+    Enregistre un fichier uploadé sur disque.
+
+    Compatible :
+    - Streamlit UploadedFile
+    - FastAPI UploadFile
+    """
+
+    os.makedirs(
+        UPLOAD_DIR,
+        exist_ok=True,
     )
-    conn.commit()
-    conn.close()
 
+    name = (
+        getattr(
+            uploaded_file,
+            "name",
+            None,
+        )
+        or getattr(
+            uploaded_file,
+            "filename",
+            None,
+        )
+    )
 
-#======================================
-# UPLOAD FILE (Streamlit & FastAPI)
-# ======================================
-def save_uploaded_file(uploaded_file) -> str:
-    """
-    Save an uploaded file to disk and return the destination path.
-
-    This helper handles both Streamlit ``UploadedFile`` objects and FastAPI ``UploadFile``
-    instances. Streamlit expose ``name`` et ``getbuffer``, FastAPI expose
-    ``filename`` et ``file`` (file-like).
-    """
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-    # Déterminer le nom d'origine : Streamlit -> name ; FastAPI -> filename
-    name = getattr(uploaded_file, "name", None) or getattr(uploaded_file, "filename", None)
     if not name:
-        # Fallback si aucun nom n'est fourni
-        name = f"uploaded_file_{int(time.time())}"
+        name = (
+            f"uploaded_file_{int(time.time())}"
+        )
 
-    base, ext = os.path.splitext(name)
-    dst = os.path.join(UPLOAD_DIR, name)
+    base, ext = os.path.splitext(
+        name
+    )
 
-    # Éviter d'écraser un fichier existant en suffixant un compteur
-    i = 1
+    dst = os.path.join(
+        UPLOAD_DIR,
+        name,
+    )
+
+    index = 1
+
     while os.path.exists(dst):
-        dst = os.path.join(UPLOAD_DIR, f"{base}_{i}{ext}")
-        i += 1
+        dst = os.path.join(
+            UPLOAD_DIR,
+            f"{base}_{index}{ext}",
+        )
 
-    # Écriture du contenu
-    with open(dst, "wb") as f:
-        # Streamlit : getbuffer()
-        if hasattr(uploaded_file, "getbuffer"):
-            f.write(uploaded_file.getbuffer())
-        # FastAPI : .file (SpooledTemporaryFile)
-        elif hasattr(uploaded_file, "file"):
+        index += 1
+
+    with open(
+        dst,
+        "wb",
+    ) as file_obj:
+
+        if hasattr(
+            uploaded_file,
+            "getbuffer",
+        ):
+            file_obj.write(
+                uploaded_file.getbuffer()
+            )
+
+        elif hasattr(
+            uploaded_file,
+            "file",
+        ):
             uploaded_file.file.seek(0)
-            import shutil
-            shutil.copyfileobj(uploaded_file.file, f)
+
+            shutil.copyfileobj(
+                uploaded_file.file,
+                file_obj,
+            )
+
         else:
-            data = uploaded_file.read() if hasattr(uploaded_file, "read") else None
+            data = (
+                uploaded_file.read()
+                if hasattr(
+                    uploaded_file,
+                    "read",
+                )
+                else None
+            )
+
             if data:
-                f.write(data)
+                file_obj.write(
+                    data
+                )
+
             else:
-                raise AttributeError("Impossible de lire le fichier envoyé.")
+                raise AttributeError(
+                    "Impossible de lire le fichier envoyé."
+                )
+
     return dst
 
 
-# =========================================================
-# IMPORT LEADS -> CLIENTS (STRICT)
-# =========================================================
-STRICT_REQUIRED_COLS = ["ID_Client", "Numero_Tel", "Mail"]
-STRICT_KEY_COL = "ID_Client"
-RADICAL_COL = "radical_compte"
+# ============================================================
+# FILE READING
+# ============================================================
 
+def _read_flat_file(
+    path: str,
+) -> pd.DataFrame:
+    """
+    Lecture multi-formats :
+    CSV, XLSX, XLS, Parquet, JSON.
+    """
 
-def _read_flat_file(path: str) -> pd.DataFrame:
-    """Lecture multi-formats (CSV, XLSX, Parquet, JSON)."""
-    ext = os.path.splitext(path)[1].lower().strip(".")
+    ext = (
+        os.path.splitext(path)[1]
+        .lower()
+        .strip(".")
+    )
+
     if ext == "csv":
-        return pd.read_csv(path)
-    if ext in ("xlsx", "xls"):
-        return pd.read_excel(path, sheet_name=0)
+        return pd.read_csv(
+            path
+        )
+
+    if ext in (
+        "xlsx",
+        "xls",
+    ):
+        return pd.read_excel(
+            path,
+            sheet_name=0,
+        )
+
     if ext == "parquet":
-        return pd.read_parquet(path)
+        return pd.read_parquet(
+            path
+        )
+
     if ext == "json":
-        return pd.read_json(path)
-    raise ValueError("Type de fichier non supporté (csv/xlsx/xls/parquet/json)")
+        return pd.read_json(
+            path
+        )
+
+    raise ValueError(
+        "Type de fichier non supporté "
+        "(csv/xlsx/xls/parquet/json)"
+    )
 
 
-def _detect_clients_table(conn: sqlite3.Connection) -> str:
-    """Trouve automatiquement la table clients."""
-    tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+# ============================================================
+# POSTGRESQL TABLE INTROSPECTION
+# ============================================================
+
+def _detect_clients_table(
+    conn,
+) -> str:
+    """
+    Trouve la table clients.
+
+    Le schéma actuel contient explicitement 'clients',
+    mais le fallback historique est conservé.
+    """
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_type = 'BASE TABLE'
+            ORDER BY table_name
+            """
+        )
+
+        tables = [
+            str(row[0])
+            for row in cur.fetchall()
+        ]
+
     if "clients" in tables:
         return "clients"
-    for t in tables:
-        if t.lower() == "client" or "client" in t.lower():
-            return t
-    return "clients"
+
+    for table in tables:
+        lower = table.lower()
+
+        if (
+            lower == "client"
+            or "client" in lower
+        ):
+            return table
+
+    raise RuntimeError(
+        "Table clients introuvable dans PostgreSQL."
+    )
 
 
-def _get_table_columns(conn: sqlite3.Connection, table: str) -> List[str]:
-    cur = conn.cursor()
-    cur.execute(f"PRAGMA table_info({table})")
-    return [r[1] for r in cur.fetchall()]
-
-
-def _strict_validate_dataframe_against_clients(df: pd.DataFrame, clients_cols: List[str]) -> None:
+def _get_table_columns(
+    conn,
+    table: str,
+) -> List[str]:
     """
-    STRICT :
-    - Le fichier doit contenir EXACTEMENT les mêmes colonnes que la table clients.
-    - Colonnes indispensables (ID_Client, Numero_Tel, Mail) présentes et non nulles.
+    Équivalent PostgreSQL de PRAGMA table_info().
     """
-    df_cols = [str(c).strip() for c in df.columns]
-    clients_cols = [str(c).strip() for c in clients_cols]
 
-    df_set = set(df_cols)
-    db_set = set(clients_cols)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = %s
+            ORDER BY ordinal_position
+            """,
+            (
+                table,
+            ),
+        )
 
-    missing = sorted(list(db_set - df_set))
-    extra = sorted(list(df_set - db_set))
+        rows = cur.fetchall()
+
+    return [
+        str(row[0])
+        for row in rows
+    ]
+
+
+def _resolve_column_name(
+    columns: List[str],
+    requested: str,
+) -> str:
+    """
+    Résout une colonne en respectant la casse PostgreSQL.
+
+    Exemple :
+        ID_Client
+        Radical_compte
+        Nom
+    """
+
+    if requested in columns:
+        return requested
+
+    lookup = {
+        str(column).lower(): str(column)
+        for column in columns
+    }
+
+    resolved = lookup.get(
+        str(requested).lower()
+    )
+
+    if resolved:
+        return resolved
+
+    raise ValueError(
+        f"Colonne clients inconnue : {requested}"
+    )
+
+
+# ============================================================
+# STRICT IMPORT VALIDATION
+# ============================================================
+
+def _strict_validate_dataframe_against_clients(
+    df: pd.DataFrame,
+    clients_cols: List[str],
+) -> None:
+    """
+    Le fichier doit contenir EXACTEMENT les mêmes colonnes
+    que la table clients.
+
+    Colonnes obligatoires :
+    - ID_Client
+    - Numero_Tel
+    - Mail
+    """
+
+    df_cols = [
+        str(column).strip()
+        for column in df.columns
+    ]
+
+    clients_cols = [
+        str(column).strip()
+        for column in clients_cols
+    ]
+
+    df_set = set(
+        df_cols
+    )
+
+    db_set = set(
+        clients_cols
+    )
+
+    missing = sorted(
+        db_set - df_set
+    )
+
+    extra = sorted(
+        df_set - db_set
+    )
 
     if missing or extra:
-        msg = ["Fichier invalide (STRICT). Le schéma doit correspondre EXACTEMENT à la table clients."]
+        message = [
+            "Fichier invalide (STRICT). "
+            "Le schéma doit correspondre EXACTEMENT "
+            "à la table clients."
+        ]
+
         if missing:
-            msg.append(f"Colonnes manquantes ({len(missing)}) : {', '.join(missing)}")
+            message.append(
+                f"Colonnes manquantes ({len(missing)}) : "
+                f"{', '.join(missing)}"
+            )
+
         if extra:
-            msg.append(f"Colonnes en trop ({len(extra)}) : {', '.join(extra)}")
-        raise ValueError("\n".join(msg))
+            message.append(
+                f"Colonnes en trop ({len(extra)}) : "
+                f"{', '.join(extra)}"
+            )
 
-    # colonnes indispensables non nulles
-    for col in STRICT_REQUIRED_COLS:
-        if col not in df_set:
-            raise ValueError(f"Fichier invalide : colonne obligatoire manquante : {col}")
-        if df[col].isna().any():
-            raise ValueError(f"Fichier invalide : la colonne '{col}' contient des valeurs vides (obligatoire).")
+        raise ValueError(
+            "\n".join(message)
+        )
+
+    for column in STRICT_REQUIRED_COLS:
+
+        if column not in df_set:
+            raise ValueError(
+                "Fichier invalide : "
+                f"colonne obligatoire manquante : {column}"
+            )
+
+        if df[column].isna().any():
+            raise ValueError(
+                "Fichier invalide : "
+                f"la colonne '{column}' contient "
+                "des valeurs vides (obligatoire)."
+            )
 
 
-def _new_radical_compte(conn: sqlite3.Connection, clients_table: str) -> str:
-    """Génère un radical_compte unique. Format : RC000001, RC000002, ..."""
-    cur = conn.cursor()
+# ============================================================
+# VALUE NORMALIZATION
+# ============================================================
+
+def _to_db_value(
+    value: Any,
+) -> Any:
+    """
+    Convertit proprement les scalaires Pandas / NumPy
+    avant envoi à psycopg.
+    """
+
     try:
-        cur.execute(f"SELECT {RADICAL_COL} FROM {clients_table} ORDER BY {RADICAL_COL} DESC LIMIT 1")
-        r = cur.fetchone()
+        if pd.isna(value):
+            return None
     except Exception:
-        r = None
+        pass
 
-    if not r or not r[0]:
+    if hasattr(
+        value,
+        "to_pydatetime",
+    ):
+        try:
+            return value.to_pydatetime()
+        except Exception:
+            pass
+
+    if hasattr(
+        value,
+        "item",
+    ):
+        try:
+            return value.item()
+        except Exception:
+            pass
+
+    return value
+
+
+# ============================================================
+# RADICAL COMPTE
+# ============================================================
+
+def _new_radical_compte(
+    cur,
+    clients_table: str,
+) -> str:
+    """
+    Génère :
+        RC000001
+        RC000002
+        ...
+    """
+
+    query = sql.SQL(
+        """
+        SELECT {radical}
+        FROM {table}
+        WHERE {radical} ~ '^RC[0-9]+$'
+        ORDER BY
+            CAST(
+                SUBSTRING({radical} FROM 3)
+                AS BIGINT
+            ) DESC
+        LIMIT 1
+        """
+    ).format(
+        radical=sql.Identifier(
+            RADICAL_COL
+        ),
+        table=sql.Identifier(
+            clients_table
+        ),
+    )
+
+    cur.execute(
+        query
+    )
+
+    row = cur.fetchone()
+
+    if (
+        not row
+        or not row[0]
+    ):
         return "RC000001"
 
-    last = str(r[0])
-    m = re.search(r"(\d+)$", last)
-    n = int(m.group(1)) if m else 0
-    return f"RC{n+1:06d}"
+    last = str(
+        row[0]
+    )
+
+    match = re.search(
+        r"(\d+)$",
+        last,
+    )
+
+    number = (
+        int(match.group(1))
+        if match
+        else 0
+    )
+
+    return f"RC{number + 1:06d}"
 
 
-def import_leads_into_clients(file_path: str) -> Tuple[int, int]:
+# ============================================================
+# IMPORT LEADS -> CLIENTS
+# ============================================================
+
+def import_leads_into_clients(
+    file_path: str,
+) -> Tuple[int, int]:
     """
-    STRICT IMPORT vers clients :
-    - Schéma identique à la table clients (voir _strict_validate_dataframe_against_clients).
-    - Upsert basé sur ID_Client :
-      * si ID_Client existe ⇒ UPDATE (ne touche pas radical_compte)
-      * sinon ⇒ INSERT + génération radical_compte
-    - Colonnes indispensables non nulles : ID_Client, Numero_Tel, Mail
+    Import STRICT vers PostgreSQL clients.
+
+    Comportement conservé :
+    - schéma fichier identique à la table clients ;
+    - upsert basé sur ID_Client ;
+    - ID existant => UPDATE ;
+    - nouvel ID => INSERT ;
+    - radical_compte conservé lors d'un UPDATE ;
+    - radical_compte généré lors d'un INSERT s'il est vide.
     """
-    conn = _connect()
-    clients_table = _detect_clients_table(conn)
 
-    df = _read_flat_file(file_path)
-    df.columns = [str(c).strip() for c in df.columns]
+    df = _read_flat_file(
+        file_path
+    )
 
-    # Schéma strict
-    clients_cols = _get_table_columns(conn, clients_table)
-    _strict_validate_dataframe_against_clients(df, clients_cols)
+    df.columns = [
+        str(column).strip()
+        for column in df.columns
+    ]
 
     inserted = 0
     updated = 0
-    cur = conn.cursor()
 
-    for _, row in df.iterrows():
-        data = {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()}
+    with connection() as conn:
 
-        key_val = data.get(STRICT_KEY_COL)
-        if key_val is None or str(key_val).strip() == "":
-            raise ValueError("Fichier invalide : ID_Client vide détecté.")
+        clients_table = _detect_clients_table(
+            conn
+        )
 
-        cur.execute(f"SELECT COUNT(*) FROM {clients_table} WHERE {STRICT_KEY_COL} = ?", (key_val,))
-        exists = cur.fetchone()[0] > 0
+        clients_cols = _get_table_columns(
+            conn,
+            clients_table,
+        )
 
-        if exists:
-            # UPDATE : toutes colonnes sauf radical_compte et clé
-            cols_to_update = [c for c in clients_cols if c not in (RADICAL_COL, STRICT_KEY_COL)]
-            set_clause = ", ".join([f"{c} = ?" for c in cols_to_update])
-            vals = [data.get(c) for c in cols_to_update] + [key_val]
+        _strict_validate_dataframe_against_clients(
+            df,
+            clients_cols,
+        )
+
+        with conn.cursor() as cur:
+
+            # Protection de la génération RCxxxxxx contre
+            # les imports concurrents.
             cur.execute(
-                f"UPDATE {clients_table} SET {set_clause} WHERE {STRICT_KEY_COL} = ?",
-                vals,
+                "SELECT pg_advisory_xact_lock(%s)",
+                (610002,),
             )
-            updated += 1
-        else:
-            # INSERT : on force radical_compte si vide ou non fourni
-            if data.get(RADICAL_COL) is None or str(data.get(RADICAL_COL)).strip() == "":
-                data[RADICAL_COL] = _new_radical_compte(conn, clients_table)
 
-            cols_insert = clients_cols[:]  # respect de l'ordre DB
-            placeholders = ", ".join(["?"] * len(cols_insert))
-            cur.execute(
-                f"INSERT INTO {clients_table} ({', '.join(cols_insert)}) VALUES ({placeholders})",
-                [data.get(c) for c in cols_insert],
+            key_column = _resolve_column_name(
+                clients_cols,
+                STRICT_KEY_COL,
             )
-            inserted += 1
 
-    conn.commit()
-    conn.close()
-    return inserted, updated
+            radical_column = _resolve_column_name(
+                clients_cols,
+                RADICAL_COL,
+            )
+
+            for _, row in df.iterrows():
+
+                data = {
+                    key: _to_db_value(value)
+                    for key, value
+                    in row.to_dict().items()
+                }
+
+                key_val = data.get(
+                    key_column
+                )
+
+                if (
+                    key_val is None
+                    or str(key_val).strip() == ""
+                ):
+                    raise ValueError(
+                        "Fichier invalide : "
+                        "ID_Client vide détecté."
+                    )
+
+                exists_query = sql.SQL(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM {table}
+                        WHERE {key_column} = %s
+                    )
+                    """
+                ).format(
+                    table=sql.Identifier(
+                        clients_table
+                    ),
+                    key_column=sql.Identifier(
+                        key_column
+                    ),
+                )
+
+                cur.execute(
+                    exists_query,
+                    (
+                        key_val,
+                    ),
+                )
+
+                exists_row = cur.fetchone()
+
+                exists = bool(
+                    exists_row
+                    and exists_row[0]
+                )
+
+                if exists:
+
+                    cols_to_update = [
+                        column
+                        for column in clients_cols
+                        if column not in (
+                            radical_column,
+                            key_column,
+                        )
+                    ]
+
+                    assignments = sql.SQL(
+                        ", "
+                    ).join(
+                        sql.SQL(
+                            "{} = %s"
+                        ).format(
+                            sql.Identifier(
+                                column
+                            )
+                        )
+                        for column
+                        in cols_to_update
+                    )
+
+                    update_query = sql.SQL(
+                        """
+                        UPDATE {table}
+                        SET {assignments}
+                        WHERE {key_column} = %s
+                        """
+                    ).format(
+                        table=sql.Identifier(
+                            clients_table
+                        ),
+                        assignments=assignments,
+                        key_column=sql.Identifier(
+                            key_column
+                        ),
+                    )
+
+                    values = [
+                        data.get(column)
+                        for column
+                        in cols_to_update
+                    ]
+
+                    values.append(
+                        key_val
+                    )
+
+                    cur.execute(
+                        update_query,
+                        values,
+                    )
+
+                    updated += 1
+
+                else:
+
+                    radical_value = data.get(
+                        radical_column
+                    )
+
+                    if (
+                        radical_value is None
+                        or str(radical_value).strip() == ""
+                    ):
+                        data[radical_column] = (
+                            _new_radical_compte(
+                                cur,
+                                clients_table,
+                            )
+                        )
+
+                    cols_insert = list(
+                        clients_cols
+                    )
+
+                    identifiers = sql.SQL(
+                        ", "
+                    ).join(
+                        sql.Identifier(
+                            column
+                        )
+                        for column
+                        in cols_insert
+                    )
+
+                    placeholders = sql.SQL(
+                        ", "
+                    ).join(
+                        sql.Placeholder()
+                        for _ in cols_insert
+                    )
+
+                    insert_query = sql.SQL(
+                        """
+                        INSERT INTO {table} (
+                            {columns}
+                        )
+                        VALUES (
+                            {placeholders}
+                        )
+                        """
+                    ).format(
+                        table=sql.Identifier(
+                            clients_table
+                        ),
+                        columns=identifiers,
+                        placeholders=placeholders,
+                    )
+
+                    cur.execute(
+                        insert_query,
+                        [
+                            data.get(column)
+                            for column
+                            in cols_insert
+                        ],
+                    )
+
+                    inserted += 1
+
+    return (
+        inserted,
+        updated,
+    )
 
 
-def get_distinct_values_clients(column: str) -> List[str]:
-    """Retourne les valeurs distinctes d'une colonne de la table clients (utile pour filtres)."""
-    conn = _connect()
-    conn.row_factory = sqlite3.Row
-    clients_table = _detect_clients_table(conn)
+# ============================================================
+# DISTINCT CLIENT VALUES
+# ============================================================
 
-    try:
-        rows = conn.execute(
-            f"SELECT DISTINCT {column} AS v FROM {clients_table} WHERE {column} IS NOT NULL ORDER BY {column}"
-        ).fetchall()
-        return [str(r["v"]) for r in rows if str(r["v"]).strip() != ""]
-    except Exception:
-        return []
-    finally:
-        conn.close()
+def get_distinct_values_clients(
+    column: str,
+) -> List[str]:
+    """
+    Retourne les valeurs distinctes d'une colonne clients.
 
-OBJECTIF_CAMPAGNES_FILTER_KEY = "__objectif_campagnes__"
+    Le nom de colonne est validé contre le vrai schéma avant
+    d'être utilisé dans la requête.
+    """
+
+    with connection() as conn:
+
+        clients_table = _detect_clients_table(
+            conn
+        )
+
+        columns = _get_table_columns(
+            conn,
+            clients_table,
+        )
+
+        try:
+            actual_column = _resolve_column_name(
+                columns,
+                column,
+            )
+        except ValueError:
+            return []
+
+        query = sql.SQL(
+            """
+            SELECT DISTINCT {column} AS v
+            FROM {table}
+            WHERE {column} IS NOT NULL
+            ORDER BY {column}
+            """
+        ).format(
+            column=sql.Identifier(
+                actual_column
+            ),
+            table=sql.Identifier(
+                clients_table
+            ),
+        )
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    query
+                )
+
+                rows = cur.fetchall()
+
+        except Exception:
+            return []
+
+    return [
+        str(row[0])
+        for row in rows
+        if (
+            row[0] is not None
+            and str(row[0]).strip() != ""
+        )
+    ]
 
 
-def _split_objectif_campaign_filter(filtre: Dict[str, Any]) -> tuple[Dict[str, Any], List[str], str]:
-    normal_filtre: Dict[str, Any] = {}
+# ============================================================
+# OBJECTIF CAMPAGNE FILTER
+# ============================================================
+
+def _split_objectif_campaign_filter(
+    filtre: Dict[str, Any],
+) -> tuple[
+    Dict[str, Any],
+    List[str],
+    str,
+]:
+    normal_filtre: Dict[
+        str,
+        Any,
+    ] = {}
+
     campagne_ids: List[str] = []
+
     mode = "atteint"
 
-    for k, v in (filtre or {}).items():
-        if k == OBJECTIF_CAMPAGNES_FILTER_KEY:
-            if isinstance(v, dict):
-                raw = v.get("values") or v.get("ids") or []
-                mode = str(v.get("mode") or v.get("status") or "atteint").strip().lower()
-            elif isinstance(v, list):
-                raw = v
+    for key, value in (
+        filtre or {}
+    ).items():
+
+        if key == OBJECTIF_CAMPAGNES_FILTER_KEY:
+
+            if isinstance(
+                value,
+                dict,
+            ):
+                raw = (
+                    value.get("values")
+                    or value.get("ids")
+                    or []
+                )
+
+                mode = str(
+                    value.get("mode")
+                    or value.get("status")
+                    or "atteint"
+                ).strip().lower()
+
+            elif isinstance(
+                value,
+                list,
+            ):
+                raw = value
+
             else:
                 raw = []
 
-            campagne_ids = [str(x).strip() for x in raw if str(x).strip()]
-        else:
-            normal_filtre[k] = v
+            campagne_ids = [
+                str(item).strip()
+                for item in raw
+                if str(item).strip()
+            ]
 
-    if mode not in {"atteint", "non_atteint"}:
+        else:
+            normal_filtre[
+                key
+            ] = value
+
+    if mode not in {
+        "atteint",
+        "non_atteint",
+    }:
         mode = "atteint"
 
-    return normal_filtre, campagne_ids, mode
+    return (
+        normal_filtre,
+        campagne_ids,
+        mode,
+    )
 
 
-def _detect_radical_column(conn: sqlite3.Connection, table: str) -> str:
-    cols = _get_table_columns(conn, table)
-    by_lower = {str(c).lower(): str(c) for c in cols}
+def _detect_radical_column(
+    conn,
+    table: str,
+) -> str:
+    columns = _get_table_columns(
+        conn,
+        table,
+    )
 
-    if "radical_compte" in by_lower:
-        return by_lower["radical_compte"]
+    lookup = {
+        str(column).lower(): str(column)
+        for column in columns
+    }
 
-    raise ValueError("Base clients : colonne 'radical_compte' manquante")
+    if "radical_compte" in lookup:
+        return lookup[
+            "radical_compte"
+        ]
+
+    raise ValueError(
+        "Base clients : colonne "
+        "'radical_compte' manquante"
+    )
 
 
-def _query_clients_by_filtre(filtre: Dict[str, Any]) -> pd.DataFrame:
-    conn = _connect()
-    table = _detect_clients_table(conn)
+# ============================================================
+# QUERY CLIENTS BY FILTER
+# ============================================================
 
-    normal_filtre, objectif_campagne_ids, objectif_mode = _split_objectif_campaign_filter(filtre or {})
+def _query_clients_by_filtre(
+    filtre: Dict[str, Any],
+) -> pd.DataFrame:
 
-    where = []
-    params = []
+    with connection() as conn:
 
-    for field, payload in (normal_filtre or {}).items():
-        if not isinstance(payload, dict):
-            continue
+        table = _detect_clients_table(
+            conn
+        )
 
-        if "values" in payload:
-            vals = payload.get("values") or []
-            vals = [str(v) for v in vals if str(v).strip() != ""]
-            if vals:
-                where.append(f"c.{field} IN ({', '.join(['?'] * len(vals))})")
-                params.extend(vals)
-        else:
-            if payload.get("min") is not None:
-                where.append(f"c.{field} >= ?")
-                params.append(payload["min"])
-            if payload.get("max") is not None:
-                where.append(f"c.{field} <= ?")
-                params.append(payload["max"])
+        clients_columns = _get_table_columns(
+            conn,
+            table,
+        )
 
-    if objectif_campagne_ids:
-        radical_col = _detect_radical_column(conn, table)
-        placeholders = ", ".join(["?"] * len(objectif_campagne_ids))
-
-        if objectif_mode == "atteint":
-            where.append(
-                f"""
-                EXISTS (
-                    SELECT 1
-                    FROM clients_campagnes cc
-                    WHERE cc.Radical_compte = c.{radical_col}
-                      AND cc.ID_CAMPAGNE IN ({placeholders})
-                      AND COALESCE(cc.conversion, 0) = 1
-                )
-                """
+        normal_filtre, objectif_campagne_ids, objectif_mode = (
+            _split_objectif_campaign_filter(
+                filtre or {}
             )
-        else:
-            where.append(
-                f"""
-                NOT EXISTS (
-                    SELECT 1
-                    FROM clients_campagnes cc
-                    WHERE cc.Radical_compte = c.{radical_col}
-                      AND cc.ID_CAMPAGNE IN ({placeholders})
-                      AND COALESCE(cc.conversion, 0) = 1
-                )
-                """
+        )
+
+        where_clauses = []
+        params: List[Any] = []
+
+        for field, payload in (
+            normal_filtre or {}
+        ).items():
+
+            if not isinstance(
+                payload,
+                dict,
+            ):
+                continue
+
+            actual_field = _resolve_column_name(
+                clients_columns,
+                field,
             )
 
-        params.extend(objectif_campagne_ids)
+            field_identifier = sql.Identifier(
+                actual_field
+            )
 
-    sql = f"SELECT c.* FROM {table} c"
-    if where:
-        sql += " WHERE " + " AND ".join(where)
+            if "values" in payload:
 
-    try:
-        return pd.read_sql_query(sql, conn, params=params)
-    finally:
-        conn.close()
+                raw_values = (
+                    payload.get("values")
+                    or []
+                )
 
-def load_clients_df_for_cible(id_cible: str) -> pd.DataFrame:
+                values = [
+                    value
+                    for value in raw_values
+                    if (
+                        value is not None
+                        and str(value).strip() != ""
+                    )
+                ]
+
+                if values:
+                    placeholders = sql.SQL(
+                        ", "
+                    ).join(
+                        sql.Placeholder()
+                        for _ in values
+                    )
+
+                    where_clauses.append(
+                        sql.SQL(
+                            "c.{field} IN ({values})"
+                        ).format(
+                            field=field_identifier,
+                            values=placeholders,
+                        )
+                    )
+
+                    params.extend(
+                        values
+                    )
+
+            else:
+
+                if payload.get("min") is not None:
+                    where_clauses.append(
+                        sql.SQL(
+                            "c.{field} >= %s"
+                        ).format(
+                            field=field_identifier
+                        )
+                    )
+
+                    params.append(
+                        payload["min"]
+                    )
+
+                if payload.get("max") is not None:
+                    where_clauses.append(
+                        sql.SQL(
+                            "c.{field} <= %s"
+                        ).format(
+                            field=field_identifier
+                        )
+                    )
+
+                    params.append(
+                        payload["max"]
+                    )
+
+        if objectif_campagne_ids:
+
+            radical_column = _detect_radical_column(
+                conn,
+                table,
+            )
+
+            placeholders = sql.SQL(
+                ", "
+            ).join(
+                sql.Placeholder()
+                for _ in objectif_campagne_ids
+            )
+
+            if objectif_mode == "atteint":
+
+                where_clauses.append(
+                    sql.SQL(
+                        """
+                        EXISTS (
+                            SELECT 1
+                            FROM clients_campagnes AS cc
+                            WHERE
+                                cc."Radical_compte"
+                                    = c.{radical}
+                                AND cc."ID_CAMPAGNE"
+                                    IN ({campaign_ids})
+                                AND COALESCE(
+                                    cc.conversion,
+                                    0
+                                ) = 1
+                        )
+                        """
+                    ).format(
+                        radical=sql.Identifier(
+                            radical_column
+                        ),
+                        campaign_ids=placeholders,
+                    )
+                )
+
+            else:
+
+                where_clauses.append(
+                    sql.SQL(
+                        """
+                        NOT EXISTS (
+                            SELECT 1
+                            FROM clients_campagnes AS cc
+                            WHERE
+                                cc."Radical_compte"
+                                    = c.{radical}
+                                AND cc."ID_CAMPAGNE"
+                                    IN ({campaign_ids})
+                                AND COALESCE(
+                                    cc.conversion,
+                                    0
+                                ) = 1
+                        )
+                        """
+                    ).format(
+                        radical=sql.Identifier(
+                            radical_column
+                        ),
+                        campaign_ids=placeholders,
+                    )
+                )
+
+            params.extend(
+                objectif_campagne_ids
+            )
+
+        query = sql.SQL(
+            """
+            SELECT c.*
+            FROM {table} AS c
+            """
+        ).format(
+            table=sql.Identifier(
+                table
+            )
+        )
+
+        if where_clauses:
+            query += (
+                sql.SQL(" WHERE ")
+                + sql.SQL(" AND ").join(
+                    where_clauses
+                )
+            )
+
+        with conn.cursor() as cur:
+            cur.execute(
+                query,
+                params,
+            )
+
+            rows = cur.fetchall()
+
+            column_names = [
+                description.name
+                for description
+                in cur.description
+            ]
+
+    return pd.DataFrame(
+        rows,
+        columns=column_names,
+    )
+
+
+# ============================================================
+# LOAD CIBLE POPULATION
+# ============================================================
+
+def load_clients_df_for_cible(
+    id_cible: str,
+) -> pd.DataFrame:
     """
-    Fonction attendue par campagne_service : retourne la population complète d'une cible sous forme DataFrame.
+    Retourne la population complète d'une cible.
     """
-    cible = get_cible(id_cible)
+
+    cible = get_cible(
+        id_cible
+    )
+
     if not cible:
-        raise ValueError(f"Cible introuvable : {id_cible}")
+        raise ValueError(
+            f"Cible introuvable : {id_cible}"
+        )
 
-    source = (cible.get("source") or "").strip()
+    source = str(
+        cible.get("source") or ""
+    ).strip()
 
     if source == "DB":
-        filtre = {}
+
+        filtre: Dict[
+            str,
+            Any,
+        ] = {}
+
         try:
-            filtre_str = cible.get("filtre") or "{}"
-            filtre = json.loads(filtre_str) if isinstance(filtre_str, str) else (filtre_str or {})
+            filtre_str = (
+                cible.get("filtre")
+                or "{}"
+            )
+
+            filtre = (
+                json.loads(
+                    filtre_str
+                )
+                if isinstance(
+                    filtre_str,
+                    str,
+                )
+                else (
+                    filtre_str
+                    or {}
+                )
+            )
+
         except Exception:
             filtre = {}
 
-        df = _query_clients_by_filtre(filtre)
-        cols = {c.lower(): c for c in df.columns}
-        if "radical_compte" in cols:
-            return df.rename(columns={cols["radical_compte"]: "radical_compte"})
-        raise ValueError("Base clients : colonne 'radical_compte' manquante")
+        df = _query_clients_by_filtre(
+            filtre
+        )
+
+        columns_by_lower = {
+            str(column).lower(): column
+            for column in df.columns
+        }
+
+        if "radical_compte" in columns_by_lower:
+
+            actual = columns_by_lower[
+                "radical_compte"
+            ]
+
+            if actual != "radical_compte":
+                df = df.rename(
+                    columns={
+                        actual: "radical_compte"
+                    }
+                )
+
+            return df
+
+        raise ValueError(
+            "Base clients : colonne "
+            "'radical_compte' manquante"
+        )
 
     if source == "Fichier plat":
-        path = (cible.get("chemin") or "").strip()
-        if not path:
-            raise ValueError("Chemin fichier plat manquant dans la cible")
-        df = _read_flat_file(path)
-        cols = {c.lower(): c for c in df.columns}
-        if "radical_compte" in cols:
-            return df.rename(columns={cols["radical_compte"]: "radical_compte"})
-        raise ValueError("Fichier plat cible : colonne 'radical_compte' manquante")
 
-    raise ValueError(f"Source cible invalide : {source}")
+        path = str(
+            cible.get("chemin")
+            or ""
+        ).strip()
+
+        if not path:
+            raise ValueError(
+                "Chemin fichier plat "
+                "manquant dans la cible"
+            )
+
+        df = _read_flat_file(
+            path
+        )
+
+        columns_by_lower = {
+            str(column).lower(): column
+            for column in df.columns
+        }
+
+        if "radical_compte" in columns_by_lower:
+
+            actual = columns_by_lower[
+                "radical_compte"
+            ]
+
+            if actual != "radical_compte":
+                df = df.rename(
+                    columns={
+                        actual: "radical_compte"
+                    }
+                )
+
+            return df
+
+        raise ValueError(
+            "Fichier plat cible : colonne "
+            "'radical_compte' manquante"
+        )
+
+    raise ValueError(
+        f"Source cible invalide : {source}"
+    )

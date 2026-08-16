@@ -1,42 +1,30 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
-import os
-import sqlite3
-import re
-# =========================================================
-# Source unique de vérité pour la base de données
-# =========================================================
+from psycopg import IntegrityError, sql
 
-# Racine du projet (…/Marketing_automation_V2)
-PROJECT_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..")
+from app.storage.postgres_db import (
+    connection,
+    get_connection,
+    get_database_url,
+    get_row_identity_columns,
+    get_table_columns as _pg_get_table_columns,
+    list_tables as _pg_list_tables,
+    normalize_value,
 )
 
-# Base par défaut : database.db à la racine du projet
-# Possibilité d'override via variable d'environnement MA_DB_PATH
-DB_PATH = os.environ.get(
-    "MA_DB_PATH",
-    os.path.join(PROJECT_ROOT, "database.db"),
-)
-
-
-def get_connection() -> sqlite3.Connection:
-    """
-    Ouvre une connexion SQLite vers la base courante.
-    Aucune logique métier ici.
-    """
-    return sqlite3.connect(DB_PATH)
-
-# ============================================================
-# DATA ADMIN HELPERS (utilisés par l'interface Data_int)
-# Dépendances: sqlite3, pandas, typing
-# ============================================================
-
-
+# Compatibilité temporaire avec les modules hors storage qui importent encore DB_PATH.
+# Le dossier storage n'utilise plus SQLite. Cette constante sera supprimée quand les
+# derniers modules externes auront été migrés.
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+DB_PATH = os.environ.get("MA_DB_PATH", os.path.join(PROJECT_ROOT, "database.db"))
+DATABASE_URL = get_database_url()
 
 
 @dataclass
@@ -47,85 +35,64 @@ class NumericBounds:
 
 @dataclass
 class ColumnFilter:
-    """
-    Un seul type de filtre à la fois :
-      - numeric: bornes min/max (None => pas de borne)
-      - categorical: liste de modalités autorisées (vide/None => pas de filtre)
-    """
     numeric: Optional[NumericBounds] = None
     categorical: Optional[List[str]] = None
 
 
-# ---------- Petits helpers SQL ----------
-
-def _quote_ident(name: str) -> str:
-    """Quote un identifiant SQLite (table/col) pour éviter injections par nom."""
-    return '"' + name.replace('"', '""') + '"'
-
-
-def _to_float_or_none(x: Any) -> Optional[float]:
-    if x is None:
-        return None
-    if isinstance(x, str) and x.strip() == "":
+def _to_float_or_none(value: Any) -> Optional[float]:
+    if value is None or (isinstance(value, str) and not value.strip()):
         return None
     try:
-        return float(x)
+        return float(value)
     except Exception:
         return None
 
-
-def _normalize_cell_value_for_sqlite(v: Any) -> Any:
-    """Convertit les NaN/NaT en None pour sqlite."""
-    try:
-        if pd.isna(v):
-            return None
-    except Exception:
-        pass
-    return v
-
-
-# ---------- Fonctions demandées ----------
 
 def list_tables() -> List[str]:
-    """Retourne la liste des tables utilisateur."""
-    with get_connection() as conn:  # <- suppose que ton db.py a déjà connect()
-        rows = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
-        ).fetchall()
-    return [r[0] for r in rows]
+    return _pg_list_tables()
 
 
 def get_table_columns(table: str) -> List[Tuple[str, str]]:
-    """
-    Retourne [(col_name, col_type)] via PRAGMA table_info.
-    """
-    t = _quote_ident(table)
-    with get_connection() as conn:
-        rows = conn.execute(f"PRAGMA table_info({t})").fetchall()
-    # PRAGMA table_info: cid, name, type, notnull, dflt_value, pk
-    return [(r[1], (r[2] or "")) for r in rows]
+    return _pg_get_table_columns(table)
+
+
+def _validate_table_column(table: str, column: Optional[str] = None) -> None:
+    tables = set(list_tables())
+    if table not in tables:
+        raise ValueError(f"Table inconnue : {table}")
+    if column is not None:
+        columns = {name for name, _ in get_table_columns(table)}
+        if column not in columns:
+            raise ValueError(f"Colonne inconnue : {table}.{column}")
 
 
 def get_distinct_values(table: str, col: str, limit: int = 200) -> List[str]:
-    """
-    Récupère des modalités distinctes (stringifiées) pour une colonne.
-    Limité pour éviter des dropdowns énormes.
-    """
-    t = _quote_ident(table)
-    c = _quote_ident(col)
-    with get_connection() as conn:
-        rows = conn.execute(
-            f"SELECT DISTINCT {c} FROM {t} WHERE {c} IS NOT NULL LIMIT ?",
-            (int(limit),),
-        ).fetchall()
-    # stringify + tri stable
-    vals = []
-    for (v,) in rows:
-        if v is None:
-            continue
-        vals.append(str(v))
-    vals = sorted(set(vals))
-    return vals
+    _validate_table_column(table, col)
+    query = sql.SQL(
+        "SELECT DISTINCT {col} FROM {table} WHERE {col} IS NOT NULL LIMIT %s"
+    ).format(col=sql.Identifier(col), table=sql.Identifier(table))
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (int(limit),))
+            rows = cur.fetchall()
+    return sorted({str(row[0]) for row in rows if row and row[0] is not None})
+
+
+# Token -> (table, [(pk_col, original_value), ...])
+_ROW_IDENTITY_CACHE: Dict[int, Tuple[str, List[Tuple[str, Any]]]] = {}
+_ROW_IDENTITY_CACHE_MAX = 100_000
+
+
+def _row_token(table: str, identity: List[Tuple[str, Any]]) -> int:
+    raw = json.dumps([table, identity], ensure_ascii=False, default=str, separators=(",", ":"))
+    digest = hashlib.blake2b(raw.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "big") & ((1 << 63) - 1)
+
+
+def _remember_identity(token: int, table: str, identity: List[Tuple[str, Any]]) -> None:
+    if len(_ROW_IDENTITY_CACHE) >= _ROW_IDENTITY_CACHE_MAX:
+        _ROW_IDENTITY_CACHE.clear()
+    _ROW_IDENTITY_CACHE[token] = (table, identity)
 
 
 def read_table(
@@ -134,131 +101,140 @@ def read_table(
     limit: Optional[int] = None,
     offset: int = 0,
 ) -> pd.DataFrame:
-    """
-    Lit une table + ajoute une colonne __rowid__ pour permettre update.
-    Filtrage SQL paramétré.
-    """
-    t = _quote_ident(table)
+    _validate_table_column(table)
+    columns = [name for name, _ in get_table_columns(table)]
+    identity_columns = get_row_identity_columns(table)
+    if not identity_columns:
+        raise RuntimeError(
+            f"La table '{table}' n'a ni clé primaire ni index UNIQUE utilisable pour l'édition."
+        )
 
-    where_parts: List[str] = []
+    where_parts: List[Any] = []
     params: List[Any] = []
 
     if filters:
-        for col, f in filters.items():
-            c = _quote_ident(col)
-            if f is None:
+        for col, filt in filters.items():
+            if filt is None:
                 continue
-
-            # Filtre numérique
-            if f.numeric is not None:
-                mn = _to_float_or_none(f.numeric.min)
-                mx = _to_float_or_none(f.numeric.max)
+            _validate_table_column(table, col)
+            col_id = sql.Identifier(col)
+            if filt.numeric is not None:
+                mn = _to_float_or_none(filt.numeric.min)
+                mx = _to_float_or_none(filt.numeric.max)
                 if mn is not None:
-                    where_parts.append(f"CAST({c} AS REAL) >= ?")
+                    where_parts.append(sql.SQL("CAST({} AS DOUBLE PRECISION) >= %s").format(col_id))
                     params.append(mn)
                 if mx is not None:
-                    where_parts.append(f"CAST({c} AS REAL) <= ?")
+                    where_parts.append(sql.SQL("CAST({} AS DOUBLE PRECISION) <= %s").format(col_id))
                     params.append(mx)
+            if filt.categorical:
+                values = [str(x) for x in filt.categorical]
+                placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in values)
+                where_parts.append(
+                    sql.SQL("CAST({} AS TEXT) IN ({})").format(col_id, placeholders)
+                )
+                params.extend(values)
 
-            # Filtre catégoriel (multi)
-            if f.categorical:
-                # si liste vide => pas de filtre
-                # comparaison en texte => robuste même si colonne est int
-                placeholders = ",".join(["?"] * len(f.categorical))
-                where_parts.append(f"CAST({c} AS TEXT) IN ({placeholders})")
-                params.extend([str(x) for x in f.categorical])
-
-    where_sql = ""
+    query = sql.SQL("SELECT * FROM {}").format(sql.Identifier(table))
     if where_parts:
-        where_sql = " WHERE " + " AND ".join(where_parts)
-
-    limit_sql = ""
+        query += sql.SQL(" WHERE ") + sql.SQL(" AND ").join(where_parts)
     if limit is not None:
-        limit_sql = " LIMIT ? OFFSET ?"
+        query += sql.SQL(" LIMIT %s OFFSET %s")
         params.extend([int(limit), int(offset)])
 
-    sql = f"SELECT rowid AS __rowid__, * FROM {t}{where_sql}{limit_sql}"
+    with connection(dict_rows=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            rows = [dict(row) for row in cur.fetchall()]
 
-    with get_connection() as conn:
-        df = pd.read_sql_query(sql, conn, params=params)
+    output: List[Dict[str, Any]] = []
+    for row in rows:
+        identity = [(name, row.get(name)) for name in identity_columns]
+        token = _row_token(table, identity)
+        _remember_identity(token, table, identity)
+        output.append({"__rowid__": token, **row})
 
-    return df
+    return pd.DataFrame(output, columns=["__rowid__", *columns])
 
 
 def update_cell(table: str, rowid: int, col: str, value: Any) -> None:
-    """
-    Update 1 cellule via rowid.
-    """
-    t = _quote_ident(table)
-    c = _quote_ident(col)
+    _validate_table_column(table, col)
+    identity_info = _ROW_IDENTITY_CACHE.get(int(rowid))
+    if identity_info is None or identity_info[0] != table:
+        raise ValueError(
+            "Identifiant de ligne expiré ou inconnu. Rechargez la table avant de modifier la cellule."
+        )
 
-    v = _normalize_cell_value_for_sqlite(value)
+    identity = identity_info[1]
+    where_parts = []
+    params: List[Any] = [normalize_value(value)]
+    for pk_col, pk_value in identity:
+        if pk_value is None:
+            where_parts.append(sql.SQL("{} IS NULL").format(sql.Identifier(pk_col)))
+        else:
+            where_parts.append(sql.SQL("{} = %s").format(sql.Identifier(pk_col)))
+            params.append(normalize_value(pk_value))
 
-    with get_connection() as conn:
-        conn.execute(f"UPDATE {t} SET {c} = ? WHERE rowid = ?", (v, int(rowid)))
-        conn.commit()
+    query = (
+        sql.SQL("UPDATE {} SET {} = %s WHERE ")
+        .format(sql.Identifier(table), sql.Identifier(col))
+        + sql.SQL(" AND ").join(where_parts)
+    )
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            if cur.rowcount != 1:
+                raise RuntimeError(
+                    f"Modification ambiguë ou ligne introuvable dans '{table}' (rowcount={cur.rowcount})."
+                )
 
+    # Si une colonne d'identité a changé, garde le token valide pour les autres
+    # modifications du même cycle d'édition.
+    for idx, (pk_col, _) in enumerate(identity):
+        if pk_col == col:
+            identity[idx] = (pk_col, normalize_value(value))
+            break
+    _ROW_IDENTITY_CACHE[int(rowid)] = (table, identity)
 
-import re
-
-import re
-import sqlite3
-from typing import Any, Dict, Tuple
 
 def insert_client_if_new(data: Dict[str, Any]) -> Tuple[bool, str]:
     required_id = str(data.get("ID_Client") or "").strip()
     if not required_id:
         return False, "ID_Client obligatoire."
 
-    with get_connection() as conn:
-        cur = conn.cursor()
+    valid_columns = {name for name, _ in get_table_columns("clients")}
+    clean = {key: normalize_value(value) for key, value in data.items() if key in valid_columns}
+    clean["ID_Client"] = required_id
+    clean.pop("radical_compte", None)
 
-        # 🔒 Lock d’écriture pour éviter les collisions
-        cur.execute("BEGIN IMMEDIATE")
+    try:
+        with connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(%s)", (620001,))
+                cur.execute('SELECT 1 FROM clients WHERE "ID_Client" = %s LIMIT 1', (required_id,))
+                if cur.fetchone():
+                    return False, f"ID_Client '{required_id}' existe déjà."
 
-        # Unicité ID_Client
-        cur.execute("SELECT 1 FROM clients WHERE ID_Client = ? LIMIT 1", (required_id,))
-        if cur.fetchone():
-            conn.rollback()
-            return False, f"ID_Client '{required_id}' existe déjà."
-
-        # ✅ MAX numérique fiable sur RCxxxxxxxx
-        cur.execute(
-            """
-            SELECT MAX(CAST(SUBSTR(radical_compte, 3) AS INTEGER))
-            FROM clients
-            WHERE radical_compte GLOB 'RC[0-9]*'
-            """
-        )
-        max_num = cur.fetchone()[0]
-        next_num = int(max_num or 0) + 1
-
-        # 🔁 Retry en cas de collision UNIQUE
-        for _ in range(20):
-            radical = f"RC{next_num:08d}"
-            data["radical_compte"] = radical
-
-            cols = list(data.keys())
-            placeholders = ", ".join(["?"] * len(cols))
-
-            try:
                 cur.execute(
-                    f"INSERT INTO clients ({', '.join(cols)}) VALUES ({placeholders})",
-                    [data.get(c) for c in cols],
+                    """
+                    SELECT MAX(CAST(SUBSTRING(radical_compte FROM 3) AS BIGINT))
+                    FROM clients
+                    WHERE radical_compte ~ '^RC[0-9]+$'
+                    """
                 )
-                conn.commit()
-                return True, f"Client créé: {radical}"
+                row = cur.fetchone()
+                next_num = int((row[0] if row else None) or 0) + 1
+                radical = f"RC{next_num:08d}"
+                clean["radical_compte"] = radical
 
-            except sqlite3.IntegrityError as e:
-                msg = str(e).lower()
-                if "unique constraint failed" in msg and "clients.radical_compte" in msg:
-                    next_num += 1
-                    continue  # on retente
-                conn.rollback()
-                return False, f"Erreur insertion: {e}"
-
-        conn.rollback()
-        return False, "Impossible de générer un radical_compte unique."
-
-
-
+                cols = list(clean.keys())
+                query = sql.SQL("INSERT INTO clients ({}) VALUES ({})").format(
+                    sql.SQL(", ").join(sql.Identifier(c) for c in cols),
+                    sql.SQL(", ").join(sql.Placeholder() for _ in cols),
+                )
+                cur.execute(query, [clean[c] for c in cols])
+        return True, f"Client créé: {radical}"
+    except IntegrityError as exc:
+        return False, f"Erreur insertion: {exc}"
+    except Exception as exc:
+        return False, f"Erreur insertion: {exc}"
