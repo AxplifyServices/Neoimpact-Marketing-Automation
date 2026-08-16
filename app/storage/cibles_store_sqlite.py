@@ -1646,6 +1646,93 @@ def _query_clients_by_filtre(
     )
 
 
+
+# ============================================================
+# POSTGRESQL-NATIVE CIBLE SELECT
+# ============================================================
+
+def build_db_cible_radicals_query(
+    id_cible: str,
+    *,
+    exclude_rupture_relation: bool = False,
+):
+    """Construit la requête SQL des radical_compte d'une cible DB sans Pandas."""
+    cible = get_cible(id_cible)
+    if not cible:
+        raise ValueError(f"Cible introuvable : {id_cible}")
+
+    if str(cible.get("source") or "").strip() != "DB":
+        return None
+
+    try:
+        filtre_str = cible.get("filtre") or "{}"
+        filtre = json.loads(filtre_str) if isinstance(filtre_str, str) else (filtre_str or {})
+    except Exception:
+        filtre = {}
+
+    with connection() as conn:
+        table = _detect_clients_table(conn)
+        clients_columns = _get_table_columns(conn, table)
+        radical_column = _detect_radical_column(conn, table)
+        normal_filtre, objectif_campagne_ids, objectif_mode = _split_objectif_campaign_filter(filtre or {})
+        where_clauses = []
+        params: List[Any] = []
+
+        for field, payload in (normal_filtre or {}).items():
+            if not isinstance(payload, dict):
+                continue
+            actual_field = _resolve_column_name(clients_columns, field)
+            field_identifier = sql.Identifier(actual_field)
+
+            if "values" in payload:
+                raw_values = payload.get("values") or []
+                values = [v for v in raw_values if v is not None and str(v).strip() != ""]
+                if values:
+                    placeholders = sql.SQL(", " ).join(sql.Placeholder() for _ in values)
+                    where_clauses.append(sql.SQL("c.{field} IN ({values})").format(field=field_identifier, values=placeholders))
+                    params.extend(values)
+            else:
+                if payload.get("min") is not None:
+                    where_clauses.append(sql.SQL("c.{field} >= %s").format(field=field_identifier))
+                    params.append(payload["min"])
+                if payload.get("max") is not None:
+                    where_clauses.append(sql.SQL("c.{field} <= %s").format(field=field_identifier))
+                    params.append(payload["max"])
+
+        if objectif_campagne_ids:
+            placeholders = sql.SQL(", " ).join(sql.Placeholder() for _ in objectif_campagne_ids)
+            operator = sql.SQL("EXISTS") if objectif_mode == "atteint" else sql.SQL("NOT EXISTS")
+            where_clauses.append(
+                sql.SQL("""
+                    {operator} (
+                        SELECT 1 FROM clients_campagnes AS cc
+                        WHERE cc."Radical_compte" = c.{radical}
+                          AND cc."ID_CAMPAGNE" IN ({campaign_ids})
+                          AND COALESCE(cc.conversion, 0) = 1
+                    )
+                """).format(operator=operator, radical=sql.Identifier(radical_column), campaign_ids=placeholders)
+            )
+            params.extend(objectif_campagne_ids)
+
+        if exclude_rupture_relation:
+            try:
+                statut_column = _resolve_column_name(clients_columns, "STATUT_CLIENT")
+            except Exception:
+                statut_column = ""
+            if statut_column:
+                where_clauses.append(
+                    sql.SQL("LOWER(TRIM(COALESCE(c.{field}::text, ''))) <> LOWER(%s)").format(field=sql.Identifier(statut_column))
+                )
+                params.append("Rupture de relation")
+
+        query = sql.SQL("SELECT c.{radical} AS \"Radical_compte\" FROM {table} AS c").format(
+            radical=sql.Identifier(radical_column), table=sql.Identifier(table)
+        )
+        if where_clauses:
+            query += sql.SQL(" WHERE " ) + sql.SQL(" AND " ).join(where_clauses)
+
+    return query, params
+
 # ============================================================
 # LOAD CIBLE POPULATION
 # ============================================================

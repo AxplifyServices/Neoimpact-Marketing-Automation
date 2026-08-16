@@ -143,6 +143,28 @@ def insert_only_members(
     return inserted
 
 
+
+def insert_only_members_from_radical_select(id_cible: str, radical_select, select_params) -> int:
+    """Version PostgreSQL-native de insert_only_members()."""
+    ensure_table()
+    id_cible = str(id_cible or "").strip()
+    if not id_cible:
+        return 0
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    query = sql.SQL("""
+        INSERT INTO clients_cibles ("ID_CIBLE", "Radical_compte", created_at)
+        SELECT %s, src."Radical_compte", %s
+        FROM ({radical_select}) AS src
+        WHERE TRIM(COALESCE(src."Radical_compte"::text, '')) <> ''
+        ON CONFLICT ("ID_CIBLE", "Radical_compte") DO NOTHING
+    """).format(radical_select=radical_select)
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, [id_cible, now, *(select_params or [])])
+            inserted = cur.rowcount
+    return int(inserted if inserted is not None and inserted >= 0 else 0)
+
+
 # ============================================================
 # VOLUME
 # ============================================================

@@ -43,7 +43,7 @@ export class ApiClient {
 
   async request<T>(req: ApiRequest): Promise<T> {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+    const timeoutId = setTimeout(() => controller.abort(), req.timeoutMs ?? this.timeout);
 
     const token = this.getToken();
 

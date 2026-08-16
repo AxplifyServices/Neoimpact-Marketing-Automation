@@ -23,6 +23,9 @@ export const campaignsApi = {
     url: '/campagnes',
     method: 'POST',
     body: data,
+    // Une création de campagne peut affecter plusieurs centaines de milliers de clients.
+    // Le backend est bulk PostgreSQL, mais on évite un faux timeout navigateur à 30 s.
+    timeoutMs: 120000,
   }),
 
   // Pause campaign

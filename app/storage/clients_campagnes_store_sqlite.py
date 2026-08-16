@@ -81,6 +81,67 @@ def bulk_insert_clients(rows: List[Dict[str, Any]]) -> int:
     return int(count if count is not None and count >= 0 else len(values))
 
 
+
+def bulk_insert_clients_from_radical_select(
+    radical_select,
+    select_params: List[Any],
+    row_template: Dict[str, Any],
+    *,
+    only_new: bool = False,
+) -> int:
+    """INSERT ... SELECT PostgreSQL natif depuis une colonne Radical_compte."""
+    ensure_table()
+    template = dict(row_template or {})
+    template.setdefault("arriv_eche", "Non")
+    template.setdefault("date_debut_campagne", None)
+    template.setdefault("nb_jour_debut_campagne", 0)
+    template.setdefault("conversion", 0)
+    template.setdefault("conversion_date", None)
+    template.setdefault("conversion_id_action", None)
+    template.setdefault("conversion_canal", None)
+    template.setdefault("objective_source_id_action", None)
+    template.setdefault("objective_source_canal", None)
+
+    select_exprs = []
+    constant_params: List[Any] = []
+    for column in COLUMNS:
+        if column == "Radical_compte":
+            select_exprs.append(sql.SQL('src."Radical_compte"'))
+        else:
+            select_exprs.append(sql.Placeholder())
+            constant_params.append(template.get(column))
+
+    where_parts = [sql.SQL("TRIM(COALESCE(src.\"Radical_compte\"::text, '')) <> ''")]
+    trailing_params: List[Any] = []
+    if only_new:
+        where_parts.append(sql.SQL("""
+            NOT EXISTS (
+                SELECT 1 FROM clients_campagnes existing
+                WHERE existing."ID_CAMPAGNE" = %s
+                  AND existing."Radical_compte" = src."Radical_compte"
+            )
+        """))
+        trailing_params.append(template.get("ID_CAMPAGNE"))
+
+    query = sql.SQL("""
+        INSERT INTO {table} ({columns})
+        SELECT {select_exprs}
+        FROM ({radical_select}) AS src
+        WHERE {where_clause}
+    """).format(
+        table=sql.Identifier(TABLE_NAME),
+        columns=sql.SQL(", " ).join(sql.Identifier(c) for c in COLUMNS),
+        select_exprs=sql.SQL(", " ).join(select_exprs),
+        radical_select=radical_select,
+        where_clause=sql.SQL(" AND " ).join(where_parts),
+    )
+    params = [*constant_params, *(select_params or []), *trailing_params]
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            count = cur.rowcount
+    return int(count if count is not None and count >= 0 else 0)
+
 def set_clients_etat_for_campagne(id_campagne: str, etat: str) -> int:
     ensure_table()
     with connection() as conn:

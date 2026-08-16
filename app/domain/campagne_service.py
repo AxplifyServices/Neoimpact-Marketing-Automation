@@ -5,18 +5,26 @@ from typing import Any, Dict, List, Tuple
 import json
 import re
 import unicodedata
+import time
 
 import pandas as pd
 
 from app.storage.runtime_db import RuntimeConnection, connect_runtime
-from app.storage.postgres_db import table_exists
+from app.storage.postgres_db import table_exists, connection as pg_connection
 from app.storage.campagnes_store_sqlite import insert_campagne, update_etat
 from app.storage.clients_campagnes_store_sqlite import (
     ensure_table as ensure_clients_campagnes_table,
     bulk_insert_clients,
+    bulk_insert_clients_from_radical_select,
     set_clients_etat_for_campagne,
 )
-from app.storage.cibles_store_sqlite import load_clients_df_for_cible
+from app.storage.cibles_store_sqlite import (
+    load_clients_df_for_cible,
+    build_db_cible_radicals_query,
+)
+from app.storage.crc_input_store_sqlite import fill_crc_input_from_clients_campagnes
+from app.storage.action_vers_cc_store_sqlite import fill_action_vers_cc_from_clients_campagnes
+from app.storage.action_vers_da_store_sqlite import fill_action_vers_da_from_clients_campagnes
 from app.storage.modele_store_sqlite import get_modele_dict
 
 # NEW: échéance (arriv_eche)
@@ -221,65 +229,46 @@ def _delete_outputs_for_campagne(id_campagne: str) -> Dict[str, int]:
         conn.close()
 
 
-def _extract_final_queue_routing(route_result: Dict[str, Any]) -> str:
+def _count_radical_select(radical_select, params: List[Any]) -> int:
+    """Compte une sélection de radicaux sans la matérialiser côté Python."""
+    from psycopg import sql
+
+    query = sql.SQL("SELECT COUNT(*) FROM ({}) AS target_population").format(radical_select)
+    with pg_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params or [])
+            row = cur.fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def _route_outputs_for_campaign_bulk(
+    id_campagne: str,
+    type_campagne: str,
+) -> Dict[str, int]:
     """
-    route_after_update peut retourner:
-      - routed_to: crc_input / vers_cc / vers_da / none
-      - routed_to: mail + post_mail: {...}
-    On veut compter la queue finale.
+    Reconstruit les outputs avec des INSERT ... SELECT PostgreSQL.
+
+    Les files CRC/CC/DA sont remplies en masse. Les visites terrain restent
+    confiées au dispatcher externe, car elles impliquent un appel HTTP par client.
     """
-    rt = (route_result or {}).get("routed_to") or ""
-    rt = str(rt).strip()
-
-    if rt == "mail":
-        post = (route_result or {}).get("post_mail") or {}
-        return _extract_final_queue_routing(post)
-
-    return rt
-
-
-def _route_initial_queues_for_campaign(id_campagne: str) -> Dict[str, int]:
-    """
-    Routage initial (métier) pour tous les clients de la campagne via contact_client_engine.route_after_update.
-    Important: on nettoie les queues avant.
-    """
-    from app.engine.contact_client_engine import route_after_update
-
-    # anti-doublons (sécurité)
     _delete_outputs_for_campagne(id_campagne)
 
-    # liste des clients
-    conn = connect_runtime()
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT Radical_compte
-            FROM clients_campagnes
-            WHERE ID_CAMPAGNE = ?
-            """,
-            (id_campagne,),
-        )
-        radicals = [str(r["Radical_compte"]).strip() for r in cur.fetchall() if str(r["Radical_compte"]).strip()]
-    finally:
-        conn.close()
+    counts = {
+        "crc": int(fill_crc_input_from_clients_campagnes(id_campagne) or 0),
+        "cc": 0,
+        "da": 0,
+        "cc_terrain": 0,
+        "da_terrain": 0,
+    }
 
-    counts = {"crc": 0, "cc": 0, "da": 0, "cc_terrain": 0, "da_terrain": 0}
-
-    for rc in radicals:
-        res = route_after_update(id_campagne, rc)
-        final_rt = _extract_final_queue_routing(res)
-
-        if final_rt == "crc_input":
-            counts["crc"] += 1
-        elif final_rt == "vers_cc":
-            counts["cc"] += 1
-        elif final_rt == "vers_da":
-            counts["da"] += 1
-        elif final_rt == "vers_cc_terrain":
-            counts["cc_terrain"] += 1
-        elif final_rt == "vers_da_terrain":
-            counts["da_terrain"] += 1
+    if _norm_str(type_campagne) == "avec_action_terrain":
+        dispatch = dispatch_pending_visits_for_campaign(id_campagne)
+        counts["external_visit_sent"] = int(dispatch.get("sent") or 0)
+        counts["external_visit_skipped"] = int(dispatch.get("skipped") or 0)
+        counts["external_visit_errors"] = int(dispatch.get("errors") or 0)
+    else:
+        counts["da"] = int(fill_action_vers_da_from_clients_campagnes(id_campagne) or 0)
+        counts["cc"] = int(fill_action_vers_cc_from_clients_campagnes(id_campagne) or 0)
 
     return counts
 
@@ -306,6 +295,10 @@ def create_campagne(
         - si la première action est Mail => exécuter mail meta-loop immédiatement
         - puis router initialement vers CRC/CC/DA via route_after_update (métier)
     """
+
+    started_at = time.perf_counter()
+    target_ready_at = started_at
+    clients_inserted_at = started_at
 
     # 0) Validation des dates + état campagne
     _validate_campaign_dates(date_debut, date_fin)
@@ -372,15 +365,37 @@ def create_campagne(
     # Bloc courant initial (pour calcul arriv_eche)
     current_bloc_init = find_bloc_by_id(liste_action, id_action_init) or root
 
-    # 3) Charger population cible
-    df = load_clients_df_for_cible(id_cible)
-    nb_init = int(len(df))
+    # 3) Population cible
+    # Pour une cible DB, PostgreSQL reste la source de vérité de bout en bout:
+    # aucun DataFrame de centaines de milliers de lignes n'est matérialisé.
+    db_select_all = build_db_cible_radicals_query(
+        id_cible,
+        exclude_rupture_relation=False,
+    )
+    db_select_filtered = build_db_cible_radicals_query(
+        id_cible,
+        exclude_rupture_relation=True,
+    )
 
-    # 4) Filtre rupture relation
-    df, removed_rupture = _remove_rupture_relation_strict(df)
-    nb_apres = int(len(df))
+    df = None
+    if db_select_all is not None and db_select_filtered is not None:
+        raw_query, raw_params = db_select_all
+        filtered_query, filtered_params = db_select_filtered
+        nb_init = _count_radical_select(raw_query, raw_params)
+        nb_apres = _count_radical_select(filtered_query, filtered_params)
+        removed_rupture = max(0, nb_init - nb_apres)
+    else:
+        # Fallback inchangé pour les cibles fichier plat.
+        df = load_clients_df_for_cible(id_cible)
+        nb_init = int(len(df))
+        df, removed_rupture = _remove_rupture_relation_strict(df)
+        nb_apres = int(len(df))
+        filtered_query = None
+        filtered_params = []
 
-    # 6) Création campagne
+    target_ready_at = time.perf_counter()
+
+    # 4) Création campagne
     ensure_clients_campagnes_table()
     id_campagne = insert_campagne(
         nom_campagne=nom_campagne,
@@ -395,68 +410,74 @@ def create_campagne(
         visitPurpose=visitPurpose,
     )
 
-    # 7) Préparer lignes clients_campagnes
-    radical_col = _detect_radical_col(df)
-
-    rows: List[Dict[str, Any]] = []
+    # 5) Valeurs initiales communes à tous les clients de la campagne.
     today_iso = date.today().isoformat()
+    row_template = {
+        "Nom_campagne": nom_campagne,
+        "ID_CAMPAGNE": id_campagne,
+        "Etat_campagne": etat_campagne,
+        "NB_jour_campagne": 0,
+        "ID_Action": id_action_init,
+        "Canal": canal_init,
+        "Action": action_init,
+        "Last_action": "",
+        "Resultat_last_action": "",
+        "Date_last_action": today_iso,
+        "NB_jour_last_action": 0,
+        "NB_appel": 0,
+        "NB_mail": 0,
+        "NB_sms": 0,
+        "NB_message": 0,
+        "NB_approche_commercial": 0,
+        "NB_da": 0,
+        "NB_cc": 0,
+        "NB_push": 0,
+        "date_debut_campagne": _norm_str(date_debut)[:10],
+        "nb_jour_debut_campagne": 0,
+        "conversion": 0,
+    }
 
-    for _, r in df.iterrows():
-        rc = _norm_str(r.get(radical_col))
-        if not rc:
-            continue
+    # arriv_eche ne dépend ici que du bloc initial et de
+    # NB_jour_last_action=0: il est donc identique pour toute la population.
+    if _norm_str(etat_campagne) != "En cours":
+        row_template["arriv_eche"] = "Non"
+    else:
+        row_template["arriv_eche"] = arrive_echeance(
+            liste_action,
+            current_bloc_init,
+            row_template,
+        )
 
-        row_cc = {
-            "Nom_campagne": nom_campagne,
-            "ID_CAMPAGNE": id_campagne,
-            "Radical_compte": rc,
-            "Etat_campagne": etat_campagne,
-            "NB_jour_campagne": 0,
-            "ID_Action": id_action_init,
-            "Canal": canal_init,
-            "Action": action_init,
-            "Last_action": "",
-            "Resultat_last_action": "",
-            "Date_last_action": today_iso,
-            "NB_jour_last_action": 0,
-            "NB_appel": 0,
-            "NB_mail": 0,
-            "NB_sms": 0,
-            "NB_message": 0,
-            "NB_approche_commercial": 0,
-            "NB_da": 0,
-            "NB_cc": 0,
-            "NB_push": 0,
-            "date_debut_campagne": _norm_str(date_debut)[:10],
-            "nb_jour_debut_campagne": 0,
-            "conversion": 0,
-        }
+    # 6) Affectation massive
+    if filtered_query is not None:
+        inserted_clients = bulk_insert_clients_from_radical_select(
+            filtered_query,
+            filtered_params,
+            row_template,
+            only_new=False,
+        )
+    else:
+        radical_col = _detect_radical_col(df) if df is not None else ""
+        rows: List[Dict[str, Any]] = []
+        if df is not None and radical_col:
+            for _, r in df.iterrows():
+                rc = _norm_str(r.get(radical_col))
+                if not rc:
+                    continue
+                row_cc = dict(row_template)
+                row_cc["Radical_compte"] = rc
+                rows.append(row_cc)
+        inserted_clients = bulk_insert_clients(rows)
 
-        # Une campagne qui n'est pas réellement En cours ne peut pas
-        # être à échéance opérationnelle.
-        if _norm_str(row_cc.get("Etat_campagne")) != "En cours":
-            row_cc["arriv_eche"] = "Non"
-        else:
-            row_cc["arriv_eche"] = arrive_echeance(
-                liste_action,
-                current_bloc_init,
-                row_cc,
-            )
+    clients_inserted_at = time.perf_counter()
 
-        rows.append(row_cc)
-
-    # 8) Insert
-    bulk_insert_clients(rows)
-
-    # 9) Sync état campagne sur clients_campagnes
-    set_clients_etat_for_campagne(id_campagne, etat_campagne)
-
+    # Les lignes viennent d'être insérées avec le bon état : pas de second
+    # UPDATE massif inutile ici.
     output_counts = {"crc": 0, "cc": 0, "da": 0, "cc_terrain": 0, "da_terrain": 0}
     mail_summary = None
 
-    # 10) Si "En cours" uniquement: mails init puis routage métier (queues)
+    # 8) Si En cours: traitement Mail éventuel puis reconstruction bulk des outputs.
     if etat_campagne == "En cours":
-        # (A) Si 1ère action = Mail => traiter immédiatement
         if _is_first_action_mail(canal_init, action_init):
             try:
                 from app.engine.traitement_mail_engine import run_mail_meta_loop
@@ -464,29 +485,11 @@ def create_campagne(
             except Exception as e:
                 mail_summary = {"error": "mail_meta_loop_failed", "details": str(e)}
 
-        # (B) Routage initial
         try:
-            if (
-                type_campagne == "avec_action_terrain"
-                and action_init in ("Directeur d'agence", "Conseiller client")
-            ):
-                from app.domain.terrain_visit_webhook import dispatch_pending_visits_for_campaign
-
-                dispatch = dispatch_pending_visits_for_campaign(id_campagne)
-
-                output_counts = {
-                    "crc": 0,
-                    "cc": 0,
-                    "da": 0,
-                    "cc_terrain": 0,
-                    "da_terrain": 0,
-                    "external_visit_sent": int(dispatch.get("sent") or 0),
-                    "external_visit_skipped": int(dispatch.get("skipped") or 0),
-                    "external_visit_errors": int(dispatch.get("errors") or 0),
-                }
-            else:
-                output_counts = _route_initial_queues_for_campaign(id_campagne)
-
+            output_counts = _route_outputs_for_campaign_bulk(
+                id_campagne,
+                type_campagne,
+            )
         except Exception as e:
             output_counts = {
                 "crc": 0,
@@ -499,12 +502,15 @@ def create_campagne(
                 "external_visit_errors": 0,
                 "error": str(e),
             }
+
+    finished_at = time.perf_counter()
+
     return {
         "id_campagne": id_campagne,
         "nb_cible_initial": nb_init,
         "nb_apres_filtrage": nb_apres,
         "nb_exclus_rupture": int(removed_rupture),
-        "nb_clients_insérés": int(len(rows)),
+        "nb_clients_insérés": int(inserted_clients),
         "etat_campagne": etat_campagne,
         "type_campagne": type_campagne,
         "id_action_initial": id_action_init,
@@ -512,6 +518,13 @@ def create_campagne(
         "action_initiale": action_init,
         "mail_meta_loop": mail_summary,
         "output_insert": output_counts,
+        "bulk_mode": "postgresql_native" if filtered_query is not None else "file_fallback",
+        "timings_ms": {
+            "target": int((target_ready_at - started_at) * 1000),
+            "insert_clients_campagnes": int((clients_inserted_at - target_ready_at) * 1000),
+            "routing_outputs": int((finished_at - clients_inserted_at) * 1000),
+            "total": int((finished_at - started_at) * 1000),
+        },
         "visitMode": visitMode,
         "visitPurpose": visitPurpose,
     }
@@ -807,30 +820,36 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
             except Exception as e:
                 mail_summary = {"error": "mail_meta_loop_failed", "details": str(e)}
 
-        # route vers queues (métier) après traitement mail
-        # route vers queues (métier) après traitement mail.
-        # Pour une campagne avec_action_terrain, route_after_update appelle déjà
-        # send_visit_for_client quand le bloc courant est DA/CC.
+        # Reconstruction bulk des queues après traitement mail.
+        type_campagne = _norm_str(c.get("type_campagne")) or "sans_action_terrain"
         try:
-            output_counts = _route_initial_queues_for_campaign(id_campagne)
-        except Exception:
+            output_counts = _route_outputs_for_campaign_bulk(
+                id_campagne,
+                type_campagne,
+            )
+        except Exception as e:
             output_counts = {
                 "crc": 0,
                 "cc": 0,
                 "da": 0,
                 "cc_terrain": 0,
                 "da_terrain": 0,
+                "error": str(e),
             }
 
-        # Sécurité supplémentaire:
-        # après réactivation, on refait un scan ciblé des clients encore
-        # positionnés sur DA/CC et non envoyés.
-        # Grâce au statut local libéré par la pause, les clients supprimés côté
-        # Wafa peuvent repartir. Les autres restent protégés par l'anti-doublon.
-        try:
-            external_dispatch_after_activation = dispatch_pending_visits_for_campaign(id_campagne)
-        except Exception as e:
-            external_dispatch_after_activation = {"ok": False, "error": str(e)}
+        if type_campagne == "avec_action_terrain":
+            external_dispatch_after_activation = {
+                "ok": int(output_counts.get("external_visit_errors") or 0) == 0,
+                "sent": int(output_counts.get("external_visit_sent") or 0),
+                "skipped": int(output_counts.get("external_visit_skipped") or 0),
+                "errors": int(output_counts.get("external_visit_errors") or 0),
+            }
+        else:
+            external_dispatch_after_activation = {
+                "ok": True,
+                "skipped": True,
+                "reason": "sans_action_terrain",
+            }
 
     else:
         external_dispatch_after_activation = {
@@ -851,19 +870,21 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
     }
 
 def sync_new_clients_from_cible_for_campaign(conn: RuntimeConnection, id_campagne: str) -> Dict[str, Any]:
-
     """
-    Insert-only :
-    - Recalcule la cible (via load_clients_df_for_cible + filtres)
-    - Ajoute les nouveaux membres dans clients_cibles (+ volume)
-    - Ajoute les nouveaux dans clients_campagnes en respectant le modèle (root bloc)
+    Synchronisation insert-only de la cible vers la campagne.
+
+    Les cibles DB utilisent INSERT ... SELECT directement dans PostgreSQL.
+    Les cibles fichier plat conservent le chemin historique DataFrame.
     """
     from app.storage.campagnes_store_sqlite import get_campagne
     from app.storage.clients_cibles_store_sqlite import (
         insert_only_members,
+        insert_only_members_from_radical_select,
         update_cible_volume_if_column_exists,
     )
     from app.domain.workflow_nav import is_objective_bloc
+
+    _ = conn  # conservé dans la signature pour compatibilité avec le batch
 
     c = get_campagne(id_campagne) or {}
     id_cible = _norm_str(c.get("id_cible") or c.get("ID_CIBLE") or c.get("cible_id"))
@@ -872,7 +893,6 @@ def sync_new_clients_from_cible_for_campaign(conn: RuntimeConnection, id_campagn
     if not id_cible or not id_modele:
         return {"ok": False, "error": "campagne missing id_cible or id_modele", "new_cible_members": 0, "new_clients_campagne": 0}
 
-    # 1) Charger modèle -> root bloc (init)
     modele = get_modele_dict(id_modele) or {}
     raw_liste = modele.get("liste_action") or "[]"
     if isinstance(raw_liste, list):
@@ -894,97 +914,98 @@ def sync_new_clients_from_cible_for_campaign(conn: RuntimeConnection, id_campagn
         action_init = "Objectif"
 
     current_bloc_init = find_bloc_by_id(liste_action, id_action_init) or root
+    campagne_state = _get_campaign_state(c) or "En cours"
 
-    # 2) Charger DF cible + filtre rupture relation
+    row_template = {
+        "Nom_campagne": _norm_str(c.get("nom_campagne") or c.get("Nom_campagne")),
+        "ID_CAMPAGNE": id_campagne,
+        "Etat_campagne": campagne_state,
+        "NB_jour_campagne": 0,
+        "ID_Action": id_action_init,
+        "Canal": canal_init,
+        "Action": action_init,
+        "Last_action": "",
+        "Resultat_last_action": "",
+        "Date_last_action": date.today().isoformat(),
+        "NB_jour_last_action": 0,
+        "NB_appel": 0,
+        "NB_mail": 0,
+        "NB_sms": 0,
+        "NB_message": 0,
+        "NB_approche_commercial": 0,
+        "NB_da": 0,
+        "NB_cc": 0,
+        "NB_push": 0,
+        "date_debut_campagne": _norm_str(c.get("date_debut") or "")[:10],
+        "nb_jour_debut_campagne": 0,
+        "conversion": 0,
+    }
+    row_template["arriv_eche"] = (
+        arrive_echeance(liste_action, current_bloc_init, row_template)
+        if campagne_state == "En cours"
+        else "Non"
+    )
+
+    db_select = build_db_cible_radicals_query(
+        id_cible,
+        exclude_rupture_relation=True,
+    )
+
+    if db_select is not None:
+        radical_query, radical_params = db_select
+        new_cible = insert_only_members_from_radical_select(
+            id_cible,
+            radical_query,
+            radical_params,
+        )
+        inserted = bulk_insert_clients_from_radical_select(
+            radical_query,
+            radical_params,
+            row_template,
+            only_new=True,
+        )
+        update_cible_volume_if_column_exists(id_cible)
+        return {
+            "ok": True,
+            "new_cible_members": int(new_cible),
+            "new_clients_campagne": int(inserted),
+        }
+
+    # Fallback fichier plat.
     df = load_clients_df_for_cible(id_cible)
     df, _ = _remove_rupture_relation_strict(df)
-
     radical_col = _detect_radical_col(df)
     radicals = []
     if radical_col:
-        for _, r in df.iterrows():
-            rc = _norm_str(r.get(radical_col))
-            if rc:
-                radicals.append(rc)
+        radicals = list(dict.fromkeys(
+            _norm_str(r.get(radical_col))
+            for _, r in df.iterrows()
+            if _norm_str(r.get(radical_col))
+        ))
 
-    # dedup
-    radicals = list(dict.fromkeys(radicals))
-
-    # 3) Mettre à jour la cible (insert-only) + volume
     new_cible = insert_only_members(id_cible, radicals)
     update_cible_volume_if_column_exists(id_cible)
 
-    # 4) Déterminer les clients qui ne sont pas encore affectés
-    # à cette campagne.
-    #
-    # On utilise volontairement la connexion fournie par le batch.
-    # La fonction ne doit ni la remplacer ni la fermer.
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT Radical_compte
-        FROM clients_campagnes
-        WHERE ID_CAMPAGNE = ?
-        """,
-        (id_campagne,),
-    )
-
-    existing = {
-        _norm_str(row[0])
-        for row in cur.fetchall()
-        if _norm_str(row[0])
-    }
-
-    to_add = [rc for rc in radicals if _norm_str(rc) and _norm_str(rc) not in existing]
-
-    if not to_add:
-        return {"ok": True, "new_cible_members": int(new_cible), "new_clients_campagne": 0}
-
-    today_iso = date.today().isoformat()
+    # Pour les fichiers plats on conserve un contrôle Python des existants.
+    runtime_conn = connect_runtime()
+    try:
+        cur = runtime_conn.cursor()
+        cur.execute("SELECT Radical_compte FROM clients_campagnes WHERE ID_CAMPAGNE = ?", (id_campagne,))
+        existing = {_norm_str(row[0]) for row in cur.fetchall() if _norm_str(row[0])}
+    finally:
+        runtime_conn.close()
 
     rows = []
-    for rc in to_add:
-        row_cc = {
-            "Nom_campagne": _norm_str(c.get("nom_campagne") or c.get("Nom_campagne")),
-            "ID_CAMPAGNE": id_campagne,
-            "Radical_compte": rc,
-            "Etat_campagne": _get_campaign_state(c) or "En cours",
-            "NB_jour_campagne": 0,
-            "ID_Action": id_action_init,
-            "Canal": canal_init,
-            "Action": action_init,
-            "Last_action": "",
-            "Resultat_last_action": "",
-            "Date_last_action": today_iso,
-            "NB_jour_last_action": 0,
-            "NB_appel": 0,
-            "NB_mail": 0,
-            "NB_sms": 0,
-            "NB_message": 0,
-            "NB_approche_commercial": 0,
-            "NB_da": 0,
-            "NB_cc": 0,
-            "NB_push": 0,
-            "date_debut_campagne": _norm_str(c.get("date_debut") or "")[:10],
-            "nb_jour_debut_campagne": 0,
-            "conversion": 0,
-        }
-
-        # arriv_eche selon le workflow courant
-        row_cc["arriv_eche"] = arrive_echeance(
-            liste_action,
-            current_bloc_init,
-            row_cc,
-        )
-
+    for rc in radicals:
+        if rc in existing:
+            continue
+        row_cc = dict(row_template)
+        row_cc["Radical_compte"] = rc
         rows.append(row_cc)
 
     inserted = bulk_insert_clients(rows)
-
-    # sécurité : resync Etat_campagne
-    set_clients_etat_for_campagne(
-        id_campagne,
-        _get_campaign_state(c) or "En cours",
-    )
-
-    return {"ok": True, "new_cible_members": int(new_cible), "new_clients_campagne": int(inserted)}
+    return {
+        "ok": True,
+        "new_cible_members": int(new_cible),
+        "new_clients_campagne": int(inserted),
+    }

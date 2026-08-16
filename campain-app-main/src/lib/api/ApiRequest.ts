@@ -7,6 +7,7 @@ export interface ApiRequest {
   headers?: Record<string, string>;
   useLoader?: boolean;
   responseType?: 'json' | 'blob';
+  timeoutMs?: number;
 }
 
 export class ApiError extends Error {
