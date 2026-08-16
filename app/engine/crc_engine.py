@@ -147,6 +147,43 @@ def get_next_row_from_queue(
 
 
 
+def get_row_from_queue(
+    table: str,
+    id_campagne: str,
+    radical_compte: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Retourne exactement la ligne identifiée dans une queue.
+
+    Cela garantit qu'un résultat est appliqué au client affiché par le
+    frontend, même si l'ordre de la queue change entre l'affichage et le clic.
+    """
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+
+        if not _table_exists(cur, table):
+            return None
+
+        cur.execute(
+            f"""
+            SELECT *
+            FROM {table}
+            WHERE TRIM(ID_CAMPAGNE) = ?
+              AND TRIM(Radical_compte) = ?
+            LIMIT 1
+            """,
+            (
+                str(id_campagne or "").strip(),
+                str(radical_compte or "").strip(),
+            ),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
 def delete_row_from_queue(table: str, id_campagne: str, radical_compte: str) -> None:
     conn = _connect()
     cur = conn.cursor()

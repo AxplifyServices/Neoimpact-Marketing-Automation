@@ -8,8 +8,8 @@ from pydantic import BaseModel
 from app.engine.crc_engine import (
     get_next_crc_input_row,
     get_next_row_from_queue,
-    skip_current_row,
-    delete_row_from_queue,
+    get_row_from_queue,
+    move_row_to_end_of_queue,
     apply_result_and_update_client_campagnes,
     apply_result_and_update_client_campagnes_from_queue,
     call_current_client,
@@ -117,11 +117,16 @@ def queue_next(
 
 @router.post("/queues/{queue}/skip")
 def queue_skip(queue: str, payload: QueueKeyIn):
+    """
+    Skip = passer au suivant sans perdre la tâche.
+    Le comportement est identique pour CRC, CC et DA.
+    """
     table = _get_table(queue)
-    if queue == "crc":
-        skip_current_row(payload.id_campagne, payload.radical_compte)
-    else:
-        delete_row_from_queue(table, payload.id_campagne, payload.radical_compte)
+    move_row_to_end_of_queue(
+        table,
+        payload.id_campagne,
+        payload.radical_compte,
+    )
     return {"ok": True}
 
 
@@ -133,28 +138,40 @@ def queue_apply_result(
     gestionnaire: Optional[str] = Query(default=None),
 ):
     """
-    id_campagne (query param) permet d'appliquer le résultat sur la prochaine ligne de la campagne filtrée,
-    cohérent avec l'UI Streamlit.
+    Applique le résultat à la ligne explicitement identifiée par le payload.
+
+    Les query params sont conservés pour compatibilité avec le frontend
+    existant, mais le payload est désormais la source de vérité pour le client
+    traité. On évite ainsi qu'un changement de queue applique le résultat au
+    mauvais client.
     """
     table = _get_table(queue)
 
-    if queue == "crc":
-        row = get_next_crc_input_row(
-            id_campagne_filter=id_campagne,
-            gestionnaire_filter=gestionnaire,
-        )
-        if not row:
-            return {"ok": False, "error": "Queue vide"}
-        return apply_result_and_update_client_campagnes(row, payload.resultat)
-
-    row = get_next_row_from_queue(
+    row = get_row_from_queue(
         table,
-        id_campagne_filter=id_campagne,
-        gestionnaire_filter=gestionnaire,
+        payload.id_campagne,
+        payload.radical_compte,
     )
+
     if not row:
-        return {"ok": False, "error": "Queue vide"}
-    return apply_result_and_update_client_campagnes_from_queue(row, payload.resultat, table)
+        return {
+            "ok": False,
+            "error": "queue_row_not_found",
+            "id_campagne": payload.id_campagne,
+            "radical_compte": payload.radical_compte,
+        }
+
+    if queue == "crc":
+        return apply_result_and_update_client_campagnes(
+            row,
+            payload.resultat,
+        )
+
+    return apply_result_and_update_client_campagnes_from_queue(
+        row,
+        payload.resultat,
+        table,
+    )
 
 
 @router.post("/queues/crc/call")

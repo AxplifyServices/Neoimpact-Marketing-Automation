@@ -200,6 +200,8 @@ def _update_after_mail_by_rid(conn: RuntimeConnection, rid: int, resultat: str, 
             Last_action = ?,
             Resultat_last_action = ?,
             Date_last_action = ?,
+            NB_jour_last_action = 0,
+            arriv_eche = 'Non',
             NB_mail = COALESCE(NB_mail,0) + ?
         WHERE rowid = ?
         """,

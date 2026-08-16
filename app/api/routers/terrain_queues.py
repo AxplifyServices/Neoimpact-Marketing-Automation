@@ -52,8 +52,20 @@ def terrain_visit_callback(payload: TerrainVisitCallbackIn) -> Dict[str, Any]:
         "ID_Action": block_id,
     }
 
-    return apply_result_from_queue(
+    result = apply_result_from_queue(
         row=row,
         resultat_label=resultat,
         queue_table="external_visit_dispatches",
     )
+
+    if not result.get("ok") and result.get("error") in {
+        "dispatch_not_found",
+        "dispatch_not_pending",
+        "client_campagne_not_found_or_not_on_this_block",
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail=result,
+        )
+
+    return result

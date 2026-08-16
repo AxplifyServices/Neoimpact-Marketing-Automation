@@ -75,6 +75,36 @@ def _infer_etat(date_debut: str, date_fin: str) -> str:
     return "Terminée"
 
 
+def _validate_campaign_dates(date_debut: str, date_fin: str) -> Tuple[date, date]:
+    """
+    Valide les dates d'une campagne.
+
+    Règles :
+    - date_debut et date_fin sont obligatoires au format ISO YYYY-MM-DD ;
+    - date_fin doit être supérieure ou égale à date_debut.
+    """
+    raw_debut = _norm_str(date_debut)[:10]
+    raw_fin = _norm_str(date_fin)[:10]
+
+    if not raw_debut or not raw_fin:
+        raise ValueError("date_debut et date_fin sont obligatoires.")
+
+    try:
+        d0 = date.fromisoformat(raw_debut)
+        d1 = date.fromisoformat(raw_fin)
+    except Exception as exc:
+        raise ValueError(
+            "Format de date invalide. Utiliser YYYY-MM-DD pour date_debut et date_fin."
+        ) from exc
+
+    if d1 < d0:
+        raise ValueError(
+            "Plage de dates invalide : date_fin doit être supérieure ou égale à date_debut."
+        )
+
+    return d0, d1
+
+
 def _detect_radical_col(df: pd.DataFrame) -> str:
     for c in ["Radical_compte", "radical_compte", "Radical compte", "radical compte"]:
         if c in df.columns:
@@ -277,7 +307,9 @@ def create_campagne(
         - puis router initialement vers CRC/CC/DA via route_after_update (métier)
     """
 
-    # 0) Etat campagne
+    # 0) Validation des dates + état campagne
+    _validate_campaign_dates(date_debut, date_fin)
+
     if not etat_campagne:
         etat_campagne = _infer_etat(date_debut, date_fin)
     
@@ -397,13 +429,18 @@ def create_campagne(
             "conversion": 0,
         }
 
-        # arriv_eche : Oui/Non selon les conditions de type NB_jour_last_action dans les fils
-        if _norm_str(row_cc.get("Etat_campagne")) not in ("En cours", "Planifiée", "En pause"):
+        # Une campagne qui n'est pas réellement En cours ne peut pas
+        # être à échéance opérationnelle.
+        if _norm_str(row_cc.get("Etat_campagne")) != "En cours":
             row_cc["arriv_eche"] = "Non"
         elif _norm_str(row_cc.get("Action")) == "Closed":
             row_cc["arriv_eche"] = "Non"
         else:
-            row_cc["arriv_eche"] = arrive_echeance(liste_action, current_bloc_init, row_cc)
+            row_cc["arriv_eche"] = arrive_echeance(
+                liste_action,
+                current_bloc_init,
+                row_cc,
+            )
 
         rows.append(row_cc)
 
@@ -580,6 +617,27 @@ def mettre_en_pause_campagne(id_campagne: str) -> Dict[str, Any]:
     les logs external_visit_dispatches status='sent' sont libérés après DELETE
     externe réussi pour permettre un renvoi lors de la réactivation.
     """
+    from app.storage.campagnes_store_sqlite import get_campagne
+
+    campagne = get_campagne(id_campagne) or {}
+
+    if not campagne:
+        return {
+            "id_campagne": id_campagne,
+            "ok": False,
+            "error": "Campagne introuvable.",
+        }
+
+    etat_actuel = _get_campaign_state(campagne)
+
+    if etat_actuel == "Terminée":
+        return {
+            "id_campagne": id_campagne,
+            "ok": False,
+            "error": "Une campagne terminée ne peut pas être mise en pause.",
+            "etat": etat_actuel,
+        }
+
     external_cancel = {"ok": True, "skipped": True, "reason": "not_called"}
 
     try:

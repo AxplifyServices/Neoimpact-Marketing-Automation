@@ -274,6 +274,8 @@ def _send_mail_for_one_client_and_advance(id_campagne: str, radical_compte: str,
                     Last_action = ?,
                     Resultat_last_action = ?,
                     Date_last_action = ?,
+                    NB_jour_last_action = 0,
+                    arriv_eche = 'Non',
                     NB_mail = COALESCE(NB_mail,0) + ?
                 WHERE rowid = ?
                 """,
@@ -376,6 +378,42 @@ def apply_result_from_queue(row: Dict[str, Any], resultat_label: str, queue_tabl
 
         block_id = _norm_str(row.get("ID_Action"))
 
+        # Un callback terrain n'est recevable que si un dispatch correspondant
+        # a réellement été envoyé et attend encore son callback.
+        if queue_table == "external_visit_dispatches":
+            cur.execute(
+                """
+                SELECT id, status
+                FROM external_visit_dispatches
+                WHERE id_campagne = ?
+                  AND radical_compte = ?
+                  AND block_id = ?
+                FOR UPDATE
+                """,
+                (id_campagne, radical, block_id),
+            )
+            dispatch_row = cur.fetchone()
+
+            if not dispatch_row:
+                return {
+                    "ok": False,
+                    "error": "dispatch_not_found",
+                    "id_campagne": id_campagne,
+                    "radical_compte": radical,
+                    "block_id": block_id,
+                }
+
+            dispatch_status = _norm_str(dispatch_row.get("status"))
+            if dispatch_status != "sent":
+                return {
+                    "ok": False,
+                    "error": "dispatch_not_pending",
+                    "status": dispatch_status,
+                    "id_campagne": id_campagne,
+                    "radical_compte": radical,
+                    "block_id": block_id,
+                }
+
         cur.execute(
             f"""
             SELECT rowid as __rid, *
@@ -429,7 +467,9 @@ def apply_result_from_queue(row: Dict[str, Any], resultat_label: str, queue_tabl
             SET
                 Resultat_last_action = ?,
                 Last_action = ?,
-                Date_last_action = ?
+                Date_last_action = ?,
+                NB_jour_last_action = 0,
+                arriv_eche = 'Non'
                 {incr_sql}
             WHERE rowid = ?
         """
@@ -491,7 +531,7 @@ def apply_result_from_queue(row: Dict[str, Any], resultat_label: str, queue_tabl
         else:
             cur.execute(
                 f"DELETE FROM {queue_table} WHERE ID_CAMPAGNE=? AND Radical_compte=?",
-                (id_campagne, radical, block_id),
+                (id_campagne, radical),
             )
 
         conn.commit()
