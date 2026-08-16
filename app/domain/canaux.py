@@ -45,12 +45,12 @@ CANAL_MAPPING: Dict[str, Dict[str, object]] = {
     # ✅ IMPORTANT: DA / CC (selon ton mapping final)
     "Directeur d'agence": {
         "action": "Directeur d'agence",
-        "compteur": "NB_approche_commercial",
+        "compteur": "NB_da",
         "resultats": ["Non Aboutit", "Aboutit"],
     },
     "Conseiller client": {
         "action": "Conseiller client",
-        "compteur": "NB_approche_commercial",
+        "compteur": "NB_cc",
         "resultats": ["Non Aboutit", "Aboutit"],
     },
 

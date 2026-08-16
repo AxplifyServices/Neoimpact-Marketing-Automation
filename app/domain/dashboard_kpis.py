@@ -26,6 +26,9 @@ CHANNEL_COLS = [
     ("Mail", "NB_mail"),
     ("SMS", "NB_sms"),
     ("Message", "NB_message"),
+    ("Directeur d'agence", "NB_da"),
+    ("Conseiller client", "NB_cc"),
+    ("Push notification", "NB_push"),
 ]
 
 
@@ -241,6 +244,8 @@ def load_clients_campagnes_df(filters: DashboardFilters) -> pd.DataFrame:
         "NB_sms",
         "NB_message",
         "NB_approche_commercial",
+        "NB_da",
+        "NB_cc",
         "NB_push",
     ]
     for col in treatment_counter_cols:

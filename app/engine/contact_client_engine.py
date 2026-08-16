@@ -531,9 +531,23 @@ def apply_result_from_queue(row: Dict[str, Any], resultat_label: str, queue_tabl
                 "radical_compte": radical,
             }
 
-        # compteur selon canal
+        # Compteur spécifique au canal.
+        # Pour DA/CC, NB_approche_commercial reste également incrémenté
+        # comme compteur global de compatibilité/historique.
         compteur_col = compteur_for_canal(canal) or ""
-        incr_sql = f", {compteur_col} = COALESCE({compteur_col},0) + 1" if compteur_col else ""
+        incr_parts: List[str] = []
+
+        if compteur_col:
+            incr_parts.append(
+                f"{compteur_col} = COALESCE({compteur_col}, 0) + 1"
+            )
+
+        if canal in ("Directeur d'agence", "Conseiller client"):
+            incr_parts.append(
+                "NB_approche_commercial = COALESCE(NB_approche_commercial, 0) + 1"
+            )
+
+        incr_sql = (", " + ", ".join(incr_parts)) if incr_parts else ""
 
         sql = f"""
             UPDATE {CLIENTS_CAMPAGNES_TABLE}
