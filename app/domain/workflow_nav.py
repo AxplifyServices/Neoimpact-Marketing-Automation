@@ -78,13 +78,115 @@ def infer_children(liste_action: List[Dict[str, Any]], parent_id: str) -> List[D
 # =========================================================
 # Comparaisons & Conditions
 # =========================================================
+_ALLOWED_CONDITION_OPERATORS = {
+    "=",
+    "==",
+    "!=",
+    "<>",
+    ">",
+    "<",
+    ">=",
+    "<=",
+    "contains",
+    "in",
+}
+
+
+def _normalize_operator(op: Any) -> str:
+    normalized = _norm_str(op) or "="
+    if normalized.lower() in {"contains", "in"}:
+        return normalized.lower()
+    return normalized
+
+
+def _condition_parts_runtime(
+    cond: Dict[str, Any],
+) -> tuple[str, str, Any, bool]:
+    """Lit une condition legacy ou nouvelle sans la rendre permissive."""
+    field = _norm_str(
+        cond.get("field")
+        if cond.get("field") is not None
+        else cond.get("Colonne")
+    )
+
+    raw_op = (
+        cond.get("op")
+        if cond.get("op") is not None
+        else cond.get("Operateur")
+    )
+    op = _normalize_operator(raw_op)
+
+    if "value" in cond:
+        value = cond.get("value")
+        value_present = True
+    elif "Valeur" in cond:
+        value = cond.get("Valeur")
+        value_present = True
+    else:
+        value = None
+        value_present = False
+
+    return field, op, value, value_present
+
+
+def _runtime_condition_is_well_formed(
+    cond: Any,
+) -> bool:
+    """
+    Garde-fou d'exécution.
+
+    Les nouveaux modèles sont validés à la sauvegarde par modele.py, mais
+    ce contrôle empêche un ancien modèle invalide de transformer une
+    condition cassée en branche implicitement vraie.
+    """
+    if not isinstance(cond, dict):
+        return False
+
+    field, op, value, value_present = _condition_parts_runtime(
+        cond
+    )
+
+    if not field:
+        return False
+
+    if op not in _ALLOWED_CONDITION_OPERATORS:
+        return False
+
+    if not value_present:
+        return False
+
+    if isinstance(value, str) and not value.strip():
+        return False
+
+    if op in {">", "<", ">=", "<="}:
+        try:
+            float(value)
+        except (TypeError, ValueError):
+            return False
+
+    if op == "in":
+        if isinstance(value, list):
+            return bool(value)
+        return isinstance(value, str) and bool(value.strip())
+
+    return True
+
+
 def _compare(op: str, left: Any, right: Any) -> bool:
     """
     Compare left <op> right.
-    Supporte:
-      =, ==, !=, <>, >, <, >=, <=, contains, in
+
+    Supporte :
+        =, ==, !=, <>, >, <, >=, <=, contains, in
+
+    Toute erreur de typage/format retourne False : la navigation échoue
+    de façon sûre au lieu d'emprunter une branche par défaut.
     """
-    op = _norm_str(op) or "="
+    op = _normalize_operator(op)
+
+    if op not in _ALLOWED_CONDITION_OPERATORS:
+        return False
+
     try:
         if op in ("=", "=="):
             if isinstance(left, str) or isinstance(right, str):
@@ -97,24 +199,26 @@ def _compare(op: str, left: Any, right: Any) -> bool:
             return left != right
 
         if op in (">", "<", ">=", "<="):
-            lf = float(left)
-            rf = float(right)
+            left_number = float(left)
+            right_number = float(right)
+
             if op == ">":
-                return lf > rf
+                return left_number > right_number
             if op == "<":
-                return lf < rf
+                return left_number < right_number
             if op == ">=":
-                return lf >= rf
-            if op == "<=":
-                return lf <= rf
+                return left_number >= right_number
+            return left_number <= right_number
 
         if op == "contains":
             return _norm_cmp(right) in _norm_cmp(left)
 
         if op == "in":
-            # right peut être list ou string
             if isinstance(right, list):
-                return any(_norm_cmp(left) == _norm_cmp(x) for x in right)
+                return any(
+                    _norm_cmp(left) == _norm_cmp(item)
+                    for item in right
+                )
             return _norm_cmp(left) in _norm_cmp(right)
 
     except Exception:
@@ -159,28 +263,47 @@ def _resolve_field_value(field_label: str, row_cc: Dict[str, Any], resultat_labe
     return row_cc.get(field_label)
 
 
-def conds_ok(conds: List[Dict[str, Any]], row_cc: Dict[str, Any], resultat_label: str) -> bool:
+def conds_ok(
+    conds: List[Dict[str, Any]],
+    row_cc: Dict[str, Any],
+    resultat_label: str,
+) -> bool:
     """
-    Multi-conditions = AND
+    Évalue une liste de conditions en AND.
 
-    Supporte 2 formats:
-      - ancien : {Colonne, Operateur, Valeur}
+    Supporte :
+      - legacy : {Colonne, Operateur, Valeur}
       - nouveau : {field, op, value}
+
+    IMPORTANT :
+    - [] reste True : un lien sans condition est un lien inconditionnel ;
+    - une condition présente mais mal formée retourne False ;
+    - aucune condition invalide n'est ignorée.
     """
-    for c in (conds or []):
-        if not isinstance(c, dict):
-            continue
+    if not isinstance(conds, list):
+        return False
 
-        field = _norm_str(c.get("field") or c.get("Colonne"))
-        op = _norm_str(c.get("op") or c.get("Operateur")) or "="
-        val = c.get("value", c.get("Valeur"))
+    for cond in conds:
+        if not _runtime_condition_is_well_formed(
+            cond
+        ):
+            return False
 
-        if not field:
-            continue
+        field, op, value, _ = _condition_parts_runtime(
+            cond
+        )
 
-        left = _resolve_field_value(field, row_cc, resultat_label)
+        left = _resolve_field_value(
+            field,
+            row_cc,
+            resultat_label,
+        )
 
-        if not _compare(op, left, val):
+        if not _compare(
+            op,
+            left,
+            value,
+        ):
             return False
 
     return True
@@ -198,17 +321,27 @@ def _child_nav_conditions_ok(child: Dict[str, Any], parent_id: str, row_cc: Dict
 
     pid = _norm_str(parent_id)
 
-    conds_global = child.get("Conditions") or []
-    if not isinstance(conds_global, list):
-        conds_global = []
+    raw_global = child.get("Conditions", [])
+    if raw_global is None:
+        raw_global = []
+    if not isinstance(raw_global, list):
+        return False
+    conds_global = raw_global
 
-    cbp = child.get("ConditionsByParent") or {}
-    conds_parent = []
-    if isinstance(cbp, dict) and pid:
-        # clés stockées parfois en str
-        conds_parent = cbp.get(pid) or cbp.get(str(pid)) or []
-    if not isinstance(conds_parent, list):
-        conds_parent = []
+    raw_cbp = child.get("ConditionsByParent", {})
+    if raw_cbp is None:
+        raw_cbp = {}
+    if not isinstance(raw_cbp, dict):
+        return False
+
+    conds_parent: List[Dict[str, Any]] = []
+    if pid:
+        candidate = raw_cbp.get(pid, [])
+        if candidate is None:
+            candidate = []
+        if not isinstance(candidate, list):
+            return False
+        conds_parent = candidate
 
     merged = list(conds_global) + list(conds_parent)
 
