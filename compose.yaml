@@ -9,8 +9,11 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
 
-    ports:
-      - "127.0.0.1:5433:5432"
+    # IMPORTANT:
+    # Aucun port PostgreSQL n'est publié sur l'hôte dans le compose de base.
+    # En production, cela évite toute collision avec un PostgreSQL déjà installé
+    # sur le VPS (typiquement 5432).
+    # En local, compose.local.yaml publie uniquement 127.0.0.1:5433 -> 5432.
 
     volumes:
       - neoimpact_postgres_data:/var/lib/postgresql/data
@@ -24,8 +27,37 @@ services:
         ]
       interval: 5s
       timeout: 5s
-      retries: 10
-      start_period: 5s
+      retries: 20
+      start_period: 10s
+
+  marketing_app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: marketing_app
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    environment:
+      # Le même .env reste utilisable localement avec :
+      #   DATABASE_URL=...@127.0.0.1:5433/...
+      # Dans Docker, on surcharge uniquement cette variable : le nom de service
+      # "postgres" est résolu sur le réseau interne Docker et le port interne
+      # PostgreSQL reste 5432.
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      POSTGRES_PORT: "5432"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    ports:
+      # On conserve les ports applicatifs historiques afin de ne pas modifier
+      # le reverse proxy / les accès déjà en place.
+      - "8000:8000"
+      - "8501:8501"
 
 volumes:
   neoimpact_postgres_data:

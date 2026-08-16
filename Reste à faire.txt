@@ -1,9 +1,9 @@
 Liste des ajouts marketing automation : 
 
-- Migrer de SQLite vers PostgreSQL
+--- Migrer de SQLite vers PostgreSQL
 - Fake data basé sur l'existant + data CDM
 - Création de modèle : segmentation, scoring carte, scoring crédit conso, scoring crédit Immo, scoring compte épargne pour commencer
-- Intégration des scores dans les filtres des campagnes
+- Intégration des scores dans les filtres des campagnes & cibles
 - Création d'un batch hebdomadaire qui met à jour les scores chaque semaine
 - Intégration des retours client dans la data pour le recalcule des scores
 - Création d'une campagne complète

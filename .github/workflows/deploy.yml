@@ -17,9 +17,40 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
+            set -e
+
             cd /opt/apps/marketing-automation/repo
+
             git fetch origin
             git reset --hard origin/main
 
-            cd /opt/apps/marketing-automation
-            docker compose up -d --build
+            # Le même .env est utilisé en local et sur le serveur.
+            # compose.yaml surcharge seulement DATABASE_URL dans le conteneur
+            # applicatif pour joindre PostgreSQL via le réseau Docker.
+            docker compose -f compose.yaml up -d --build --remove-orphans
+
+            echo "Waiting for PostgreSQL..."
+            until docker compose -f compose.yaml exec -T postgres sh -lc \
+              'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+              >/dev/null 2>&1; do
+              sleep 2
+            done
+
+            # 001_schema.sql est uniquement exécuté automatiquement par l'image
+            # PostgreSQL lors de la création initiale du volume.
+            # Les migrations suivantes sont rejouées à chaque déploiement et
+            # doivent donc rester idempotentes (IF NOT EXISTS, etc.).
+            for migration in database/init/*.sql; do
+              [ -f "$migration" ] || continue
+
+              if [ "$(basename "$migration")" = "001_schema.sql" ]; then
+                continue
+              fi
+
+              echo "Applying migration: $migration"
+              docker compose -f compose.yaml exec -T postgres sh -lc \
+                'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+                < "$migration"
+            done
+
+            docker compose -f compose.yaml ps
