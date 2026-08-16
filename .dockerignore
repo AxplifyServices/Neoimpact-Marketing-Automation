@@ -9,3 +9,6 @@ venv/
 .idea/
 .vscode/
 .DS_Store
+
+# Frontend has its own Docker build context.
+campain-app-main/

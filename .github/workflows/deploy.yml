@@ -24,34 +24,28 @@ jobs:
             git fetch origin
             git reset --hard origin/main
 
-            # Transition depuis l'ancien déploiement :
-            # l'ancien conteneur marketing_app peut appartenir à un autre
-            # projet Docker Compose et ne sera donc pas supprimé par
-            # --remove-orphans du nouveau projet.
-            #
-            # On ne touche qu'au conteneur applicatif historique.
-            # Le PostgreSQL installé nativement sur le VPS n'est pas concerné.
-            if docker ps -a --format '{{.Names}}' | grep -qx 'marketing_app'; then
-              echo "Removing legacy marketing_app container..."
-              docker rm -f marketing_app
-            fi
+            # Transition depuis un éventuel ancien projet Compose.
+            for container in marketing_app marketing_frontend neoimpact-postgres; do
+              if docker ps -a --format '{{.Names}}' | grep -qx "$container"; then
+                project="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project" }}' "$container" 2>/dev/null || true)"
+                if [ "$project" != "repo" ]; then
+                  echo "Removing legacy container: $container"
+                  docker rm -f "$container"
+                fi
+              fi
+            done
 
-            # Build + démarrage de l'application et du PostgreSQL Docker.
-            # PostgreSQL n'expose aucun port hôte dans compose.yaml.
-            docker compose -f compose.yaml up -d --build --remove-orphans
+            # Même principe que le projet Hire :
+            # Traefik route directement les conteneurs via traefik-public.
+            docker compose -f docker-compose.prod.yml up -d --build --force-recreate --remove-orphans
 
             echo "Waiting for PostgreSQL..."
-            until docker compose -f compose.yaml exec -T postgres sh -lc \
-              'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
-              >/dev/null 2>&1; do
+            until docker compose -f docker-compose.prod.yml exec -T postgres sh -lc               'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'               >/dev/null 2>&1; do
               sleep 2
             done
 
-            # 001_schema.sql est exécuté automatiquement uniquement lors de
-            # l'initialisation d'un volume PostgreSQL neuf.
-            #
-            # Les migrations suivantes doivent rester idempotentes car elles
-            # sont rejouées à chaque déploiement.
+            # 001_schema.sql est exécuté automatiquement seulement
+            # lors de l'initialisation d'un volume PostgreSQL neuf.
             for migration in database/init/*.sql; do
               [ -f "$migration" ] || continue
 
@@ -61,10 +55,20 @@ jobs:
 
               echo "Applying migration: $migration"
 
-              docker compose -f compose.yaml exec -T postgres sh -lc \
-                'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
-                < "$migration"
+              docker compose -f docker-compose.prod.yml exec -T postgres sh -lc                 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'                 < "$migration"
             done
 
+            echo "Checking backend..."
+            docker compose -f docker-compose.prod.yml exec -T marketing_app               curl -fsS http://127.0.0.1:8000/api/health
+
+            echo "Checking frontend..."
+            docker compose -f docker-compose.prod.yml exec -T marketing_frontend               wget -q -O - http://127.0.0.1/health
+
             echo "Deployment status:"
-            docker compose -f compose.yaml ps
+            docker compose -f docker-compose.prod.yml ps
+
+            echo "Backend logs:"
+            docker logs marketing_app --tail 50
+
+            echo "Frontend logs:"
+            docker logs marketing_frontend --tail 50

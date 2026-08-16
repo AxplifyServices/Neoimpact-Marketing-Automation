@@ -24,10 +24,14 @@ from app.batch.scheduler import start_batch_scheduler, stop_batch_scheduler
 API_PREFIX = "/api"
 
 ALLOWED_ORIGINS = [
+    "https://marketing-automation.axplitest.com",
+    # Anciens frontends conservés temporairement pour compatibilité.
     "https://campain.dev.swiftnova.ma",
     "https://campain.swiftnova.ma",
+    # Développement local.
     "http://localhost:3000",
     "http://localhost:5173",
+    "http://localhost:8081",
 ]
 
 

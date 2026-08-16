@@ -1,5 +1,11 @@
 cd OneDrive\Bureau\Projet Dev\Marketing_automation_V2
 
+**Front : 
+
+cd OneDrive\Bureau\Projet Dev\Marketing_automation_V2\campain-app-main
+npm run dev
+
+
 .\.venv\Scripts\Activate
 
 streamlit run app/streamlit/Consolide_int.py
@@ -7,13 +13,10 @@ streamlit run app/streamlit/Consolide_int.py
 serv :ssh ubuntu@51.75.252.139
 Code serveur : zitanezac
 
-http://vps-2fd6dcaa.vps.ovh.net/
-
 cd /opt/apps
 
 Liens : 
 
-http://51.75.252.139:8501/
 http://51.75.252.139:8000/docs
 
 Lancer un script : 

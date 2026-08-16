@@ -3,15 +3,16 @@ services:
     image: postgres:17
     container_name: neoimpact-postgres
     restart: unless-stopped
+
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    ports:
-      - "127.0.0.1:5433:5432"
+
     volumes:
       - neoimpact_postgres_data:/var/lib/postgresql/data
       - ./database/init:/docker-entrypoint-initdb.d:ro
+
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
@@ -19,22 +20,38 @@ services:
       retries: 20
       start_period: 10s
 
+    networks:
+      - marketing-db
+
   marketing_app:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: marketing_app
     restart: unless-stopped
+
     env_file:
       - .env
+
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       POSTGRES_PORT: "5432"
+
     depends_on:
       postgres:
         condition: service_healthy
-    ports:
-      - "8000:8000"
+
+    networks:
+      - marketing-db
+      - traefik-public
+
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-public"
+      - "traefik.http.routers.marketing-automation-api.rule=Host(`marketing-automation-api.axplitest.com`)"
+      - "traefik.http.routers.marketing-automation-api.entrypoints=websecure"
+      - "traefik.http.routers.marketing-automation-api.tls.certresolver=letsencrypt"
+      - "traefik.http.services.marketing-automation-api.loadbalancer.server.port=8000"
 
   marketing_frontend:
     build:
@@ -45,10 +62,26 @@ services:
         VITE_AUTH_URL: https://marketing-automation-api.axplitest.com/api
     container_name: marketing_frontend
     restart: unless-stopped
+
     depends_on:
       - marketing_app
-    ports:
-      - "8081:80"
+
+    networks:
+      - traefik-public
+
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-public"
+      - "traefik.http.routers.marketing-automation-frontend.rule=Host(`marketing-automation.axplitest.com`)"
+      - "traefik.http.routers.marketing-automation-frontend.entrypoints=websecure"
+      - "traefik.http.routers.marketing-automation-frontend.tls.certresolver=letsencrypt"
+      - "traefik.http.services.marketing-automation-frontend.loadbalancer.server.port=80"
+
+networks:
+  marketing-db:
+    driver: bridge
+  traefik-public:
+    external: true
 
 volumes:
   neoimpact_postgres_data:
