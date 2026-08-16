@@ -148,7 +148,7 @@ def _recompute_nb_jour_debut_campagne(conn: RuntimeConnection) -> int:
             WHEN COALESCE(date_debut_campagne,'') = '' THEN nb_jour_debut_campagne
             ELSE (?::date - SUBSTRING(date_debut_campagne FROM 1 FOR 10)::date)
         END
-        WHERE COALESCE(Etat_campagne,'') IN ('En cours','Planifiée','En pause')
+        WHERE COALESCE(Etat_campagne,'') = 'En cours'
         """,
         (today_iso,),
     )
@@ -239,25 +239,20 @@ def _list_active_campaigns(
     campagnes: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """
-    Retourne les campagnes devant être prises en charge par le batch.
+    Retourne uniquement les campagnes réellement actives.
 
-    États concernés :
-    - En cours
-    - Planifiée
-    - En pause
-
-    Une campagne en pause reste chargée pour les traitements techniques
-    compatibles, mais ne doit pas être routée comme une campagne en cours.
+    Une campagne :
+    - Planifiée : attend sa date de démarrage ;
+    - En pause   : aucun workflow ne doit progresser ;
+    - Terminée / Annulée : aucun traitement métier ;
+    - En cours   : seule campagne traitée par le moteur.
     """
-    active_campaigns: List[Dict[str, Any]] = []
 
-    for campagne in campagnes:
-        etat = _get_campaign_state(campagne)
-
-        if etat in ("En cours", "Planifiée", "En pause"):
-            active_campaigns.append(campagne)
-
-    return active_campaigns
+    return [
+        campagne
+        for campagne in campagnes
+        if _get_campaign_state(campagne) == "En cours"
+    ]
 
 
 def _load_modele_meta(conn: RuntimeConnection, id_modele: str) -> Tuple[List[Dict[str, Any]]]:
@@ -395,10 +390,44 @@ def _update_campaigns_status_from_dates(
             continue
 
         if etat == "Planifiée" and date_debut <= today <= date_fin:
-            update_etat(id_campagne, "En cours")
-            set_clients_etat_for_campagne(id_campagne, "En cours")
+            update_etat(
+                id_campagne,
+                "En cours",
+            )
+
+            set_clients_etat_for_campagne(
+                id_campagne,
+                "En cours",
+            )
+
+            # Le temps opérationnel démarre réellement aujourd'hui.
+            conn = connect_runtime()
+
+            try:
+                cur = conn.cursor()
+
+                cur.execute(
+                    f"""
+                    UPDATE {CLIENTS_CAMPAGNES_TABLE}
+                    SET
+                        Date_last_action = ?,
+                        NB_jour_last_action = 0,
+                        nb_jour_debut_campagne = 0
+                    WHERE ID_CAMPAGNE = ?
+                    """,
+                    (
+                        today.isoformat(),
+                        id_campagne,
+                    ),
+                )
+
+                conn.commit()
+
+            finally:
+                conn.close()
+
             counts["to_en_cours"] += 1
-            continue
+            continue    
 
         if etat == "En cours" and date_fin < today:
             update_etat(id_campagne, "Terminée")
@@ -418,7 +447,7 @@ def _recompute_nb_jour_last_action(conn: RuntimeConnection) -> int:
             WHEN COALESCE(Date_last_action,'') = '' THEN 0
             ELSE (?::date - SUBSTRING(Date_last_action FROM 1 FOR 10)::date)
         END
-        WHERE COALESCE(Etat_campagne,'') IN ('En cours','Planifiée', 'En pause')
+        WHERE COALESCE(Etat_campagne,'') = 'En cours'
         """,
         (today_iso,),
     )
@@ -447,8 +476,8 @@ def _advance_en_attente_rows(conn: RuntimeConnection, id_campagne: str, liste_ac
         SELECT rowid as __rid, *
         FROM {CLIENTS_CAMPAGNES_TABLE}
         WHERE ID_CAMPAGNE = ?
-          AND COALESCE(Etat_campagne,'') IN ('En cours','Planifiée', 'En pause')
-          AND COALESCE(Action,'') IN ('En attente', 'Objectif')
+            AND COALESCE(Etat_campagne,'') = 'En cours'
+            AND COALESCE(Action,'') IN ('En attente', 'Objectif')
         """,
         (id_campagne,),
     )
@@ -580,7 +609,7 @@ def _update_arriv_eche_for_campaign(
         SELECT rowid as __rid, ID_Action, Action, Etat_campagne, Resultat_last_action, NB_jour_last_action, arriv_eche
         FROM {CLIENTS_CAMPAGNES_TABLE}
         WHERE ID_CAMPAGNE = ?
-          AND COALESCE(Etat_campagne,'') IN ('En cours','Planifiée','En pause')
+            AND COALESCE(Etat_campagne,'') = 'En cours'
         """,
         (id_campagne,),
     )

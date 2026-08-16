@@ -687,25 +687,29 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
     if new_etat == "En cours":
         # NEW: sync nouveaux clients depuis la cible (INSERT ONLY) avant mail/rebuild
         try:
-            id_cible = _norm_str(c.get("id_cible") or c.get("ID_CIBLE") or c.get("cible_id"))
-            if id_cible:
-                from app.batch.batch_manuel import sync_new_clients_from_cible_insert_only
+            conn = connect_runtime()
+            try:
+                sync_result = sync_new_clients_from_cible_for_campaign(
+                    conn,
+                    id_campagne,
+                )
 
-                conn = connect_runtime()
-                try:
-                    new_clients_added = sync_new_clients_from_cible_insert_only(
-                        conn,
-                        id_campagne=_norm_str(id_campagne),
-                        id_cible=id_cible,
-                        id_action_initiale="2",
-                        canal_initial="Appel",
-                        action_initial="Appeler",
+                if sync_result.get("ok"):
+                    new_clients_added = int(
+                        sync_result.get("new_clients_campagne") or 0
                     )
                     conn.commit()
-                finally:
-                    conn.close()
+                else:
+                    new_clients_added = 0
+                    conn.rollback()
 
-                set_clients_etat_for_campagne(id_campagne, new_etat)
+            finally:
+                conn.close()
+
+            set_clients_etat_for_campagne(
+                id_campagne,
+                new_etat,
+            )
 
         except Exception:
             new_clients_added = 0
