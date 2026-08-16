@@ -517,31 +517,31 @@ def _advance_en_attente_rows(
 
     cur.execute(
         f"""
-        SELECT rowid AS __rid, *
-        FROM {CLIENTS_CAMPAGNES_TABLE}
-        WHERE ID_CAMPAGNE = ?
-          AND COALESCE(Etat_campagne,'') = 'En cours'
-          AND COALESCE(conversion, 0) <> 1
-          AND COALESCE(Action,'') IN ('En attente', 'Objectif')
+        SELECT
+            cc.rowid AS __rid,
+            cc.*,
+            to_jsonb(cl) AS __client_row
+        FROM {CLIENTS_CAMPAGNES_TABLE} cc
+        LEFT JOIN {CLIENTS_TABLE} cl
+          ON cl.radical_compte = cc.Radical_compte
+        WHERE cc.ID_CAMPAGNE = ?
+          AND COALESCE(cc.Etat_campagne,'') = 'En cours'
+          AND COALESCE(cc.conversion, 0) <> 1
+          AND COALESCE(cc.Action,'') IN ('En attente', 'Objectif')
         """,
         (id_campagne,),
     )
 
     rows = [dict(row) for row in cur.fetchall()]
     changed = 0
-    client_cache: Dict[str, Dict[str, Any]] = {}
 
     for row in rows:
         rid = int(row["__rid"])
         id_action = _norm_str(row.get("ID_Action"))
 
-        rc = _norm_str(
-            row.get("Radical_compte") or row.get("radical_compte")
-        )
-        if rc:
-            if rc not in client_cache:
-                client_cache[rc] = _load_client_row_by_radical(conn, rc)
-            _inject_client_fields(row, client_cache.get(rc, {}))
+        client_row = row.pop("__client_row", None)
+        if isinstance(client_row, dict):
+            _inject_client_fields(row, client_row)
 
         current = find_bloc_by_id(liste_action, id_action)
         if not current:
@@ -653,61 +653,123 @@ def _update_arriv_eche_for_campaign(
     id_campagne: str,
     liste_action: List[Dict[str, Any]],
 ) -> int:
+    """
+    Calcule arriv_eche en bulk PostgreSQL.
+
+    La règle métier historique ne dépend ici que de NB_jour_last_action :
+    une échéance vaut Oui si une condition enfant sur ce compteur est déjà
+    satisfaite ou se trouve à +/- 1 jour. On transforme cette règle en
+    prédicats SQL par bloc au lieu de parcourir chaque client Python.
+    """
     if not id_campagne or not isinstance(liste_action, list) or not liste_action:
         return 0
 
     cur = conn.cursor()
+    changed = 0
+
+    # Valeur par défaut, et conversion toujours terminale/non échue.
     cur.execute(
         f"""
-        SELECT
-            rowid AS __rid,
-            ID_Action,
-            Action,
-            Etat_campagne,
-            Resultat_last_action,
-            NB_jour_last_action,
-            arriv_eche,
-            conversion
-        FROM {CLIENTS_CAMPAGNES_TABLE}
+        UPDATE {CLIENTS_CAMPAGNES_TABLE}
+        SET arriv_eche = 'Non'
         WHERE ID_CAMPAGNE = ?
           AND COALESCE(Etat_campagne,'') = 'En cours'
+          AND COALESCE(arriv_eche,'') <> 'Non'
         """,
         (id_campagne,),
     )
+    changed += int(cur.rowcount or 0)
 
-    rows = [dict(row) for row in cur.fetchall()]
-    changed = 0
+    def _children(parent_id: str) -> List[Dict[str, Any]]:
+        parent = find_bloc_by_id(liste_action, parent_id) or {}
+        children = parent.get("Fils")
+        if isinstance(children, list) and children:
+            return [x for x in children if isinstance(x, dict)]
+        out: List[Dict[str, Any]] = []
+        for b in liste_action:
+            if not isinstance(b, dict):
+                continue
+            parents = b.get("Parents")
+            if isinstance(parents, list) and parent_id in {_norm_str(x) for x in parents}:
+                out.append(b)
+                continue
+            legacy = b.get("Bloc_mere") if b.get("Bloc_mere") is not None else b.get("Bloc_mère")
+            if _norm_str(legacy) == parent_id:
+                out.append(b)
+        return out
 
-    for row in rows:
-        rid = int(row.get("__rid") or 0)
-        if rid <= 0:
+    def _deadline_predicates(parent_id: str) -> tuple[List[str], List[Any]]:
+        predicates: List[str] = []
+        params: List[Any] = []
+        for child in _children(parent_id):
+            conds = child.get("Conditions") or []
+            if not isinstance(conds, list):
+                conds = []
+            cbp = child.get("ConditionsByParent") or {}
+            parent_conds = []
+            if isinstance(cbp, dict):
+                parent_conds = cbp.get(parent_id) or cbp.get(str(parent_id)) or []
+            if not isinstance(parent_conds, list):
+                parent_conds = []
+
+            for c in list(conds) + list(parent_conds):
+                if not isinstance(c, dict):
+                    continue
+                field = _norm_str(c.get("field") or c.get("Colonne"))
+                if _norm_cmp(field) not in (
+                    _norm_cmp("NB jours depuis last action"),
+                    _norm_cmp("NB_jour_last_action"),
+                ):
+                    continue
+                op = _norm_str(c.get("op") or c.get("Operateur")) or "="
+                raw = c.get("value", c.get("Valeur"))
+                try:
+                    target = float(raw)
+                except Exception:
+                    continue
+
+                # Condition satisfaite OU distance à la valeur <= 1.
+                if op in ("=", "=="):
+                    predicates.append("ABS(COALESCE(NB_jour_last_action,0)::double precision - ?) <= 1")
+                    params.append(target)
+                elif op in ("!=", "<>"):
+                    # != est vraie partout sauf exactement target, et le cas exact
+                    # est malgré tout à distance 0 <= 1 : donc toujours Oui.
+                    predicates.append("TRUE")
+                elif op in (">", ">="):
+                    predicates.append("COALESCE(NB_jour_last_action,0)::double precision >= ?")
+                    params.append(target - 1.0)
+                elif op in ("<", "<="):
+                    predicates.append("COALESCE(NB_jour_last_action,0)::double precision <= ?")
+                    params.append(target + 1.0)
+        return predicates, params
+
+    for bloc in liste_action:
+        if not isinstance(bloc, dict):
             continue
-
-        try:
-            converted = int(row.get("conversion") or 0) == 1
-        except Exception:
-            converted = False
-
-        if converted:
-            new_flag = "Non"
-        else:
-            id_action = _norm_str(row.get("ID_Action"))
-            current = find_bloc_by_id(liste_action, id_action)
-            new_flag = (
-                "Non"
-                if not current
-                else arrive_echeance(liste_action, current, row)
-            )
-
-        if _norm_str(row.get("arriv_eche")) != _norm_str(new_flag):
-            cur.execute(
-                f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET arriv_eche = ? WHERE rowid = ?",
-                (new_flag, rid),
-            )
-            changed += int(cur.rowcount or 0)
+        block_id = _norm_str(bloc.get("ID"))
+        if not block_id:
+            continue
+        predicates, params = _deadline_predicates(block_id)
+        if not predicates:
+            continue
+        where_deadline = " OR ".join(f"({p})" for p in predicates)
+        cur.execute(
+            f"""
+            UPDATE {CLIENTS_CAMPAGNES_TABLE}
+            SET arriv_eche = 'Oui'
+            WHERE ID_CAMPAGNE = ?
+              AND COALESCE(Etat_campagne,'') = 'En cours'
+              AND COALESCE(conversion,0) <> 1
+              AND ID_Action = ?
+              AND ({where_deadline})
+              AND COALESCE(arriv_eche,'') <> 'Oui'
+            """,
+            [id_campagne, block_id, *params],
+        )
+        changed += int(cur.rowcount or 0)
 
     return int(changed)
-
 
 def _rebuild_outputs_for_all_en_cours(
     conn: RuntimeConnection,
@@ -732,6 +794,8 @@ def _rebuild_outputs_for_all_en_cours(
     n_crc = 0
     n_da = 0
     n_cc = 0
+    n_external_queued = 0
+    n_external_pending = 0
     n_external_sent = 0
     n_external_errors = 0
 
@@ -754,6 +818,8 @@ def _rebuild_outputs_for_all_en_cours(
 
         if type_campagne == "avec_action_terrain":
             dispatch = dispatch_pending_visits_for_campaign(id_campagne)
+            n_external_queued += int(dispatch.get("queued") or 0)
+            n_external_pending += int(dispatch.get("pending") or 0)
             n_external_sent += int(dispatch.get("sent") or 0)
             n_external_errors += int(dispatch.get("errors") or 0)
         else:
@@ -768,6 +834,8 @@ def _rebuild_outputs_for_all_en_cours(
         "crc_input": n_crc,
         "vers_da": n_da,
         "vers_cc": n_cc,
+        "external_visit_queued": n_external_queued,
+        "external_visit_pending": n_external_pending,
         "external_visit_sent": n_external_sent,
         "external_visit_errors": n_external_errors,
     }
@@ -818,6 +886,8 @@ def run_batch_manuel() -> Dict[str, Any]:
             "crc_input": 0,
             "vers_da": 0,
             "vers_cc": 0,
+            "external_visit_queued": 0,
+            "external_visit_pending": 0,
             "external_visit_sent": 0,
             "external_visit_errors": 0,
         },

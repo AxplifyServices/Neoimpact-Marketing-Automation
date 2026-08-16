@@ -215,15 +215,9 @@ def insert_client_if_new(data: Dict[str, Any]) -> Tuple[bool, str]:
                 if cur.fetchone():
                     return False, f"ID_Client '{required_id}' existe déjà."
 
-                cur.execute(
-                    """
-                    SELECT MAX(CAST(SUBSTRING(radical_compte FROM 3) AS BIGINT))
-                    FROM clients
-                    WHERE radical_compte ~ '^RC[0-9]+$'
-                    """
-                )
+                cur.execute("SELECT nextval('client_radical_seq')")
                 row = cur.fetchone()
-                next_num = int((row[0] if row else None) or 0) + 1
+                next_num = int(row[0])
                 radical = f"RC{next_num:08d}"
                 clean["radical_compte"] = radical
 

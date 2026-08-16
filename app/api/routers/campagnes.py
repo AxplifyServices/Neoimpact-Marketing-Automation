@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
+import logging
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -25,7 +26,9 @@ from app.domain.campagne_service import (
     activer_campagne as _activer_campagne,
 )
 
-from app.domain.terrain_visit_webhook import dispatch_pending_visits_for_campaign
+from app.domain.terrain_visit_webhook import dispatch_pending_visits_for_campaign, get_terrain_dispatch_status
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -212,6 +215,7 @@ def create_campagne_endpoint(payload: CampagneCreateIn):
             visitPurpose=payload.visitPurpose,
         )
     except Exception as e:
+        logger.exception("Échec de création de campagne")
         raise HTTPException(status_code=400, detail=str(e))
 
 
@@ -260,6 +264,11 @@ def dispatch_terrain_for_campaign(id_campagne: str):
         return dispatch_pending_visits_for_campaign(id_campagne)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/campagnes/{id_campagne}/dispatch-terrain/status")
+def dispatch_terrain_status(id_campagne: str):
+    return {"ok": True, "dispatch": get_terrain_dispatch_status(id_campagne)}
     
 # =========================================================
 # Endpoints META (additifs -> ne cassent rien)

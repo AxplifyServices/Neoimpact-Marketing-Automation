@@ -263,6 +263,8 @@ def _route_outputs_for_campaign_bulk(
 
     if _norm_str(type_campagne) == "avec_action_terrain":
         dispatch = dispatch_pending_visits_for_campaign(id_campagne)
+        counts["external_visit_queued"] = int(dispatch.get("queued") or 0)
+        counts["external_visit_pending"] = int(dispatch.get("pending") or 0)
         counts["external_visit_sent"] = int(dispatch.get("sent") or 0)
         counts["external_visit_skipped"] = int(dispatch.get("skipped") or 0)
         counts["external_visit_errors"] = int(dispatch.get("errors") or 0)

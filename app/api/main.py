@@ -20,6 +20,7 @@ from app.api.routers.modeles import router as modeles_router
 from app.api.routers.queues import router as queues_router
 from app.api.routers.terrain_queues import router as terrain_queues_router
 from app.batch.scheduler import start_batch_scheduler, stop_batch_scheduler
+from app.domain.terrain_visit_webhook import start_terrain_dispatch_worker, stop_terrain_dispatch_worker
 
 API_PREFIX = "/api"
 
@@ -40,10 +41,12 @@ async def lifespan(app: FastAPI):
     """Cycle de vie API : démarre et arrête le scheduler quotidien."""
     _ = app
     start_batch_scheduler()
+    start_terrain_dispatch_worker()
 
     try:
         yield
     finally:
+        stop_terrain_dispatch_worker()
         stop_batch_scheduler()
 
 
