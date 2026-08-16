@@ -5,7 +5,7 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.scripts.batch_manuel import run_batch_manuel
+from app.batch.batch_manuel import run_batch_manuel
 
 router = APIRouter()
 

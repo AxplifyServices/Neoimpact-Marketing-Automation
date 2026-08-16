@@ -14,7 +14,7 @@ from app.engine.crc_engine import (
     list_gestionnaires_in_queue,
     get_queue_counts_by_gestionnaire,
 )
-from app.scripts.batch_manuel import run_batch_manuel
+from app.batch.batch_manuel import run_batch_manuel
 
 # ✅ façade UI : plus de sqlite3 / DB_PATH dans le front
 from app.domain.ui_facades.da_ui_facade import get_da_context_from_db

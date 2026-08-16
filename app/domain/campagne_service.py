@@ -692,7 +692,7 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
         try:
             id_cible = _norm_str(c.get("id_cible") or c.get("ID_CIBLE") or c.get("cible_id"))
             if id_cible:
-                from app.scripts.batch_manuel import sync_new_clients_from_cible_insert_only
+                from app.batch.batch_manuel import sync_new_clients_from_cible_insert_only
 
                 conn = sqlite3.connect(DB_PATH)
                 try:

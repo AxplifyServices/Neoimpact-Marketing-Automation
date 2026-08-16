@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from app.scripts.batch_manuel import run_batch_manuel
+from app.batch.batch_manuel import run_batch_manuel
 from app.streamlit.CRC_int import main as crc_main
 from app.streamlit.DA_int import main as da_main
 from app.streamlit.CC_int import main as cc_main
