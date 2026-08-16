@@ -58,11 +58,47 @@ jobs:
               docker compose -f docker-compose.prod.yml exec -T postgres sh -lc                 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'                 < "$migration"
             done
 
-            echo "Checking backend..."
-            docker compose -f docker-compose.prod.yml exec -T marketing_app               curl -fsS http://127.0.0.1:8000/api/health
+            echo "Waiting for backend health..."
+            backend_ok=0
+            for i in $(seq 1 30); do
+              if docker compose -f docker-compose.prod.yml exec -T marketing_app                 curl -fsS http://127.0.0.1:8000/api/health >/dev/null 2>&1; then
+                backend_ok=1
+                break
+              fi
+              sleep 2
+            done
 
-            echo "Checking frontend..."
-            docker compose -f docker-compose.prod.yml exec -T marketing_frontend               wget -q -O - http://127.0.0.1/health
+            if [ "$backend_ok" -ne 1 ]; then
+              echo "Backend did not become healthy."
+              echo "Backend container status:"
+              docker compose -f docker-compose.prod.yml ps marketing_app || true
+              echo "Backend logs:"
+              docker logs marketing_app --tail 200 || true
+              exit 1
+            fi
+
+            echo "Backend is healthy."
+
+            echo "Waiting for frontend health..."
+            frontend_ok=0
+            for i in $(seq 1 30); do
+              if docker compose -f docker-compose.prod.yml exec -T marketing_frontend                 wget -q -O - http://127.0.0.1/health >/dev/null 2>&1; then
+                frontend_ok=1
+                break
+              fi
+              sleep 2
+            done
+
+            if [ "$frontend_ok" -ne 1 ]; then
+              echo "Frontend did not become healthy."
+              echo "Frontend container status:"
+              docker compose -f docker-compose.prod.yml ps marketing_frontend || true
+              echo "Frontend logs:"
+              docker logs marketing_frontend --tail 200 || true
+              exit 1
+            fi
+
+            echo "Frontend is healthy."
 
             echo "Deployment status:"
             docker compose -f docker-compose.prod.yml ps
