@@ -15,8 +15,8 @@ from app.domain.ui_facades.campagne_ui_facade import (
     get_modele_graph_payload_for_ui,
 )
 
-# KPI dashboard (réutilisation existant)
-import app.domain.dashboard_kpis as dashboard_kpis
+# KPI légers pour la liste des campagnes : agrégés directement par PostgreSQL.
+from app.storage.postgres_db import connection
 
 # Actions campagne (cycle de vie + création)
 from app.domain.campagne_service import (
@@ -69,46 +69,106 @@ def _to_int(v: Any) -> int:
         return 0
 
 
-def _get_dashboard_kpis_for_campaign(id_campagne: str) -> Dict[str, Any]:
-    """
-    Utilise STRICTEMENT l'existant:
-      - dashboard_kpis.DashboardFilters
-      - dashboard_kpis.compute_dashboard_payload
-
-    Mapping:
-      nb_attribues      <- transmis
-      nb_contactes      <- contactes_total
-      nb_conversions    <- closing_total   (⚠️ si tu as déjà migré dashboard_kpis vers conversion,
-                                            laisse la clé de sortie "nb_conversions" identique
-                                            pour ne pas casser le front)
-      nb_en_traitement  <- traitements_total
-      nb_arriv_eche     <- arriv_eche
-    """
-    if not id_campagne:
-        return {
-            "nb_attribues": 0,
-            "nb_conversions": 0,
-            "nb_contactes": 0,
-            "nb_en_traitement": 0,
-            "nb_arriv_eche": 0,
-        }
-
-    try:
-        filters = dashboard_kpis.DashboardFilters(campagne_ids=[id_campagne])
-        payload = dashboard_kpis.compute_dashboard_payload(filters) or {}
-        k = (payload.get("kpis") or {}) if isinstance(payload, dict) else {}
-    except Exception:
-        # ne jamais casser l'API si le dashboard a un souci
-        k = {}
-
+def _empty_campaign_kpis() -> Dict[str, int]:
     return {
-        "nb_attribues": _to_int(k.get("transmis", 0)),
-        "nb_conversions": _to_int(k.get("closing_total", 0)),
-        "nb_contactes": _to_int(k.get("contactes_total", 0)),
-        "nb_en_traitement": _to_int(k.get("traitements_total", 0)),
-        "nb_arriv_eche": _to_int(k.get("arriv_eche", 0)),
+        "nb_attribues": 0,
+        "nb_conversions": 0,
+        "nb_contactes": 0,
+        "nb_en_traitement": 0,
+        "nb_arriv_eche": 0,
     }
 
+
+def _get_dashboard_kpis_for_campaign_ids(
+    campagne_ids: list[str],
+) -> Dict[str, Dict[str, int]]:
+    """
+    KPI compacts de la liste des campagnes, calculés 100% dans PostgreSQL.
+
+    IMPORTANT PERFORMANCE:
+    - aucune ligne clients_campagnes n'est matérialisée en Python;
+    - aucun DataFrame Pandas;
+    - une seule requête GROUP BY pour toutes les campagnes de la page.
+
+    Les définitions restent alignées avec dashboard_kpis.compute_kpis_compact:
+      nb_attribues      = nombre historique de lignes clients_campagnes
+      nb_contactes      = client ayant au moins un compteur canal > 0
+      nb_conversions    = conversion = 1
+      nb_en_traitement  = somme des compteurs de traitements par canal
+      nb_arriv_eche     = arriv_eche = 'Oui'
+
+    Comme le dashboard historique, les campagnes Annulées ne contribuent pas
+    à ces KPI.
+    """
+    ids = [_norm_str(x) for x in campagne_ids if _norm_str(x)]
+    if not ids:
+        return {}
+
+    placeholders = ", ".join(["%s"] * len(ids))
+
+    treatment_expr = """
+        COALESCE(cc."NB_appel", 0)
+      + COALESCE(cc."NB_mail", 0)
+      + COALESCE(cc."NB_sms", 0)
+      + COALESCE(cc."NB_message", 0)
+      + COALESCE(cc."NB_da", 0)
+      + COALESCE(cc."NB_cc", 0)
+      + COALESCE(cc."NB_push", 0)
+    """
+
+    query = f"""
+        SELECT
+            cc."ID_CAMPAGNE" AS id_campagne,
+            COUNT(*) AS nb_attribues,
+            COUNT(*) FILTER (
+                WHERE ({treatment_expr}) > 0
+            ) AS nb_contactes,
+            COUNT(*) FILTER (
+                WHERE COALESCE(cc.conversion, 0) = 1
+            ) AS nb_conversions,
+            COALESCE(SUM({treatment_expr}), 0) AS nb_en_traitement,
+            COUNT(*) FILTER (
+                WHERE LOWER(TRIM(COALESCE(cc.arriv_eche, ''))) = 'oui'
+            ) AS nb_arriv_eche
+        FROM clients_campagnes AS cc
+        INNER JOIN campagnes AS c
+            ON c.id_campagne = cc."ID_CAMPAGNE"
+        WHERE cc."ID_CAMPAGNE" IN ({placeholders})
+          AND COALESCE(c.etat_campagne, '') IN (
+              'Planifiée',
+              'En cours',
+              'En pause',
+              'Terminée'
+          )
+        GROUP BY cc."ID_CAMPAGNE"
+    """
+
+    result: Dict[str, Dict[str, int]] = {}
+    with connection(dict_rows=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, ids)
+            for row in cur.fetchall():
+                cid = _norm_str(row.get("id_campagne"))
+                if not cid:
+                    continue
+                result[cid] = {
+                    "nb_attribues": _to_int(row.get("nb_attribues")),
+                    "nb_conversions": _to_int(row.get("nb_conversions")),
+                    "nb_contactes": _to_int(row.get("nb_contactes")),
+                    "nb_en_traitement": _to_int(row.get("nb_en_traitement")),
+                    "nb_arriv_eche": _to_int(row.get("nb_arriv_eche")),
+                }
+
+    return result
+
+
+def _get_dashboard_kpis_for_campaign(id_campagne: str) -> Dict[str, int]:
+    if not _norm_str(id_campagne):
+        return _empty_campaign_kpis()
+    return _get_dashboard_kpis_for_campaign_ids([id_campagne]).get(
+        _norm_str(id_campagne),
+        _empty_campaign_kpis(),
+    )
 
 def _enrich_campaign_with_kpis(c: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(c)
@@ -164,12 +224,13 @@ def list_campagnes(
                 if cid and cid not in base_by_id:
                     base_by_id[cid] = c
 
-        all_items = [_enrich_campaign_with_kpis(c) for c in base_by_id.values()]
+        all_items = list(base_by_id.values())
     else:
-        all_c = list_all_campagnes() or []
-        all_items = [_enrich_campaign_with_kpis(c) for c in all_c]
+        all_items = list_all_campagnes() or []
 
-    # ---------- 2) Pagination "pages" ----------
+    # ---------- 2) Pagination AVANT les KPI ----------
+    # On ne calcule jamais les KPI de campagnes qui ne sont pas présentes
+    # dans la page demandée.
     page_start = int(offset or 0)
     per_page = int(limit or 500)
     nb_pages = int(pages or 1)
@@ -177,7 +238,28 @@ def list_campagnes(
     start = page_start * per_page
     end = start + (per_page * nb_pages)
 
-    page_items = all_items[start:end]
+    page_base_items = all_items[start:end]
+
+    # ---------- 3) Une seule agrégation SQL pour toute la page ----------
+    page_ids = [
+        _norm_str(c.get("id_campagne") or c.get("ID_CAMPAGNE"))
+        for c in page_base_items
+    ]
+    kpis_by_campaign = _get_dashboard_kpis_for_campaign_ids(page_ids)
+
+    page_items = []
+    for campaign in page_base_items:
+        out = dict(campaign)
+        cid = _norm_str(out.get("id_campagne") or out.get("ID_CAMPAGNE"))
+        out.update(kpis_by_campaign.get(cid, _empty_campaign_kpis()))
+
+        if "etat" not in out:
+            if "etat_campagne" in out:
+                out["etat"] = out.get("etat_campagne")
+            elif "Etat_campagne" in out:
+                out["etat"] = out.get("Etat_campagne")
+
+        page_items.append(out)
 
     return {
         "etat": etat,
