@@ -20,6 +20,12 @@ export const campaignsApi = {
     method: 'GET',
   }),
 
+  // Lightweight active campaigns for selectors (CRC / Terrain).
+  activeChoices: (): ApiRequest => ({
+    url: '/campagnes/meta/active-choices',
+    method: 'GET',
+  }),
+
   // Create new campaign
   create: (data: {
     nom_campagne: string;

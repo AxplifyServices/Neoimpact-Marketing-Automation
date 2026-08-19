@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Plus, Edit2, Save, X, RefreshCw } from 'lucide-react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { dataApi } from '@/lib/api/definitions/data.api';
 import { getApiClient } from '@/lib/api/api-client';
 import Toast from '../../components/Toast';
@@ -59,10 +59,11 @@ export default function ClientsPage() {
           table: selectedTable,
           filters: debouncedFilters,
           limit: pageSize,
-          offset: page * pageSize,
+          offset: page,
         })
       ),
     enabled: !!selectedTable,
+    placeholderData: keepPreviousData,
   });
 
   const updateCellMutation = useMutation({

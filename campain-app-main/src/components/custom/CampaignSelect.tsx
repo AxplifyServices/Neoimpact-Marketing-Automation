@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getApiClient } from '@/lib/api/api-client';
 import { campaignsApi } from '@/lib/api/definitions/campaigns.api';
-import type { CampaignAPIResponse, TypeCampagne } from '@/types/campaign.types';
+import type { TypeCampagne } from '@/types/campaign.types';
 import {
   Select,
   SelectContent,
@@ -30,24 +30,25 @@ export default function CampaignSelect({
 }: CampaignSelectProps) {
   const apiClient = getApiClient();
 
-  interface PaginatedResponse<T> {
-    items: T[];
-    count: number;
-    total: number;
-    limit: number;
-    pages: number;
-    page_start: number;
-    next_page_start: number | null;
+  interface CampaignChoice {
+    id_campagne: string;
+    nom_campagne: string;
+    etat_campagne: string;
+    type_campagne?: TypeCampagne | null;
   }
 
-  // Shares cache with useCampagnesData (same key) so this select reuses the fetched list
+  interface CampaignChoicesResponse {
+    items: CampaignChoice[];
+    count: number;
+  }
+
   const { data: campaigns = [], isLoading } = useQuery<
-    PaginatedResponse<CampaignAPIResponse>,
+    CampaignChoicesResponse,
     unknown,
-    CampaignAPIResponse[]
+    CampaignChoice[]
   >({
-    queryKey: ['campaigns'],
-    queryFn: () => apiClient.request<PaginatedResponse<CampaignAPIResponse>>(campaignsApi.findAll()),
+    queryKey: ['campaign-meta', 'active-choices'],
+    queryFn: () => apiClient.request<CampaignChoicesResponse>(campaignsApi.activeChoices()),
     select: (data) => data?.items ?? [],
     staleTime: 60_000,
   });
@@ -55,9 +56,7 @@ export default function CampaignSelect({
   const activeCampaigns = useMemo(
     () =>
       campaigns.filter(
-        (c) =>
-          c.etat_campagne === 'En cours' &&
-          (!typeCampagne || (c.type_campagne ?? 'sans_action_terrain') === typeCampagne)
+        (c) => !typeCampagne || (c.type_campagne ?? 'sans_action_terrain') === typeCampagne
       ),
     [campaigns, typeCampagne]
   );

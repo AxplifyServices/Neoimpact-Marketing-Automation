@@ -20,13 +20,19 @@ import ReactFlow, {
 } from 'reactflow';
 import type { WorkflowLayout, NodePosition, HandleSide, EdgeEndpoint, EdgeHandles } from '@/types/modele.types';
 import 'reactflow/dist/style.css';
-import ELK from 'elkjs/lib/elk.bundled.js';
 import { useQuery } from '@tanstack/react-query';
 import { getApiClient } from '@/lib/api/api-client';
 import { dashboardApi } from '@/lib/api/definitions/dashboard.api';
 import type { DashboardComputeByCampaignResponse, CampaignGraphNode, ChannelTableRow } from '@/types/dashboard.types';
 
-const elk = new ELK();
+let elkPromise: Promise<any> | null = null;
+
+const getElk = async () => {
+  if (!elkPromise) {
+    elkPromise = import('elkjs/lib/elk.bundled.js').then(({ default: ELK }) => new ELK());
+  }
+  return elkPromise;
+};
 
 // Estimate edge label dimensions for ELK layout
 const estimateLabelWidth = (conditions: string[]): number => {
@@ -90,6 +96,7 @@ const getLayoutedElements = async (
     }),
   };
 
+  const elk = await getElk();
   const layoutedGraph = await elk.layout(graph);
 
   return {

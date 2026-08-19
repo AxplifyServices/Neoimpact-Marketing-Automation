@@ -553,18 +553,20 @@ def read_table(payload: ReadTableIn):
     row_offset = page_start * limit
     row_limit = limit * pages
 
+    total = db.count_table(payload.table, filters=db_filters)
     df = db.read_table(payload.table, filters=db_filters, limit=row_limit, offset=row_offset)
 
     return {
         "table": payload.table,
         "rows": df.to_dict(orient="records"),
         "count": int(len(df)),
+        "total": int(total),
         "limit": limit,
         "pages": pages,
         "page_start": page_start,
         "row_offset": row_offset,
         "row_limit": row_limit,
-        "next_page_start": page_start + pages if len(df) == row_limit else None,
+        "next_page_start": page_start + pages if (row_offset + len(df)) < total else None,
     }
 
 @router.post("/data/update-cell")

@@ -157,6 +157,53 @@ def read_table(
     return pd.DataFrame(output, columns=["__rowid__", *columns])
 
 
+
+def count_table(
+    table: str,
+    filters: Optional[Dict[str, ColumnFilter]] = None,
+) -> int:
+    """Compte les lignes avec les mêmes filtres que read_table, sans matérialiser les données."""
+    _validate_table_column(table)
+
+    where_parts: List[Any] = []
+    params: List[Any] = []
+
+    if filters:
+        for col, filt in filters.items():
+            if filt is None:
+                continue
+            _validate_table_column(table, col)
+            col_id = sql.Identifier(col)
+
+            if filt.numeric is not None:
+                mn = _to_float_or_none(filt.numeric.min)
+                mx = _to_float_or_none(filt.numeric.max)
+                if mn is not None:
+                    where_parts.append(sql.SQL("CAST({} AS DOUBLE PRECISION) >= %s").format(col_id))
+                    params.append(mn)
+                if mx is not None:
+                    where_parts.append(sql.SQL("CAST({} AS DOUBLE PRECISION) <= %s").format(col_id))
+                    params.append(mx)
+
+            if filt.categorical:
+                values = [str(x) for x in filt.categorical]
+                placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in values)
+                where_parts.append(
+                    sql.SQL("CAST({} AS TEXT) IN ({})").format(col_id, placeholders)
+                )
+                params.extend(values)
+
+    query = sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(table))
+    if where_parts:
+        query += sql.SQL(" WHERE ") + sql.SQL(" AND ").join(where_parts)
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            row = cur.fetchone()
+
+    return int(row[0] if row else 0)
+
 def update_cell(table: str, rowid: int, col: str, value: Any) -> None:
     _validate_table_column(table, col)
     identity_info = _ROW_IDENTITY_CACHE.get(int(rowid))

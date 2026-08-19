@@ -1,7 +1,7 @@
 import { Database, Edit2, Save, X, RefreshCw } from 'lucide-react';
 import { useHistoriqueData, useTableColumns } from './useHistoriqueData';
 import { useState, useEffect } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { dataApi } from '@/lib/api/definitions/data.api';
 import { getApiClient } from '@/lib/api/api-client';
 import Toast from '../../components/Toast';
@@ -58,10 +58,11 @@ export default function HistoriquePage() {
           table: selectedTable!,
           filters: debouncedFilters,
           limit: pageSize,
-          offset: page * pageSize,
+          offset: page,
         })
       ),
     enabled: !!selectedTable,
+    placeholderData: keepPreviousData,
   });
 
   // Update cell mutation

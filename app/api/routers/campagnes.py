@@ -355,6 +355,26 @@ def dispatch_terrain_status(id_campagne: str):
 # =========================================================
 # Endpoints META (additifs -> ne cassent rien)
 # =========================================================
+@router.get("/campagnes/meta/active-choices")
+def active_campaign_choices():
+    """
+    Liste légère destinée aux sélecteurs CRC/Terrain.
+    Évite de charger les campagnes complètes et leurs KPI.
+    """
+    query = """
+        SELECT id_campagne, nom_campagne, etat_campagne, type_campagne
+        FROM campagnes
+        WHERE etat_campagne = 'En cours'
+        ORDER BY nom_campagne ASC, id_campagne ASC
+    """
+    with connection(dict_rows=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            rows = [dict(row) for row in cur.fetchall()]
+
+    return {"items": rows, "count": len(rows)}
+
+
 @router.get("/campagnes/meta/modele-choices")
 def modele_choices():
     """

@@ -27,7 +27,7 @@ export function useDashboardData({
         etats_campagne: selectedStates.length > 0 ? selectedStates : undefined,
       })
     ),
-    staleTime: 0, // No caching - always fetch fresh data for dynamic filtering
+    staleTime: 30_000, // Dynamic but stable enough to avoid duplicate requests during navigation
   });
 
   // Compute dashboard data (triggered when filters are applied)
