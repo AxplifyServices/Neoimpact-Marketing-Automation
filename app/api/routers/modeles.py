@@ -114,6 +114,11 @@ def list_modeles(
         "pages": nb_pages,
         "page_start": page_start,
         "next_page_start": page_start + nb_pages if end < len(modeles) else None,
+        "stats": {
+            "total": int(len(modeles)),
+            "locked_total": int(sum(1 for m in modeles if isinstance(m, dict) and bool(m.get("locked")))),
+            "unique_variables": int(len({str(m.get("variable_cible") or "").strip() for m in modeles if isinstance(m, dict) and str(m.get("variable_cible") or "").strip()})),
+        },
     }
 
 

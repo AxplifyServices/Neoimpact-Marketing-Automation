@@ -4,8 +4,6 @@ import { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ciblesApi } from '@/lib/api/definitions/cibles.api';
-import { campaignsApi } from '@/lib/api/definitions/campaigns.api';
-import type { CampaignAPIResponse } from '@/types/campaign.types';
 import { getApiClient } from '@/lib/api/api-client';
 import { OBJECTIF_KEY, isObjectifMode } from '@/lib/cible-filters';
 
@@ -36,7 +34,9 @@ export default function CiblesPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const apiClient = getApiClient();
-  const { stats: statsData, cibles, isLoading, lockedCibles } = useCiblesData();
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(20);
+  const { cibles, isLoading, lockedCibles, total, totalPages, usedCount, dbCount, fileCount } = useCiblesData(page, pageSize);
   const [toast, setToast] = useState<{
     isOpen: boolean;
     title: string;
@@ -56,21 +56,16 @@ export default function CiblesPage() {
   const [dateMin, setDateMin] = useState<string>('');
   const [dateMax, setDateMax] = useState<string>('');
 
-  const { data: campaignList = [] } = useQuery<
-    { items: CampaignAPIResponse[] },
-    unknown,
-    CampaignAPIResponse[]
-  >({
-    queryKey: ['campaigns'],
-    queryFn: () => apiClient.request<{ items: CampaignAPIResponse[] }>(campaignsApi.findAll()),
+  const { data: campaignList = [] } = useQuery({
+    queryKey: ['cibles', 'objective-campaigns'],
+    queryFn: () => apiClient.request<{ items: Array<{ id_campagne: string; nom_campagne: string; etat?: string }> }>(
+      ciblesApi.getObjectiveCampaigns()
+    ),
     select: (data) => data?.items ?? [],
-    staleTime: 60_000,
+    staleTime: 5 * 60_000,
   });
-  const usedCount = lockedCibles.length;
-  const unusedCount = Math.max(cibles.length - usedCount, 0);
-  const usagePercent = cibles.length > 0 ? Math.round((usedCount / cibles.length) * 100) : 0;
-  const dbCount = cibles.filter(c => c.source?.toLowerCase() === 'db').length;
-  const fileCount = cibles.filter(c => c.source?.toLowerCase() === 'file').length;
+  const unusedCount = Math.max(total - usedCount, 0);
+  const usagePercent = total > 0 ? Math.round((usedCount / total) * 100) : 0;
   const sourceTotal = dbCount + fileCount;
   const dbPercent = sourceTotal > 0 ? Math.round((dbCount / sourceTotal) * 100) : 0;
   const filePercent = sourceTotal > 0 ? Math.round((fileCount / sourceTotal) * 100) : 0;
@@ -396,15 +391,24 @@ export default function CiblesPage() {
   const stats = [
     {
       icon: <Database className="w-5 h-5 text-blue-600" />,
-      ...statsData[0],
+      value: String(total),
+      label: 'Total cibles',
+      change: `${dbCount + fileCount} classées par source`,
+      changeColor: 'text-green-600',
     },
     {
       icon: <Database className="w-5 h-5 text-purple-600" />,
-      ...statsData[1],
+      value: String(dbCount),
+      label: 'Cibles DB',
+      change: 'Basées sur filtres',
+      changeColor: 'text-blue-600',
     },
     {
       icon: <FileText className="w-5 h-5 text-green-600" />,
-      ...statsData[2],
+      value: String(fileCount),
+      label: 'Cibles fichier',
+      change: 'Importées',
+      changeColor: 'text-purple-600',
     },
   ];
   const totalStat = stats[0];
@@ -519,7 +523,7 @@ export default function CiblesPage() {
             <div className="w-full bg-gray-200 rounded-full h-2 mb-3">
               <div
                 className="bg-amber-500 h-2 rounded-full transition-all duration-300"
-                style={{ width: `${cibles.length > 0 ? (usedCount / cibles.length) * 100 : 0}%` }}
+                style={{ width: `${total > 0 ? (usedCount / total) * 100 : 0}%` }}
               />
             </div>
             <div className="flex items-center justify-between">
@@ -529,7 +533,7 @@ export default function CiblesPage() {
             <div className="w-full bg-gray-200 rounded-full h-2">
               <div
                 className="bg-green-500 h-2 rounded-full transition-all duration-300"
-                style={{ width: `${cibles.length > 0 ? (unusedCount / cibles.length) * 100 : 0}%` }}
+                style={{ width: `${total > 0 ? (unusedCount / total) * 100 : 0}%` }}
               />
             </div>
           </div>
@@ -546,6 +550,9 @@ export default function CiblesPage() {
         columns={columns}
         data={cibles}
         isLoading={isLoading}
+        pagination={{ currentPage: page, totalPages, pageSize }}
+        onPageChange={setPage}
+        onPageSizeChange={(size) => { setPageSize(size); setPage(0); }}
         toolbar={(table) => (
           <DataTableToolbar
             table={table}

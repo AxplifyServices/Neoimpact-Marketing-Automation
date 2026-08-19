@@ -1,6 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { Upload, FileText, X, AlertCircle, Eye } from 'lucide-react';
-import * as XLSX from 'xlsx';
 
 interface FileUploadProps {
   onFileSelect: (file: File | null) => void;
@@ -75,10 +74,13 @@ export const FileUpload: React.FC<FileUploadProps> = ({
   const parseFilePreview = async (file: File) => {
     setIsLoadingPreview(true);
     try {
-      const arrayBuffer = await file.arrayBuffer();
-      const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+      const [{ read, utils }, arrayBuffer] = await Promise.all([
+        import('xlsx'),
+        file.arrayBuffer(),
+      ]);
+      const workbook = read(arrayBuffer, { type: 'array' });
       const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-      const jsonData = XLSX.utils.sheet_to_json(firstSheet, { header: 1 }) as string[][];
+      const jsonData = utils.sheet_to_json(firstSheet, { header: 1 }) as string[][];
 
       if (jsonData.length === 0) {
         setPreviewData(null);

@@ -2,8 +2,16 @@ import type { ApiRequest } from '../ApiRequest';
 
 export const ciblesApi = {
   // Get all cibles
-  findAll: (): ApiRequest => ({
+  findAll: (params?: { limit?: number; offset?: number; pages?: number }): ApiRequest => ({
     url: '/cibles',
+    method: 'GET',
+    params,
+  }),
+
+
+  // Lightweight campaigns used by cible objective filters
+  getObjectiveCampaigns: (): ApiRequest => ({
+    url: '/cibles/objective-campaigns',
     method: 'GET',
   }),
 

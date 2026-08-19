@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { lazy, Suspense, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import { ArrowLeft, Plus, Trash2, GitBranch, X, Eye, Code2, Undo2, Redo2, Copy } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -8,7 +8,7 @@ import { metaApi } from '@/lib/api/definitions/meta.api';
 import { getApiClient } from '@/lib/api/api-client';
 import LoadingSpinner from '../../components/LoadingSpinner';
 import Toast from '../../components/Toast';
-import WorkflowPreview from '../../components/custom/WorkflowPreview';
+const WorkflowPreview = lazy(() => import('../../components/custom/WorkflowPreview'));
 import ParentConditionsSection from '../../components/custom/ParentConditionsSection';
 import ObjectiveConditionsSection from '../../components/custom/ObjectiveConditionsSection';
 import type { CanauxMetadata, CampaignConditionField, EditPayload, DuplicateState, ConditionMetaResponse } from '@/types/modele.types';
@@ -498,7 +498,7 @@ export default function CreateModelePage() {
                     <p className="text-gray-500 mb-4">Aucune action ajoutee. Commencez a construire votre workflow.</p>
                   </div>
                 ) : (
-                  <WorkflowPreview
+                  <Suspense fallback={<div className="h-[420px] rounded-lg border border-gray-200 bg-white flex items-center justify-center text-sm text-gray-500">Chargement du workflow…</div>}><WorkflowPreview
                     blocks={bm.blocks}
                     getBlockDisplayNumber={(blockId: string) => getBlockDisplayNumber(bm.blocks, blockId)}
                     onSelectBlock={handleWorkflowSelect}
@@ -520,7 +520,7 @@ export default function CreateModelePage() {
                     showFrame={false}
                     height="calc(100vh - 280px)"
                     containerClassName="rounded-lg border border-gray-200"
-                  />
+                  /></Suspense>
                 )}
               </TabsContent>
 

@@ -152,6 +152,12 @@ def list_cibles(
         "pages": nb_pages,
         "page_start": page_start,
         "next_page_start": page_start + nb_pages if end < len(cibles) else None,
+        "stats": {
+            "total": int(len(cibles)),
+            "locked_total": int(sum(1 for c in cibles if isinstance(c, dict) and bool(c.get("locked")))),
+            "db_total": int(sum(1 for c in cibles if isinstance(c, dict) and str(c.get("source") or "").strip().lower() == "db")),
+            "file_total": int(sum(1 for c in cibles if isinstance(c, dict) and str(c.get("source") or "").strip().lower() == "file")),
+        },
     }
 
 @router.get("/cibles/objective-campaigns")

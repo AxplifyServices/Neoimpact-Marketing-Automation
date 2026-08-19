@@ -85,7 +85,9 @@ const renderObjectifBadge = (objectif: string) => {
 
 export default function ModelesPage() {
   const navigate = useNavigate();
-  const { stats: statsData, modeles, isLoading, refetch, lockedModels, usedCount, unusedCount } = useModelesData();
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(20);
+  const { modeles, isLoading, refetch, lockedModels, usedCount, unusedCount, total, totalPages, uniqueVariables } = useModelesData(page, pageSize);
   const apiClient = getApiClient();
   const [toast, setToast] = useState<{ isOpen: boolean; title: string; message?: string; type?: 'success' | 'error' | 'warning' }>({
     isOpen: false,
@@ -360,18 +362,21 @@ export default function ModelesPage() {
     },
   ], []);
 
-  const usedPercent = modeles.length > 0 ? Math.round((usedCount / modeles.length) * 100) : 0;
-  const unusedPercent = modeles.length > 0 ? Math.round((unusedCount / modeles.length) * 100) : 0;
+  const usedPercent = total > 0 ? Math.round((usedCount / total) * 100) : 0;
+  const unusedPercent = total > 0 ? Math.round((unusedCount / total) * 100) : 0;
 
   const stats = [
     {
       icon: <Database className="w-5 h-5 text-blue-600" />,
-      ...statsData[0],
+      value: String(total),
+      label: 'Total modèles',
+      change: `${uniqueVariables} variable${uniqueVariables > 1 ? 's' : ''} unique${uniqueVariables > 1 ? 's' : ''}`,
+      changeColor: 'text-purple-600',
     },
     {
       icon: <Lock className="w-5 h-5 text-amber-600" />,
       value: String(usedCount),
-      label: 'UtilisAc',
+      label: 'Utilisés',
       change: `${usedPercent}% en utilisation`,
       changeColor: 'text-amber-600',
     },
@@ -441,6 +446,9 @@ export default function ModelesPage() {
         columns={columns}
         data={modeles}
         isLoading={isLoading}
+        pagination={{ currentPage: page, totalPages, pageSize }}
+        onPageChange={setPage}
+        onPageSizeChange={(size) => { setPageSize(size); setPage(0); }}
         toolbar={(table) => (
           <DataTableToolbar
             table={table}

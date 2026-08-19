@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from 'react';
+import { lazy, Suspense, useState, useMemo, useCallback } from 'react';
 import { Phone, Target, Activity, Filter, AlertCircle, LayoutGrid, Table2 } from 'lucide-react';
 import {
   BarChart,
@@ -20,8 +20,8 @@ import {
 import { useQuery } from '@tanstack/react-query';
 import { useDashboardData } from './useDashboardData';
 import DashboardFilters from '@/components/custom/DashboardFilters';
-import WorkflowPreview from '@/components/custom/WorkflowPreview';
-import WorkflowTable from '@/components/custom/WorkflowTable';
+const WorkflowPreview = lazy(() => import('@/components/custom/WorkflowPreview'));
+const WorkflowTable = lazy(() => import('@/components/custom/WorkflowTable'));
 import LoadingSpinner from '@/components/LoadingSpinner';
 import Toast from '@/components/Toast';
 import { modelesApi } from '@/lib/api/definitions/modeles.api';
@@ -404,7 +404,7 @@ export default function DashboardPage() {
                 </div>
                 {workflowView === 'graph' ? (
                   <div style={{ height: '500px' }} className="border border-gray-200 rounded-lg overflow-hidden">
-                    <WorkflowPreview
+                    <Suspense fallback={<div className="h-full flex items-center justify-center text-sm text-gray-500">Chargement du workflow…</div>}><WorkflowPreview
                       blocks={workflowBlocks}
                       getBlockDisplayNumber={blockDisplayNumber}
                       campaignId={dashboardData.graph.campaign_id}
@@ -416,17 +416,17 @@ export default function DashboardPage() {
                       showFrame={false}
                       height={500}
                       containerClassName="rounded-lg"
-                    />
+                    /></Suspense>
                   </div>
                 ) : (
-                  <WorkflowTable
+                  <Suspense fallback={<div className="py-12 text-center text-sm text-gray-500">Chargement du tableau…</div>}><WorkflowTable
                     blocks={workflowBlocks}
                     campaignId={dashboardData.graph.campaign_id}
                     etatsCampagne={etatsCampagne}
                     dateMin={dateMin}
                     dateMax={dateMax}
                     getBlockDisplayNumber={blockDisplayNumber}
-                  />
+                  /></Suspense>
                 )}
               </div>
             </div>
