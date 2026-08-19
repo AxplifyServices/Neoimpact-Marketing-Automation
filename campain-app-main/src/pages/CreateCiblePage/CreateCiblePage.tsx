@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { ciblesApi } from '@/lib/api/definitions/cibles.api';
 import { metaApi } from '@/lib/api/definitions/meta.api';
 import { getApiClient } from '@/lib/api/api-client';
+import { invalidateCampaignReferenceCaches } from '@/lib/api/cache-invalidation';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
@@ -168,6 +169,7 @@ export default function CreateCiblePage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['cibles'] });
       queryClient.invalidateQueries({ queryKey: ['cible', id] });
+      void invalidateCampaignReferenceCaches(queryClient);
       setToast({
         isOpen: true,
         title: 'Succes',
@@ -193,6 +195,7 @@ export default function CreateCiblePage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['cibles'] });
+      void invalidateCampaignReferenceCaches(queryClient);
       setToast({
         isOpen: true,
         title: 'Succes',

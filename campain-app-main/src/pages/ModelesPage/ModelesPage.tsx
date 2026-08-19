@@ -1,11 +1,13 @@
 import { Target, Calendar, Database, MoreVertical, Edit, Trash2, Eye, Lock, Copy } from 'lucide-react';
 import { useModelesData } from './useModelesData';
 import { useState, useMemo } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import Toast from '../../components/Toast';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import { modelesApi } from '@/lib/api/definitions/modeles.api';
 import { getApiClient } from '@/lib/api/api-client';
+import { invalidateCampaignReferenceCaches } from '@/lib/api/cache-invalidation';
 import { type ColumnDef } from '@tanstack/react-table';
 import { DataTable } from '@/components/data-table/data-table';
 import { DataTableToolbar } from '@/components/data-table/toolbar';
@@ -89,6 +91,7 @@ export default function ModelesPage() {
   const [pageSize, setPageSize] = useState(20);
   const { modeles, isLoading, refetch, lockedModels, usedCount, unusedCount, total, totalPages, uniqueVariables } = useModelesData(page, pageSize);
   const apiClient = getApiClient();
+  const queryClient = useQueryClient();
   const [toast, setToast] = useState<{ isOpen: boolean; title: string; message?: string; type?: 'success' | 'error' | 'warning' }>({
     isOpen: false,
     title: '',
@@ -154,7 +157,8 @@ export default function ModelesPage() {
         message: 'Modèle supprimé avec succès',
         type: 'success',
       });
-      refetch();
+      await refetch();
+      void invalidateCampaignReferenceCaches(queryClient);
     } catch (error) {
       setToast({
         isOpen: true,

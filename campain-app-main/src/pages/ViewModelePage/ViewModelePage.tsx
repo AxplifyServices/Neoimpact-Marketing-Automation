@@ -212,6 +212,7 @@ export default function ViewModelePage() {
   const { data: canauxData, isLoading: canauxLoading } = useQuery<CanauxMetadata>({
     queryKey: ['meta-canaux'],
     queryFn: () => apiClient.request<CanauxMetadata>(metaApi.getCanaux()),
+    staleTime: 5 * 60_000,
   });
 
   const isLoading = modeleLoading || canauxLoading;

@@ -5,6 +5,7 @@ import { useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ciblesApi } from '@/lib/api/definitions/cibles.api';
 import { getApiClient } from '@/lib/api/api-client';
+import { invalidateCampaignReferenceCaches } from '@/lib/api/cache-invalidation';
 import { OBJECTIF_KEY, isObjectifMode } from '@/lib/cible-filters';
 
 const readObjectif = (filtre: CibleData['filtre']) => {
@@ -75,6 +76,7 @@ export default function CiblesPage() {
     mutationFn: (id: string) => apiClient.request(ciblesApi.delete(id)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['cibles'] });
+      void invalidateCampaignReferenceCaches(queryClient);
       setToast({
         isOpen: true,
         title: 'Succès',

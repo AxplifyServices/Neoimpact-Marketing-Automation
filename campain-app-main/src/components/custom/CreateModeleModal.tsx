@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { modelesApi } from '@/lib/api/definitions/modeles.api';
 import { metaApi } from '@/lib/api/definitions/meta.api';
 import { getApiClient } from '@/lib/api/api-client';
+import { invalidateCampaignReferenceCaches } from '@/lib/api/cache-invalidation';
 import LoadingSpinner from '../LoadingSpinner';
 import Toast from '../Toast';
 import type { CanauxMetadata, CampaignConditionField } from '@/types/modele.types';
@@ -35,12 +36,14 @@ export default function CreateModeleModal({ isOpen, onClose, onSuccess }: Create
     queryKey: ['meta-canaux'],
     queryFn: () => apiClient.request<CanauxMetadata>(metaApi.getCanaux()),
     enabled: isOpen,
+    staleTime: 5 * 60_000,
   });
 
   const { data: campaignConditionFields } = useQuery<{ fields: CampaignConditionField[] }>({
     queryKey: ['campaign-condition-fields'],
     queryFn: () => apiClient.request<{ fields: CampaignConditionField[] }>(metaApi.getCampaignConditionFields()),
     enabled: isOpen,
+    staleTime: 5 * 60_000,
   });
 
   // Fetch condition metadata for field kinds
@@ -48,6 +51,7 @@ export default function CreateModeleModal({ isOpen, onClose, onSuccess }: Create
     queryKey: ['condition-meta'],
     queryFn: () => apiClient.request(metaApi.getConditionMeta()),
     enabled: isOpen,
+    staleTime: 5 * 60_000,
   });
 
   const conditionMetaTyped = conditionMeta as Record<string, string[] | 'Numérique'> | undefined;
@@ -73,6 +77,7 @@ export default function CreateModeleModal({ isOpen, onClose, onSuccess }: Create
     mutationFn: (data: any) => apiClient.request(modelesApi.save(data)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['modeles'] });
+      void invalidateCampaignReferenceCaches(queryClient);
       onSuccess?.();
       onClose();
       resetForm();

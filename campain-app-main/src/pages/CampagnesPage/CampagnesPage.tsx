@@ -4,6 +4,7 @@ import { lazy, Suspense, useState, useMemo, useRef, useEffect } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { campaignsApi } from '@/lib/api/definitions/campaigns.api';
 import { getApiClient } from '@/lib/api/api-client';
+import { invalidateCampaignCaches } from '@/lib/api/cache-invalidation';
 import Toast from '../../components/Toast';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import LoadingSpinner from '../../components/LoadingSpinner';
@@ -60,7 +61,7 @@ export default function CampagnesPage() {
   const cancelCampaignMutation = useMutation({
     mutationFn: (id: string) => apiClient.request(campaignsApi.cancel(id)),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['campaigns'] });
+      void invalidateCampaignCaches(queryClient);
       setToast({
         isOpen: true,
         title: 'Campagne annulée',
@@ -83,7 +84,7 @@ export default function CampagnesPage() {
   const pauseCampaignMutation = useMutation({
     mutationFn: (id: string) => apiClient.request(campaignsApi.pause(id)),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['campaigns'] });
+      void invalidateCampaignCaches(queryClient);
       setToast({
         isOpen: true,
         title: 'Campagne désactivée',
@@ -117,7 +118,7 @@ export default function CampagnesPage() {
         return;
       }
 
-      queryClient.invalidateQueries({ queryKey: ['campaigns'] });
+      void invalidateCampaignCaches(queryClient);
       setToast({
         isOpen: true,
         title: 'Campagne activée',

@@ -3,6 +3,7 @@ import { X } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { campaignsApi } from '@/lib/api/definitions/campaigns.api';
 import { getApiClient } from '@/lib/api/api-client';
+import { invalidateCampaignCaches } from '@/lib/api/cache-invalidation';
 import type { TypeCampagne, VisitMode, VisitPurpose } from '@/types/campaign.types';
 import LoadingSpinner from '../LoadingSpinner';
 
@@ -148,8 +149,7 @@ export default function CreateCampaignModal({ isOpen, onClose, onSuccess, duplic
       );
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['campaigns'] });
-      queryClient.invalidateQueries({ queryKey: ['campaign-meta'] });
+      void invalidateCampaignCaches(queryClient);
       onSuccess?.();
       onClose();
       resetForm();
