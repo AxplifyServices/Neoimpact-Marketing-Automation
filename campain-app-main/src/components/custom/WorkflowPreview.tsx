@@ -111,6 +111,73 @@ const getLayoutedElements = async (
   };
 };
 
+
+const getSimpleLayoutedElements = (
+  nodes: Node[],
+  edges: Edge[],
+): { nodes: Node[]; edges: Edge[] } => {
+  if (nodes.length === 0) return { nodes, edges };
+
+  const incoming = new Map<string, number>();
+  const children = new Map<string, string[]>();
+  for (const node of nodes) {
+    incoming.set(node.id, 0);
+    children.set(node.id, []);
+  }
+
+  for (const edge of edges) {
+    if (!incoming.has(edge.target) || !children.has(edge.source)) continue;
+    incoming.set(edge.target, (incoming.get(edge.target) || 0) + 1);
+    children.get(edge.source)!.push(edge.target);
+  }
+
+  const roots = nodes.filter((node) => (incoming.get(node.id) || 0) === 0).map((node) => node.id);
+  const queue = roots.length > 0 ? [...roots] : [nodes[0].id];
+  const levelById = new Map<string, number>();
+  queue.forEach((id) => levelById.set(id, 0));
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    const level = levelById.get(current) || 0;
+    for (const child of children.get(current) || []) {
+      // Assign once: keeps the fallback O(nodes + edges) and is cycle-safe.
+      if (!levelById.has(child)) {
+        levelById.set(child, level + 1);
+        queue.push(child);
+      }
+    }
+  }
+
+  for (const node of nodes) {
+    if (!levelById.has(node.id)) levelById.set(node.id, 0);
+  }
+
+  const levels = new Map<number, Node[]>();
+  for (const node of nodes) {
+    const level = levelById.get(node.id) || 0;
+    const levelNodes = levels.get(level) || [];
+    levelNodes.push(node);
+    levels.set(level, levelNodes);
+  }
+
+  const horizontalGap = 360;
+  const verticalGap = 220;
+  const positioned = nodes.map((node) => {
+    const level = levelById.get(node.id) || 0;
+    const levelNodes = levels.get(level) || [];
+    const index = levelNodes.findIndex((item) => item.id === node.id);
+    return {
+      ...node,
+      position: {
+        x: level * horizontalGap,
+        y: Math.max(0, index) * verticalGap,
+      },
+    };
+  });
+
+  return { nodes: positioned, edges };
+};
+
 interface Block {
   id: string;
   canal: string;
@@ -158,6 +225,8 @@ interface WorkflowPreviewProps {
   getBlockDisplayNumber: (blockId: string) => number;
   campaignId?: string;
   analyticsData?: WorkflowAnalyticsData;
+  loadAnalytics?: boolean;
+  autoLayoutEngine?: 'elk' | 'simple';
   etatsCampagne?: string[];
   dateMin?: string | null;
   dateMax?: string | null;
@@ -845,6 +914,8 @@ export default function WorkflowPreview({
   getBlockDisplayNumber,
   campaignId,
   analyticsData: providedAnalyticsData,
+  loadAnalytics = true,
+  autoLayoutEngine = 'elk',
   etatsCampagne,
   dateMin,
   dateMax,
@@ -886,7 +957,7 @@ export default function WorkflowPreview({
         date_max: dateMax,
       })
     ),
-    enabled: !!campaignId && !providedAnalyticsData,
+    enabled: loadAnalytics && !!campaignId && !providedAnalyticsData,
     staleTime: 5 * 60 * 1000,
   });
 
@@ -1380,16 +1451,29 @@ export default function WorkflowPreview({
       }
     }
 
-    // Otherwise run ELK auto-layout
+    // For read-only campaign workflows, render immediately with a lightweight layout.
+    // ELK remains available for editing screens where a richer auto-layout is useful.
+    if (autoLayoutEngine === 'simple') {
+      const { nodes: layoutedNodes, edges: layoutedEdges } = getSimpleLayoutedElements(
+        currentNodes,
+        currentEdges,
+      );
+      setNodes(layoutedNodes);
+      setEdges(layoutedEdges);
+      return;
+    }
+
+    // Rich auto-layout: load ELK only when explicitly needed.
     getLayoutedElements(currentNodes, currentEdges).then(({ nodes: layoutedNodes, edges: layoutedEdges }) => {
       setNodes(layoutedNodes);
       setEdges(layoutedEdges);
     }).catch((err) => {
       console.error('[WorkflowPreview] ELK layout failed:', err);
-      setNodes(currentNodes.map(n => ({ ...n, position: { x: 0, y: 0 } })));
-      setEdges(currentEdges);
+      const fallback = getSimpleLayoutedElements(currentNodes, currentEdges);
+      setNodes(fallback.nodes);
+      setEdges(fallback.edges);
     });
-  }, [blocks, layout, setNodes, setEdges]);
+  }, [blocks, layout, autoLayoutEngine, setNodes, setEdges]);
 
   useEffect(() => {
     if (fitViewSignal === undefined || !flowInstanceRef.current || nodes.length === 0) {

@@ -66,6 +66,7 @@ export default function WorkflowModal({
     queryKey: ['modele', modelId],
     queryFn: () => apiClient.request<ModeleDetail>(modelesApi.findById(modelId)),
     enabled: isOpen && !!modelId,
+    staleTime: 5 * 60_000,
   });
 
   // WorkflowPreview charge lui-même les analytics uniquement si elles sont nécessaires.
@@ -129,6 +130,8 @@ export default function WorkflowModal({
               blocks={blocks}
               getBlockDisplayNumber={blockDisplayNumber}
               campaignId={campaignId}
+              loadAnalytics={false}
+              autoLayoutEngine="simple"
               layout={layout}
               showHeader={false}
               showFrame={false}

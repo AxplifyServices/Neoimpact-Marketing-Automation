@@ -191,85 +191,106 @@ def _enrich_campaign_with_kpis(c: Dict[str, Any]) -> Dict[str, Any]:
 @router.get("/campagnes")
 def list_campagnes(
     etat: Optional[str] = "affichables",
-    limit: int = Query(default=500, ge=1, le=5000),   # taille page
-    offset: int = Query(default=0, ge=0),             # page_start
-    pages: int = Query(default=1, ge=1, le=50),       # nb pages à charger
+    limit: int = Query(default=500, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+    pages: int = Query(default=1, ge=1, le=10),
 ):
     """
-    - etat=affichables : campagnes UI + ajoute Annulées/Terminées
-    - sinon : renvoie toutes les campagnes
-    - toujours enrichi avec KPI dashboard filtrés par campagne
+    Liste paginée des campagnes.
+
+    PERFORMANCE:
+    - pagination directement dans PostgreSQL ;
+    - aucune matérialisation préalable de toutes les campagnes en Python ;
+    - une seule agrégation KPI SQL pour les campagnes réellement affichées.
 
     Pagination:
       - limit = nb éléments par page
       - offset = page_start (0,1,2,...)
       - pages = nb pages consécutives
-      - total max renvoyé = limit * pages
     """
-
-    # ---------- 1) Construire la liste complète (comportement actuel) ----------
-    if etat == "affichables":
-        base = get_campagnes_affichables_for_ui() or []
-        base_by_id = {
-            _norm_str(x.get("id_campagne") or x.get("ID_CAMPAGNE")): x
-            for x in base
-            if _norm_str(x.get("id_campagne") or x.get("ID_CAMPAGNE"))
-        }
-
-        all_c = list_all_campagnes() or []
-        for c in all_c:
-            et = _campaign_etat(c)
-            if et in ("Annulée", "Terminée"):
-                cid = _norm_str(c.get("id_campagne") or c.get("ID_CAMPAGNE"))
-                if cid and cid not in base_by_id:
-                    base_by_id[cid] = c
-
-        all_items = list(base_by_id.values())
-    else:
-        all_items = list_all_campagnes() or []
-
-    # ---------- 2) Pagination AVANT les KPI ----------
-    # On ne calcule jamais les KPI de campagnes qui ne sont pas présentes
-    # dans la page demandée.
     page_start = int(offset or 0)
     per_page = int(limit or 500)
     nb_pages = int(pages or 1)
+    row_limit = per_page * nb_pages
+    row_offset = page_start * per_page
 
-    start = page_start * per_page
-    end = start + (per_page * nb_pages)
+    where_sql = ""
+    params: list[Any] = []
 
-    page_base_items = all_items[start:end]
+    if etat == "affichables":
+        # Reproduit le périmètre historique de l'écran Campagnes.
+        where_sql = """
+            WHERE COALESCE(etat_campagne, '') IN (
+                'En cours',
+                'Planifiée',
+                'En pause',
+                'Annulée',
+                'Terminée'
+            )
+        """
 
-    # ---------- 3) Une seule agrégation SQL pour toute la page ----------
+    with connection(dict_rows=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT COUNT(*) AS total
+                FROM campagnes
+                {where_sql}
+                """,
+                params,
+            )
+            total_row = cur.fetchone()
+            total = _to_int(total_row.get("total") if total_row else 0)
+
+            cur.execute(
+                f"""
+                SELECT
+                    id_campagne,
+                    nom_campagne,
+                    id_modele,
+                    id_cible,
+                    date_creation,
+                    date_debut,
+                    date_fin,
+                    etat_campagne,
+                    description,
+                    type_campagne,
+                    "visitMode",
+                    "visitPurpose"
+                FROM campagnes
+                {where_sql}
+                ORDER BY date_creation DESC NULLS LAST, id_campagne DESC
+                LIMIT %s OFFSET %s
+                """,
+                [*params, row_limit, row_offset],
+            )
+            page_base_items = [dict(row) for row in cur.fetchall()]
+
     page_ids = [
-        _norm_str(c.get("id_campagne") or c.get("ID_CAMPAGNE"))
+        _norm_str(c.get("id_campagne"))
         for c in page_base_items
+        if _norm_str(c.get("id_campagne"))
     ]
     kpis_by_campaign = _get_dashboard_kpis_for_campaign_ids(page_ids)
 
     page_items = []
     for campaign in page_base_items:
         out = dict(campaign)
-        cid = _norm_str(out.get("id_campagne") or out.get("ID_CAMPAGNE"))
+        cid = _norm_str(out.get("id_campagne"))
         out.update(kpis_by_campaign.get(cid, _empty_campaign_kpis()))
-
-        if "etat" not in out:
-            if "etat_campagne" in out:
-                out["etat"] = out.get("etat_campagne")
-            elif "Etat_campagne" in out:
-                out["etat"] = out.get("Etat_campagne")
-
+        out.setdefault("etat", out.get("etat_campagne"))
         page_items.append(out)
 
+    consumed = row_offset + len(page_items)
     return {
         "etat": etat,
         "items": page_items,
-        "count": int(len(page_items)),
-        "total": int(len(all_items)),
+        "count": len(page_items),
+        "total": total,
         "limit": per_page,
         "pages": nb_pages,
         "page_start": page_start,
-        "next_page_start": page_start + nb_pages if end < len(all_items) else None,
+        "next_page_start": page_start + nb_pages if consumed < total else None,
     }
 
 
@@ -411,18 +432,56 @@ def active_campaign_choices():
 @router.get("/campagnes/meta/modele-choices")
 def modele_choices():
     """
-    Permet au front d'afficher la liste des modèles (labels + mapping label->id).
+    Liste légère id/libellé des modèles.
+    Évite de charger la table complète dans un DataFrame Pandas.
     """
-    labels, mapping = get_modele_choices_for_ui()
+    labels: list[str] = []
+    mapping: Dict[str, str] = {}
+    with connection(dict_rows=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id_modele, nom_modele
+                FROM modeles
+                ORDER BY date_creation DESC NULLS LAST, id_modele DESC
+                """
+            )
+            for row in cur.fetchall():
+                mid = _norm_str(row.get("id_modele"))
+                if not mid:
+                    continue
+                nom = _norm_str(row.get("nom_modele"))
+                label = f"{mid} — {nom}" if nom else mid
+                labels.append(label)
+                mapping[label] = mid
     return {"labels": labels, "mapping": mapping}
 
 
 @router.get("/campagnes/meta/cible-choices")
 def cible_choices():
     """
-    Permet au front d'afficher la liste des cibles (labels + mapping label->id).
+    Liste légère id/libellé des cibles.
+    Évite de charger les objets complets des cibles.
     """
-    labels, mapping = get_cible_choices_for_ui()
+    labels: list[str] = []
+    mapping: Dict[str, str] = {}
+    with connection(dict_rows=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id_cible, nom_cible
+                FROM cibles
+                ORDER BY date_creation DESC NULLS LAST, id_cible DESC
+                """
+            )
+            for row in cur.fetchall():
+                cid = _norm_str(row.get("id_cible"))
+                if not cid:
+                    continue
+                nom = _norm_str(row.get("nom_cible"))
+                label = f"{cid} — {nom}" if nom else cid
+                labels.append(label)
+                mapping[label] = cid
     return {"labels": labels, "mapping": mapping}
 
 

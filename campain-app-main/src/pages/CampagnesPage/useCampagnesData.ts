@@ -136,7 +136,10 @@ export function useCampagnesData() {
     campaigns,
     stats,
     total,
-    isLoading: campaignsQuery.isLoading || modelesLoading || ciblesLoading,
+    // Do not block the campaign cards while auxiliary labels are still loading.
+    // IDs are rendered as a safe fallback and labels replace them as soon as metadata arrives.
+    isLoading: campaignsQuery.isLoading,
+    isMetadataLoading: modelesLoading || ciblesLoading,
     isFetchingNextPage: campaignsQuery.isFetchingNextPage,
     hasNextPage: campaignsQuery.hasNextPage,
     fetchNextPage: campaignsQuery.fetchNextPage,

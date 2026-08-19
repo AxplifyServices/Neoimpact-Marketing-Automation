@@ -207,7 +207,8 @@ def load_clients_campagnes_df(filters: DashboardFilters) -> pd.DataFrame:
     sql = f"""
     SELECT
         cc.*,
-        cl.Gestionnaire AS Gestionnaire,
+        cl."Gestionnaire" AS "Gestionnaire",
+        cl."Region" AS "_client_region",
         c.etat_campagne AS campagne_master_etat
     FROM {CLIENTS_TABLE} cc
     LEFT JOIN {CLIENTS_DIM_TABLE} cl
@@ -438,17 +439,27 @@ def compute_region_transmit_closed(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=["Region", "Transmis", "Closed"])
 
-    dim = load_clients_dim_regions()
-
-    if dim.empty:
-        tmp = df.copy()
-        tmp["Region"] = "Inconnue"
+    # Region is already joined in load_clients_campagnes_df().
+    # This avoids a second SELECT * over the entire clients table for every dashboard computation.
+    tmp = df.copy()
+    if "_client_region" in tmp.columns:
+        tmp["Region"] = (
+            tmp["_client_region"]
+            .astype(str)
+            .str.strip()
+            .replace({"": "Inconnue", "nan": "Inconnue", "None": "Inconnue"})
+            .fillna("Inconnue")
+        )
     else:
-        tmp = df.copy()
-        tmp["Radical_compte"] = tmp["Radical_compte"].astype(str).str.strip()
-        dim["radical_compte"] = dim["radical_compte"].astype(str).str.strip()
-        tmp = tmp.merge(dim, left_on="Radical_compte", right_on="radical_compte", how="left")
-        tmp["Region"] = tmp["Region"].replace({"": "Inconnue"}).fillna("Inconnue")
+        # Backward-compatible fallback for callers that provide a custom DataFrame.
+        dim = load_clients_dim_regions()
+        if dim.empty:
+            tmp["Region"] = "Inconnue"
+        else:
+            tmp["Radical_compte"] = tmp["Radical_compte"].astype(str).str.strip()
+            dim["radical_compte"] = dim["radical_compte"].astype(str).str.strip()
+            tmp = tmp.merge(dim, left_on="Radical_compte", right_on="radical_compte", how="left")
+            tmp["Region"] = tmp["Region"].replace({"": "Inconnue"}).fillna("Inconnue")
 
     g_transmis = tmp.groupby("Region", as_index=False).size().rename(columns={"size": "Transmis"})
 
