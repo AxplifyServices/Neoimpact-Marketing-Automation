@@ -2,9 +2,21 @@ import type { ApiRequest } from '../ApiRequest';
 import type { TypeCampagne, VisitMode, VisitPurpose } from '@/types/campaign.types';
 
 export const campaignsApi = {
-  // Get all campaigns
-  findAll: (): ApiRequest => ({
+  // Get campaigns with server-side pagination. `offset` is the backend page index.
+  findAll: (params?: { limit?: number; offset?: number; pages?: number; etat?: string }): ApiRequest => ({
     url: '/campagnes',
+    method: 'GET',
+    params,
+  }),
+
+  // Lightweight label/id lookups used by campaign cards.
+  modeleChoices: (): ApiRequest => ({
+    url: '/campagnes/meta/modele-choices',
+    method: 'GET',
+  }),
+
+  cibleChoices: (): ApiRequest => ({
+    url: '/campagnes/meta/cible-choices',
     method: 'GET',
   }),
 

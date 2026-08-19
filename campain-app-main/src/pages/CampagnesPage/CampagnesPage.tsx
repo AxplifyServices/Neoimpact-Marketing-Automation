@@ -1,14 +1,12 @@
 import { Search, TrendingUp, Users, Target, MoreVertical, Play, Pause, XCircle, X, Check, Copy, MapPin, Monitor } from 'lucide-react';
 import { useCampagnesData } from './useCampagnesData';
-import { useState, useMemo, useRef, useEffect } from 'react';
+import { lazy, Suspense, useState, useMemo, useRef, useEffect } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { campaignsApi } from '@/lib/api/definitions/campaigns.api';
 import { getApiClient } from '@/lib/api/api-client';
 import Toast from '../../components/Toast';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import LoadingSpinner from '../../components/LoadingSpinner';
-import CreateCampaignModal from '../../components/custom/CreateCampaignModal';
-import WorkflowModal from '../../components/custom/WorkflowModal';
 import { Input } from '@/components/ui/input';
 import {
   DropdownMenu,
@@ -18,8 +16,19 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Button } from '@/components/ui/button';
 
+const CreateCampaignModal = lazy(() => import('../../components/custom/CreateCampaignModal'));
+const WorkflowModal = lazy(() => import('../../components/custom/WorkflowModal'));
+
 export default function CampagnesPage() {
-  const { stats: statsData, campaigns, isLoading } = useCampagnesData();
+  const {
+    stats: statsData,
+    campaigns,
+    total,
+    isLoading,
+    isFetchingNextPage,
+    hasNextPage,
+    fetchNextPage,
+  } = useCampagnesData();
   const queryClient = useQueryClient();
   const apiClient = getApiClient();
   const [searchQuery, setSearchQuery] = useState('');
@@ -44,8 +53,7 @@ export default function CampagnesPage() {
     title: '',
   });
 
-  // Infinite scroll state
-  const [displayedCount, setDisplayedCount] = useState(9); // Show 9 cards initially (3x3 grid)
+  // Infinite scroll is backed by real server-side pagination (9 campaigns per request).
   const loadMoreRef = useRef<HTMLDivElement>(null);
 
   // Cancel campaign mutation
@@ -163,41 +171,26 @@ export default function CampagnesPage() {
     });
   }, [campaigns, searchQuery, selectedStatuses, dateMin, dateMax]);
 
-  // Displayed campaigns (for infinite scroll)
-  const displayedCampaigns = useMemo(() => {
-    return filteredCampaigns.slice(0, displayedCount);
-  }, [filteredCampaigns, displayedCount]);
+  const displayedCampaigns = filteredCampaigns;
 
-  const hasMore = displayedCount < filteredCampaigns.length;
-
-  // Reset displayed count when filters change
+  // Load the next backend page only when the user reaches the end of the loaded list.
   useEffect(() => {
-    setDisplayedCount(9);
-  }, [searchQuery, selectedStatuses, dateMin, dateMax]);
+    const currentRef = loadMoreRef.current;
+    if (!currentRef || !hasNextPage) return;
 
-  // Infinite scroll observer
-  useEffect(() => {
     const observer = new IntersectionObserver(
       (entries) => {
         const first = entries[0];
-        if (first.isIntersecting && hasMore && !isLoading) {
-          setDisplayedCount((prev) => Math.min(prev + 9, filteredCampaigns.length));
+        if (first.isIntersecting && hasNextPage && !isLoading && !isFetchingNextPage) {
+          void fetchNextPage();
         }
       },
-      { threshold: 0.1 }
+      { rootMargin: '240px 0px', threshold: 0.01 }
     );
 
-    const currentRef = loadMoreRef.current;
-    if (currentRef) {
-      observer.observe(currentRef);
-    }
-
-    return () => {
-      if (currentRef) {
-        observer.unobserve(currentRef);
-      }
-    };
-  }, [hasMore, isLoading, filteredCampaigns.length]);
+    observer.observe(currentRef);
+    return () => observer.disconnect();
+  }, [fetchNextPage, hasNextPage, isFetchingNextPage, isLoading]);
 
   // Status options
   const statusOptions = useMemo(() => [
@@ -256,41 +249,6 @@ export default function CampagnesPage() {
   };
 
 
-  const IMAGE_CATEGORIES = [
-    { name: 'email', keywords: ['email', 'mail', 'newsletter'], query: 'email,office' },
-    { name: 'sms', keywords: ['sms', 'texto', 'message'], query: 'smartphone,office' },
-    { name: 'call', keywords: ['appel', 'call', 'phone', 'crc', 'centre', 'teleprospection'], query: 'callcenter,headset' },
-    { name: 'activation', keywords: ['activation', 'carte', 'compte', 'onboarding'], query: 'banking,office' },
-    { name: 'payment', keywords: ['paiement', 'payment', 'recouvrement', 'facture', 'invoice', 'relance'], query: 'invoice,business' },
-    { name: 'analytics', keywords: ['dashboard', 'report', 'reporting', 'analytics', 'kpi'], query: 'analytics,office' },
-    { name: 'loyalty', keywords: ['fidelisation', 'retention', 'loyalty'], query: 'customer,meeting' },
-    { name: 'prospection', keywords: ['prospection', 'acquisition', 'growth', 'lead'], query: 'business,team' },
-  ];
-
-  const normalizeText = (text: string) =>
-    text
-      .toLowerCase()
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '');
-
-  const hashString = (value: string) =>
-    value.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
-
-  const pickCategory = (description: string, seed: string) => {
-    const normalized = normalizeText(description || '');
-    const matched = IMAGE_CATEGORIES.find((category) =>
-      category.keywords.some((keyword) => normalized.includes(keyword))
-    );
-    if (matched) return matched;
-    const index = Math.abs(hashString(seed)) % IMAGE_CATEGORIES.length;
-    return IMAGE_CATEGORIES[index];
-  };
-
-  const getCampaignImage = (campaign: { id: string; description?: string }) => {
-    const category = pickCategory(campaign.description || '', campaign.id);
-    const seed = Math.abs(hashString(`${campaign.id}-${category.name}`));
-    return `https://loremflickr.com/800/600/${category.query}?lock=${seed}`;
-  };
 
   const stats = [
     {
@@ -317,32 +275,36 @@ export default function CampagnesPage() {
         type={toast.type}
       />
 
-      <CreateCampaignModal
-        isOpen={isCreateModalOpen}
-        onClose={() => {
-          setIsCreateModalOpen(false);
-          setDuplicateCampaign(null);
-        }}
-        onSuccess={() => {
-          setToast({
-            isOpen: true,
-            title: duplicateCampaign ? 'Campagne dupliquée' : 'Campagne créée',
-            message: duplicateCampaign ? 'La campagne a été dupliquée avec succès' : 'La campagne a été créée avec succès',
-            type: 'success',
-          });
-        }}
-        duplicateData={duplicateCampaign ? {
-          nom_campagne: duplicateCampaign.title,
-          description: duplicateCampaign.description,
-          id_modele: duplicateCampaign.id_modele,
-          id_cible: duplicateCampaign.id_cible,
-          date_debut: duplicateCampaign.startDate,
-          date_fin: duplicateCampaign.endDate,
-          type_campagne: duplicateCampaign.type_campagne,
-          visitMode: duplicateCampaign.visitMode,
-          visitPurpose: duplicateCampaign.visitPurpose,
-        } : undefined}
-      />
+      {isCreateModalOpen && (
+        <Suspense fallback={null}>
+          <CreateCampaignModal
+            isOpen
+            onClose={() => {
+              setIsCreateModalOpen(false);
+              setDuplicateCampaign(null);
+            }}
+            onSuccess={() => {
+              setToast({
+                isOpen: true,
+                title: duplicateCampaign ? 'Campagne dupliquée' : 'Campagne créée',
+                message: duplicateCampaign ? 'La campagne a été dupliquée avec succès' : 'La campagne a été créée avec succès',
+                type: 'success',
+              });
+            }}
+            duplicateData={duplicateCampaign ? {
+              nom_campagne: duplicateCampaign.title,
+              description: duplicateCampaign.description,
+              id_modele: duplicateCampaign.id_modele,
+              id_cible: duplicateCampaign.id_cible,
+              date_debut: duplicateCampaign.startDate,
+              date_fin: duplicateCampaign.endDate,
+              type_campagne: duplicateCampaign.type_campagne,
+              visitMode: duplicateCampaign.visitMode,
+              visitPurpose: duplicateCampaign.visitPurpose,
+            } : undefined}
+          />
+        </Suspense>
+      )}
 
       <ConfirmDialog
         isOpen={cancelDialog.isOpen}
@@ -355,12 +317,16 @@ export default function CampagnesPage() {
         type="danger"
       />
 
-      <WorkflowModal
-        isOpen={workflowModal.isOpen}
-        onClose={() => setWorkflowModal({ isOpen: false })}
-        modelId={workflowModal.modelId || ''}
-        campaignId={workflowModal.campaignId}
-      />
+      {workflowModal.isOpen && (
+        <Suspense fallback={null}>
+          <WorkflowModal
+            isOpen
+            onClose={() => setWorkflowModal({ isOpen: false })}
+            modelId={workflowModal.modelId || ''}
+            campaignId={workflowModal.campaignId}
+          />
+        </Suspense>
+      )}
 
 
       {/* Header */}
@@ -711,11 +677,15 @@ export default function CampagnesPage() {
             ))}
 
             {/* Load More Trigger */}
-            {hasMore && (
+            {hasNextPage && (
               <div ref={loadMoreRef} className="col-span-full py-8 flex justify-center">
-                <div className="text-sm text-gray-500">
-                  Affichage de {displayedCount} sur {filteredCampaigns.length} campagnes
-                </div>
+                {isFetchingNextPage ? (
+                  <LoadingSpinner size="sm" />
+                ) : (
+                  <div className="text-sm text-gray-500">
+                    {campaigns.length} campagne{campaigns.length > 1 ? 's' : ''} chargée{campaigns.length > 1 ? 's' : ''} sur {total}
+                  </div>
+                )}
               </div>
             )}
           </>

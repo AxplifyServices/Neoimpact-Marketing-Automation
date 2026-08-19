@@ -236,7 +236,7 @@ export default function CreateClientPage() {
       return apiClient.request(clientsApi.create(data));
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['clients'] });
+      queryClient.invalidateQueries({ queryKey: ['table-data', 'clients'] });
       if (isEditing && id) {
         queryClient.invalidateQueries({ queryKey: ['client', id] });
       }

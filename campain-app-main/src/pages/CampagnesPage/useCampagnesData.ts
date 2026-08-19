@@ -1,9 +1,7 @@
-import { useQuery, useQueries } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { campaignsApi } from '@/lib/api/definitions/campaigns.api';
-import { modelesApi } from '@/lib/api/definitions/modeles.api';
-import { ciblesApi } from '@/lib/api/definitions/cibles.api';
 import { getApiClient } from '@/lib/api/api-client';
-import type { Campaign, CampaignAPIResponse, Stat, CibleAPIResponse, ModeleAPIResponse } from '@/types/campaign.types';
+import type { Campaign, CampaignAPIResponse, Stat } from '@/types/campaign.types';
 
 interface PaginatedResponse<T> {
   items: T[];
@@ -15,123 +13,72 @@ interface PaginatedResponse<T> {
   next_page_start: number | null;
 }
 
+interface ChoicesResponse {
+  labels: string[];
+  mapping: Record<string, string>;
+}
+
+const PAGE_SIZE = 9;
+
+const invertChoices = (response?: ChoicesResponse) => {
+  const byId = new Map<string, string>();
+  if (!response?.mapping) return byId;
+
+  Object.entries(response.mapping).forEach(([label, id]) => {
+    if (id) byId.set(String(id), label);
+  });
+
+  return byId;
+};
+
 export function useCampagnesData() {
   const apiClient = getApiClient();
 
-  // Fetch campaigns from real API
-  const { data: response, isLoading: campaignsLoading, error, refetch } = useQuery({
-    queryKey: ['campaigns'],
-    queryFn: async () => {
-      return await apiClient.request<PaginatedResponse<CampaignAPIResponse>>(
-        campaignsApi.findAll()
-      );
-    },
+  const campaignsQuery = useInfiniteQuery({
+    queryKey: ['campaigns', 'infinite', PAGE_SIZE],
+    initialPageParam: 0,
+    queryFn: ({ pageParam }) =>
+      apiClient.request<PaginatedResponse<CampaignAPIResponse>>(
+        campaignsApi.findAll({ limit: PAGE_SIZE, offset: Number(pageParam), pages: 1 })
+      ),
+    getNextPageParam: (lastPage) => lastPage.next_page_start ?? undefined,
   });
 
-  const apiCampaigns: CampaignAPIResponse[] = response?.items ?? [];
-
-  // Fetch related models and cibles for each campaign
-  const relatedDataQueries = useQueries({
-    queries: apiCampaigns.flatMap((campaign) => [
-      // Fetch model
-      {
-        queryKey: ['modele', campaign.id_modele],
-        queryFn: async () => {
-          try {
-            const response = await apiClient.request<ModeleAPIResponse>(
-              modelesApi.findById(campaign.id_modele)
-            );
-            return { campaignId: campaign.id_campagne, type: 'model', data: response };
-          } catch (error) {
-            console.error(`Failed to fetch model ${campaign.id_modele}:`, error);
-            return { campaignId: campaign.id_campagne, type: 'model', data: null };
-          }
-        },
-        enabled: !!campaign.id_modele,
-      },
-      // Fetch cible
-      {
-        queryKey: ['cible', campaign.id_cible],
-        queryFn: async () => {
-          try {
-            const response = await apiClient.request<CibleAPIResponse>(
-              ciblesApi.findById(campaign.id_cible)
-            );
-            return { campaignId: campaign.id_campagne, type: 'cible', data: response };
-          } catch (error) {
-            console.error(`Failed to fetch cible ${campaign.id_cible}:`, error);
-            return { campaignId: campaign.id_campagne, type: 'cible', data: null };
-          }
-        },
-        enabled: !!campaign.id_cible,
-      },
-    ]),
+  const { data: modeleChoices, isLoading: modelesLoading } = useQuery({
+    queryKey: ['campaign-meta', 'modele-choices'],
+    queryFn: () => apiClient.request<ChoicesResponse>(campaignsApi.modeleChoices()),
+    staleTime: 5 * 60_000,
   });
 
-  // Check if related data is still loading
-  const relatedDataLoading = relatedDataQueries.some((query) => query.isLoading);
-  const isLoading = campaignsLoading || relatedDataLoading;
-
-  // Build lookup maps for models and cibles
-  const modelsMap = new Map<string, string>();
-  const ciblesMap = new Map<string, string>();
-
-  relatedDataQueries.forEach((query) => {
-    if (query.data) {
-      const result = query.data as any;
-      if (result.type === 'model' && result.data) {
-        const modelId = result.data.id_modele;
-        const modelName = result.data.nom_modele || `Modèle ${modelId}`;
-        modelsMap.set(modelId, modelName);
-      } else if (result.type === 'cible' && result.data) {
-        const cibleId = result.data.id_cible || result.data.id;
-        const cibleName = result.data.nom_cible || `Cible ${cibleId}`;
-        if (cibleId) {
-          ciblesMap.set(cibleId, cibleName);
-        }
-      }
-    }
+  const { data: cibleChoices, isLoading: ciblesLoading } = useQuery({
+    queryKey: ['campaign-meta', 'cible-choices'],
+    queryFn: () => apiClient.request<ChoicesResponse>(campaignsApi.cibleChoices()),
+    staleTime: 5 * 60_000,
   });
 
-  // Map API data to UI format with resolved names
+  const apiCampaigns = campaignsQuery.data?.pages.flatMap((page) => page.items) ?? [];
+  const total = campaignsQuery.data?.pages[0]?.total ?? apiCampaigns.length;
+  const modelsMap = invertChoices(modeleChoices);
+  const ciblesMap = invertChoices(cibleChoices);
+
   const campaigns: Campaign[] = apiCampaigns.map((apiCampaign) => {
-    // Map API status to UI status with proper handling for all states
     const getStatusMapping = (etatCampagne: string) => {
       switch (etatCampagne) {
         case 'En cours':
-          return {
-            status: 'En cours',
-            statusColor: 'bg-green-100 text-green-700'
-          };
+          return { status: 'En cours', statusColor: 'bg-green-100 text-green-700' };
         case 'En pause':
-          return {
-            status: 'En pause',
-            statusColor: 'bg-orange-100 text-orange-700'
-          };
+          return { status: 'En pause', statusColor: 'bg-orange-100 text-orange-700' };
         case 'Planifié':
         case 'Planifiée':
-          return {
-            status: 'Planifié',
-            statusColor: 'bg-yellow-100 text-yellow-700'
-          };
+          return { status: 'Planifié', statusColor: 'bg-yellow-100 text-yellow-700' };
         case 'Terminé':
         case 'Terminée':
-          return {
-            status: 'Terminé',
-            statusColor: 'bg-blue-100 text-blue-700'
-          };
+          return { status: 'Terminé', statusColor: 'bg-blue-100 text-blue-700' };
         case 'Annulée':
         case 'Annulé':
-          return {
-            status: 'Annulée',
-            statusColor: 'bg-gray-100 text-gray-500'
-          };
+          return { status: 'Annulée', statusColor: 'bg-gray-100 text-gray-500' };
         default:
-          // Generic status for unknown states
-          return {
-            status: etatCampagne,
-            statusColor: 'bg-gray-100 text-gray-700'
-          };
+          return { status: etatCampagne, statusColor: 'bg-gray-100 text-gray-700' };
       }
     };
 
@@ -164,24 +111,23 @@ export function useCampagnesData() {
     };
   });
 
-  // Calculate stats from campaigns
   const stats: Stat[] = [
     {
-      value: String(campaigns.filter(c => c.status === 'En cours').length),
-      label: 'Campagnes actives',
-      change: '+12%',
+      value: String(campaigns.filter((c) => c.status === 'En cours').length),
+      label: 'Actives chargées',
+      change: `${campaigns.length} chargées`,
       changeColor: 'text-green-600',
     },
     {
-      value: String(campaigns.length),
+      value: String(total),
       label: 'Total campagnes',
-      change: '+8%',
+      change: `${campaigns.length} affichables`,
       changeColor: 'text-green-600',
     },
     {
-      value: String(campaigns.filter(c => c.status === 'Planifié').length),
-      label: 'Campagnes planifiées',
-      change: '+5%',
+      value: String(campaigns.filter((c) => c.status === 'Planifié').length),
+      label: 'Planifiées chargées',
+      change: 'Page courante',
       changeColor: 'text-blue-600',
     },
   ];
@@ -189,8 +135,12 @@ export function useCampagnesData() {
   return {
     campaigns,
     stats,
-    isLoading,
-    error,
-    refetch,
+    total,
+    isLoading: campaignsQuery.isLoading || modelesLoading || ciblesLoading,
+    isFetchingNextPage: campaignsQuery.isFetchingNextPage,
+    hasNextPage: campaignsQuery.hasNextPage,
+    fetchNextPage: campaignsQuery.fetchNextPage,
+    error: campaignsQuery.error,
+    refetch: campaignsQuery.refetch,
   };
 }
