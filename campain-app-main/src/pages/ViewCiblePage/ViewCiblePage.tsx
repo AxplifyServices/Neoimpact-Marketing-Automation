@@ -4,7 +4,6 @@ import { useQuery } from '@tanstack/react-query';
 import { useMemo } from 'react';
 import { type ColumnDef } from '@tanstack/react-table';
 import { ciblesApi } from '@/lib/api/definitions/cibles.api';
-import { campaignsApi } from '@/lib/api/definitions/campaigns.api';
 import { getApiClient } from '@/lib/api/api-client';
 import LoadingSpinner from '../../components/LoadingSpinner';
 import { DataTable } from '@/components/data-table/data-table';
@@ -12,7 +11,6 @@ import { DataTableColumnHeader } from '@/components/data-table/column-header';
 import { DataTablePagination } from '@/components/data-table/pagination';
 import { Label } from '@/components/ui/label';
 import type { CibleData } from '../CiblesPage/useCiblesData';
-import type { CampaignAPIResponse } from '@/types/campaign.types';
 import { OBJECTIF_KEY, objectifModeLabel, objectifModeReadOnlyClasses } from '@/lib/cible-filters';
 
 type ViewFilter = {
@@ -53,14 +51,16 @@ export default function ViewCiblePage() {
   const displayFiltre = parsedFiltre || filtreData;
 
   const { data: campaignList = [] } = useQuery<
-    { items: CampaignAPIResponse[] },
+    { items: Array<{ id_campagne: string; nom_campagne: string; etat?: string }> },
     unknown,
-    CampaignAPIResponse[]
+    Array<{ id_campagne: string; nom_campagne: string; etat?: string }>
   >({
-    queryKey: ['campaigns'],
-    queryFn: () => apiClient.request<{ items: CampaignAPIResponse[] }>(campaignsApi.findAll()),
+    queryKey: ['cible-meta', 'objective-campaigns'],
+    queryFn: () => apiClient.request<{ items: Array<{ id_campagne: string; nom_campagne: string; etat?: string }> }>(
+      ciblesApi.getObjectiveCampaigns()
+    ),
     select: (data) => data?.items ?? [],
-    staleTime: 60_000,
+    staleTime: 5 * 60 * 1000,
     enabled: !!displayFiltre?.[OBJECTIF_KEY],
   });
 

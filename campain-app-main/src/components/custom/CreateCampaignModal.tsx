@@ -1,8 +1,6 @@
 import { useState, useEffect } from 'react';
 import { X } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { modelesApi } from '@/lib/api/definitions/modeles.api';
-import { ciblesApi } from '@/lib/api/definitions/cibles.api';
 import { campaignsApi } from '@/lib/api/definitions/campaigns.api';
 import { getApiClient } from '@/lib/api/api-client';
 import type { TypeCampagne, VisitMode, VisitPurpose } from '@/types/campaign.types';
@@ -45,16 +43,19 @@ interface CreateCampaignModalProps {
 interface ModeleAPIResponse {
   id_modele: string;
   nom_modele: string;
-  date_creation: string;
+  date_creation?: string;
 }
 
 interface CibleAPIResponse {
-  id: string;
-  id_cible?: string;
+  id_cible: string;
   nom_cible: string;
-  source: string;
-  created_at?: string;
+  source?: string;
   date_creation?: string;
+}
+
+interface CampaignCreateOptionsResponse {
+  modeles: ModeleAPIResponse[];
+  cibles: CibleAPIResponse[];
 }
 
 export default function CreateCampaignModal({ isOpen, onClose, onSuccess, duplicateData }: CreateCampaignModalProps) {
@@ -85,52 +86,29 @@ export default function CreateCampaignModal({ isOpen, onClose, onSuccess, duplic
 
   const [errors, setErrors] = useState<Record<string, string>>({});
 
-  // Fetch modeles (shares cache key with useModelesData — always store raw response)
-  const { data: modelesResponse, isLoading: modelesLoading } = useQuery({
-    queryKey: ['modeles'],
-    queryFn: async () => {
-      return await apiClient.request<{ items: ModeleAPIResponse[] }>(
-        modelesApi.findAll()
-      );
-    },
+  // Une seule requête légère pour les deux sélecteurs de la modale.
+  const { data: createOptions, isLoading: createOptionsLoading } = useQuery<CampaignCreateOptionsResponse>({
+    queryKey: ['campaign-meta', 'create-options'],
+    queryFn: () => apiClient.request<CampaignCreateOptionsResponse>(campaignsApi.createOptions()),
     enabled: isOpen,
-  });
-  const modeles: ModeleAPIResponse[] = Array.isArray(modelesResponse) ? modelesResponse : modelesResponse?.items ?? [];
-
-  // Fetch cibles (API returns direct array)
-  const { data: cibles = [], isLoading: ciblesLoading } = useQuery({
-    queryKey: ['cibles'],
-    queryFn: async () => {
-      const response = await apiClient.request<CibleAPIResponse[] | { items: CibleAPIResponse[] }>(
-        ciblesApi.findAll()
-      );
-      return Array.isArray(response) ? response : response?.items ?? [];
-    },
-    enabled: isOpen,
+    staleTime: 5 * 60 * 1000,
   });
 
-  // Set default values when data is loaded
+  const modeles = createOptions?.modeles ?? [];
+  const cibles = createOptions?.cibles ?? [];
+  const modelesLoading = createOptionsLoading;
+  const ciblesLoading = createOptionsLoading;
+
+  // Le backend renvoie déjà les options de la plus récente à la plus ancienne.
   useEffect(() => {
     if (modeles.length > 0 && !formData.id_modele) {
-      // Get latest modele (sorted by date_creation desc)
-      const sortedModeles = [...modeles].sort((a, b) =>
-        new Date(b.date_creation).getTime() - new Date(a.date_creation).getTime()
-      );
-      setFormData((prev) => ({ ...prev, id_modele: sortedModeles[0].id_modele }));
+      setFormData((prev) => ({ ...prev, id_modele: modeles[0].id_modele }));
     }
   }, [modeles, formData.id_modele]);
 
   useEffect(() => {
     if (cibles.length > 0 && !formData.id_cible) {
-      // Get latest cible (sorted by created_at desc)
-      const sortedCibles = [...cibles].sort((a, b) => {
-        const dateStrA = a.date_creation || a.created_at;
-        const dateStrB = b.date_creation || b.created_at;
-        const dateA = dateStrA ? new Date(dateStrA).getTime() : 0;
-        const dateB = dateStrB ? new Date(dateStrB).getTime() : 0;
-        return dateB - dateA;
-      });
-      setFormData((prev) => ({ ...prev, id_cible: sortedCibles[0].id_cible || sortedCibles[0].id }));
+      setFormData((prev) => ({ ...prev, id_cible: cibles[0].id_cible }));
     }
   }, [cibles, formData.id_cible]);
 
@@ -171,6 +149,7 @@ export default function CreateCampaignModal({ isOpen, onClose, onSuccess, duplic
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['campaigns'] });
+      queryClient.invalidateQueries({ queryKey: ['campaign-meta'] });
       onSuccess?.();
       onClose();
       resetForm();
@@ -431,8 +410,8 @@ export default function CreateCampaignModal({ isOpen, onClose, onSuccess, duplic
                 >
                   <option value="">Sélectionner une cible</option>
                   {cibles.map((cible) => (
-                    <option key={cible.id_cible || cible.id} value={cible.id_cible || cible.id}>
-                      {cible.nom_cible} ({cible.source})
+                    <option key={cible.id_cible} value={cible.id_cible}>
+                      {cible.nom_cible}{cible.source ? ` (${cible.source})` : ''}
                     </option>
                   ))}
                 </select>

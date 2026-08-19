@@ -2,7 +2,6 @@ import { useMemo, useCallback, useEffect } from 'react';
 import { X } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { modelesApi } from '@/lib/api/definitions/modeles.api';
-import { dashboardApi } from '@/lib/api/definitions/dashboard.api';
 import { getApiClient } from '@/lib/api/api-client';
 import { normalizeBlocks } from '@/lib/modele-normalization';
 import { getBlockDisplayNumber } from '@/lib/block-utils';
@@ -69,15 +68,9 @@ export default function WorkflowModal({
     enabled: isOpen && !!modelId,
   });
 
-  const { isLoading: analyticsLoading } = useQuery({
-    queryKey: ['campaign-analytics-by-campaign', campaignId],
-    queryFn: () => apiClient.request(
-      dashboardApi.computeByCampaign({ campagne_ids: campaignId ? [campaignId] : [] })
-    ),
-    enabled: isOpen && !!campaignId,
-  });
-
-  const isLoading = modeleLoading || analyticsLoading;
+  // WorkflowPreview charge lui-même les analytics uniquement si elles sont nécessaires.
+  // On évite ici une requête dupliquée qui bloquait inutilement l'ouverture de la modale.
+  const isLoading = modeleLoading;
 
   const blocks = useMemo(() => resolveBlocks(modele), [modele]);
   const layout = useMemo<WorkflowLayout | null>(() => {

@@ -3,7 +3,6 @@ import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import { useState, useEffect, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { ciblesApi } from '@/lib/api/definitions/cibles.api';
-import { campaignsApi } from '@/lib/api/definitions/campaigns.api';
 import { metaApi } from '@/lib/api/definitions/meta.api';
 import { getApiClient } from '@/lib/api/api-client';
 import { Input } from '@/components/ui/input';
@@ -12,7 +11,6 @@ import { Button } from '@/components/ui/button';
 import { MultiSelect } from '@/components/ui/multi-select';
 import Toast from '@/components/Toast';
 import { FileUpload } from '@/components/custom/FileUpload';
-import type { CampaignAPIResponse } from '@/types/campaign.types';
 import {
   OBJECTIF_KEY,
   OBJECTIF_MODES,
@@ -85,14 +83,16 @@ export default function CreateCiblePage() {
   });
 
   const { data: campaignList = [] } = useQuery<
-    { items: CampaignAPIResponse[] },
+    { items: Array<{ id_campagne: string; nom_campagne: string; etat?: string }> },
     unknown,
-    CampaignAPIResponse[]
+    Array<{ id_campagne: string; nom_campagne: string; etat?: string }>
   >({
-    queryKey: ['campaigns'],
-    queryFn: () => apiClient.request<{ items: CampaignAPIResponse[] }>(campaignsApi.findAll()),
+    queryKey: ['cible-meta', 'objective-campaigns'],
+    queryFn: () => apiClient.request<{ items: Array<{ id_campagne: string; nom_campagne: string; etat?: string }> }>(
+      ciblesApi.getObjectiveCampaigns()
+    ),
     select: (data) => data?.items ?? [],
-    staleTime: 60_000,
+    staleTime: 5 * 60 * 1000,
   });
 
   const campaignOptions = useMemo(

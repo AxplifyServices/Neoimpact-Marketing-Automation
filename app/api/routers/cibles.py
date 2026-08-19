@@ -8,6 +8,7 @@ import pandas as pd
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query
 from pydantic import BaseModel
+from app.storage.postgres_db import connection
 from fastapi.encoders import jsonable_encoder
 
 from app.domain.ui_facades.cibles_ui_facade import (
@@ -163,12 +164,28 @@ def list_cibles(
 @router.get("/cibles/objective-campaigns")
 def list_objective_campaigns_for_cible_filter():
     """
-    Liste des campagnes disponibles pour le filtre :
-    clients ayant atteint un objectif dans une autre campagne.
+    Liste légère des campagnes disponibles pour le filtre objectif.
+    Ne charge que les trois colonnes nécessaires aux sélecteurs.
     """
-    return {
-        "items": list_campaigns_for_objective_filter_ui()
-    }
+    with connection(dict_rows=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id_campagne, nom_campagne, etat_campagne
+                FROM campagnes
+                ORDER BY nom_campagne ASC, id_campagne ASC
+                """
+            )
+            items = [
+                {
+                    "id_campagne": str(row.get("id_campagne") or ""),
+                    "nom_campagne": str(row.get("nom_campagne") or ""),
+                    "etat": str(row.get("etat_campagne") or ""),
+                }
+                for row in cur.fetchall()
+                if row.get("id_campagne")
+            ]
+    return {"items": items}
 
 @router.get("/cibles/locked")
 def locked_cibles():

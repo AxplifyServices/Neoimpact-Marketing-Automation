@@ -355,6 +355,39 @@ def dispatch_terrain_status(id_campagne: str):
 # =========================================================
 # Endpoints META (additifs -> ne cassent rien)
 # =========================================================
+
+@router.get("/campagnes/meta/create-options")
+def campaign_create_options():
+    """
+    Options légères pour la modale de création de campagne.
+    Retourne uniquement les champs réellement affichés dans les deux sélecteurs.
+    """
+    with connection(dict_rows=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id_modele, nom_modele, date_creation
+                FROM modeles
+                ORDER BY date_creation DESC NULLS LAST, id_modele DESC
+                """
+            )
+            modeles = [dict(row) for row in cur.fetchall()]
+
+            cur.execute(
+                """
+                SELECT id_cible, nom_cible, source, date_creation
+                FROM cibles
+                ORDER BY date_creation DESC NULLS LAST, id_cible DESC
+                """
+            )
+            cibles = [dict(row) for row in cur.fetchall()]
+
+    return {
+        "modeles": modeles,
+        "cibles": cibles,
+    }
+
+
 @router.get("/campagnes/meta/active-choices")
 def active_campaign_choices():
     """
