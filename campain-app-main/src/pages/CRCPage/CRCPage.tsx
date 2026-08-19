@@ -29,6 +29,7 @@ export default function CRCPage() {
   const { data: gestionnairesData } = useQuery<{ gestionnaires: string[] }>({
     queryKey: ['gestionnaires'],
     queryFn: () => apiClient.request<{ gestionnaires: string[] }>(queuesApi.getGestionnaires()),
+    staleTime: 5 * 60 * 1000,
   });
 
   // Fetch next contact from selected queue

@@ -11,7 +11,7 @@ export const dashboardApi = {
 
   // Compute dashboard (POST method - preferred)
   compute: (filters: DashboardComputeRequest): ApiRequest => ({
-    url: '/dashboard/compute',
+    url: '/dashboard/compute-summary',
     method: 'POST',
     body: filters,
   }),

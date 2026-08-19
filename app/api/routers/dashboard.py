@@ -73,6 +73,25 @@ def dashboard_compute(payload: DashboardIn):
     return compute_dashboard_payload(filters)
 
 
+
+# =========================================================
+# Compute dashboard summary (POST)
+# - Endpoint optimisé pour le front principal.
+# - Ne calcule pas le bloc by_campaign, très coûteux et inutilisé par cet écran.
+# - L'ancien /dashboard/compute reste inchangé pour compatibilité.
+# =========================================================
+@router.post("/dashboard/compute-summary")
+def dashboard_compute_summary(payload: DashboardIn):
+    filters = DashboardFilters(
+        campagne_ids=payload.campagne_ids,
+        etats_campagne=payload.etats_campagne,
+        date_min=payload.date_min,
+        date_max=payload.date_max,
+        gestionnaires=payload.gestionnaires,
+    )
+    return compute_dashboard_payload(filters, include_by_campaign=False)
+
+
 # =========================================================
 # Compute dashboard (GET) – utile debug / URL share
 # =========================================================

@@ -148,10 +148,16 @@ interface BlockCondition {
   nextBlockId: string | null;
 }
 
+interface WorkflowAnalyticsData {
+  graph?: { nodes?: CampaignGraphNode[] };
+  tables?: { by_channel?: ChannelTableRow[] };
+}
+
 interface WorkflowPreviewProps {
   blocks: Block[];
   getBlockDisplayNumber: (blockId: string) => number;
   campaignId?: string;
+  analyticsData?: WorkflowAnalyticsData;
   etatsCampagne?: string[];
   dateMin?: string | null;
   dateMax?: string | null;
@@ -838,6 +844,7 @@ export default function WorkflowPreview({
   blocks,
   getBlockDisplayNumber,
   campaignId,
+  analyticsData: providedAnalyticsData,
   etatsCampagne,
   dateMin,
   dateMax,
@@ -866,8 +873,10 @@ export default function WorkflowPreview({
 }: WorkflowPreviewProps) {
   const apiClient = getApiClient();
 
-  // Fetch campaign analytics when campaignId is provided
-  const { data: analyticsData } = useQuery<DashboardComputeByCampaignResponse>({
+  // Fetch campaign analytics only when the caller has not already supplied them.
+  // DashboardPage already owns the same graph/table data, so reusing it avoids
+  // a second expensive dashboard computation for the same campaign.
+  const { data: fetchedAnalyticsData } = useQuery<DashboardComputeByCampaignResponse>({
     queryKey: ['campaign-analytics-by-campaign', campaignId, etatsCampagne, dateMin, dateMax],
     queryFn: () => apiClient.request<DashboardComputeByCampaignResponse>(
       dashboardApi.computeByCampaign({
@@ -877,9 +886,11 @@ export default function WorkflowPreview({
         date_max: dateMax,
       })
     ),
-    enabled: !!campaignId,
+    enabled: !!campaignId && !providedAnalyticsData,
     staleTime: 5 * 60 * 1000,
   });
+
+  const analyticsData = providedAnalyticsData ?? fetchedAnalyticsData;
 
   // Build lookup map: graph node id -> graph node (for per-node Clients/Closed/Taux)
   const graphNodeMap = useMemo(() => {

@@ -117,7 +117,7 @@ class DashboardFilters:
 # =========================================================
 def list_campagnes_df() -> pd.DataFrame:
     return read_dataframe(
-        f"SELECT * FROM {CAMPAGNES_TABLE}"
+        f"SELECT id_campagne, nom_campagne, etat_campagne FROM {CAMPAGNES_TABLE}"
     )
 
 
@@ -700,7 +700,7 @@ def build_graph_payload_for_single_campaign(df: pd.DataFrame, campagne_id: str) 
 # =========================================================
 # Orchestrator (Streamlit + API)
 # =========================================================
-def compute_dashboard_payload(filters: DashboardFilters) -> Dict[str, Any]:
+def compute_dashboard_payload(filters: DashboardFilters, include_by_campaign: bool = True) -> Dict[str, Any]:
     df = load_clients_campagnes_df(filters)
 
     kpis = compute_kpis_compact(df)
@@ -728,7 +728,7 @@ def compute_dashboard_payload(filters: DashboardFilters) -> Dict[str, Any]:
     if filters.campagne_ids and len(filters.campagne_ids) == 1:
         payload["graph"] = build_graph_payload_for_single_campaign(df, _clean_campagne_id(filters.campagne_ids[0]))
 
-    if filters.campagne_ids:
+    if include_by_campaign and filters.campagne_ids:
         by_campaign: Dict[str, Any] = {}
         for raw in (filters.campagne_ids or []):
             cid = _clean_campagne_id(raw)

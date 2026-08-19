@@ -28,8 +28,7 @@ import { modelesApi } from '@/lib/api/definitions/modeles.api';
 import { getApiClient } from '@/lib/api/api-client';
 import { normalizeBlocks } from '@/lib/modele-normalization';
 import { getBlockDisplayNumber } from '@/lib/block-utils';
-import { dashboardApi } from '@/lib/api/definitions/dashboard.api';
-import type { DashboardComputeRequest, DashboardComputeByCampaignResponse, ChannelTableRow } from '@/types/dashboard.types';
+import type { DashboardComputeRequest, ChannelTableRow } from '@/types/dashboard.types';
 import type { WorkflowLayout } from '@/types/modele.types';
 
 export default function DashboardPage() {
@@ -79,23 +78,6 @@ export default function DashboardPage() {
     enabled: !!modeleId,
   });
 
-  // Pre-fetch analytics so WorkflowPreview has data in cache on first render
-  const dateMin = appliedFilters?.date_min ?? null;
-  const dateMax = appliedFilters?.date_max ?? null;
-  const etatsCampagne = appliedFilters?.etats_campagne;
-  const { isLoading: workflowAnalyticsLoading } = useQuery<DashboardComputeByCampaignResponse>({
-    queryKey: ['campaign-analytics-by-campaign', workflowCampaignId, etatsCampagne, dateMin, dateMax],
-    queryFn: () => apiClient.request<DashboardComputeByCampaignResponse>(
-      dashboardApi.computeByCampaign({
-        campagne_ids: workflowCampaignId ? [workflowCampaignId] : [],
-        etats_campagne: etatsCampagne,
-        date_min: dateMin,
-        date_max: dateMax,
-      })
-    ),
-    enabled: !!workflowCampaignId,
-    staleTime: 5 * 60 * 1000,
-  });
 
   const workflowBlocks = useMemo(() => {
     if (!modele) return [];
@@ -367,7 +349,7 @@ export default function DashboardPage() {
           )}
 
           {/* Workflow Section - Full Width */}
-          {dashboardData?.graph && workflowBlocks.length > 0 && !workflowAnalyticsLoading && (
+          {dashboardData?.graph && workflowBlocks.length > 0 && (
             <div className="mb-8">
               <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-100">
                 <div className="flex items-center justify-between mb-4">
@@ -408,9 +390,7 @@ export default function DashboardPage() {
                       blocks={workflowBlocks}
                       getBlockDisplayNumber={blockDisplayNumber}
                       campaignId={dashboardData.graph.campaign_id}
-                      etatsCampagne={etatsCampagne}
-                      dateMin={dateMin}
-                      dateMax={dateMax}
+                      analyticsData={dashboardData}
                       layout={workflowLayout}
                       showHeader={false}
                       showFrame={false}
@@ -422,9 +402,7 @@ export default function DashboardPage() {
                   <Suspense fallback={<div className="py-12 text-center text-sm text-gray-500">Chargement du tableau…</div>}><WorkflowTable
                     blocks={workflowBlocks}
                     campaignId={dashboardData.graph.campaign_id}
-                    etatsCampagne={etatsCampagne}
-                    dateMin={dateMin}
-                    dateMax={dateMax}
+                    analyticsData={dashboardData}
                     getBlockDisplayNumber={blockDisplayNumber}
                   /></Suspense>
                 )}

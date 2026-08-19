@@ -5,9 +5,15 @@ import { dashboardApi } from '@/lib/api/definitions/dashboard.api';
 import type { DashboardComputeByCampaignResponse, CampaignGraphNode, ChannelTableRow } from '@/types/dashboard.types';
 import type { Block } from '@/types/modele.types';
 
+interface WorkflowAnalyticsData {
+  graph?: { nodes?: CampaignGraphNode[] };
+  tables?: { by_channel?: ChannelTableRow[] };
+}
+
 interface WorkflowTableProps {
   blocks: Block[];
   campaignId: string;
+  analyticsData?: WorkflowAnalyticsData;
   getBlockDisplayNumber: (blockId: string) => number;
   etatsCampagne?: string[];
   dateMin?: string | null;
@@ -63,17 +69,19 @@ function formatObjectiveDetail(cond: Block['objectiveConditions'][number]): { na
   return { name, value: '' };
 }
 
-export default function WorkflowTable({ blocks, campaignId, getBlockDisplayNumber, etatsCampagne, dateMin, dateMax }: WorkflowTableProps) {
+export default function WorkflowTable({ blocks, campaignId, analyticsData: providedAnalyticsData, getBlockDisplayNumber, etatsCampagne, dateMin, dateMax }: WorkflowTableProps) {
   const apiClient = getApiClient();
 
-  const { data: analyticsData } = useQuery<DashboardComputeByCampaignResponse>({
+  const { data: fetchedAnalyticsData } = useQuery<DashboardComputeByCampaignResponse>({
     queryKey: ['campaign-analytics-by-campaign', campaignId, etatsCampagne, dateMin, dateMax],
     queryFn: () => apiClient.request<DashboardComputeByCampaignResponse>(
       dashboardApi.computeByCampaign({ campagne_ids: [campaignId], etats_campagne: etatsCampagne, date_min: dateMin, date_max: dateMax })
     ),
-    enabled: !!campaignId,
+    enabled: !!campaignId && !providedAnalyticsData,
     staleTime: 5 * 60 * 1000,
   });
+
+  const analyticsData = providedAnalyticsData ?? fetchedAnalyticsData;
 
   const graphNodeMap = useMemo(() => {
     if (!analyticsData?.graph?.nodes) return new Map<string, CampaignGraphNode>();

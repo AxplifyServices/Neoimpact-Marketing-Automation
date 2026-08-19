@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { getApiClient } from '@/lib/api/api-client';
 import { dashboardApi } from '@/lib/api/definitions/dashboard.api';
 import type {
@@ -47,6 +47,8 @@ export function useDashboardData({
       })
     ),
     enabled: !!appliedFilters, // Only run when filters are applied
+    placeholderData: keepPreviousData,
+    staleTime: 30_000,
   });
 
   return {
