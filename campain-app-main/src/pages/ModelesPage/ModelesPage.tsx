@@ -8,11 +8,12 @@ import ConfirmDialog from '../../components/ConfirmDialog';
 import { modelesApi } from '@/lib/api/definitions/modeles.api';
 import { getApiClient } from '@/lib/api/api-client';
 import { invalidateCampaignReferenceCaches } from '@/lib/api/cache-invalidation';
-import { type ColumnDef } from '@tanstack/react-table';
+import { type ColumnDef, type SortingState } from '@tanstack/react-table';
 import { DataTable } from '@/components/data-table/data-table';
 import { DataTableToolbar } from '@/components/data-table/toolbar';
 import { DataTablePagination } from '@/components/data-table/pagination';
 import { DataTableColumnHeader } from '@/components/data-table/column-header';
+import { ServerFacetedFilter } from '@/components/data-table/server-faceted-filter';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -89,7 +90,21 @@ export default function ModelesPage() {
   const navigate = useNavigate();
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(20);
-  const { modeles, isLoading, refetch, lockedModels, usedCount, unusedCount, total, totalPages, uniqueVariables } = useModelesData(page, pageSize);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<string[]>([]);
+  const [variableFilter, setVariableFilter] = useState<string[]>([]);
+  const [dateMin, setDateMin] = useState<string>('');
+  const [dateMax, setDateMax] = useState<string>('');
+  const [sorting, setSorting] = useState<SortingState>([]);
+  const { modeles, isLoading, refetch, lockedModels, usedCount, unusedCount, total, totalPages, uniqueVariables, variableOptions } = useModelesData(page, pageSize, {
+    search: searchQuery,
+    status: (statusFilter[0] as 'locked' | 'available' | undefined) || '',
+    variable: variableFilter[0] || '',
+    dateMin,
+    dateMax,
+    sortBy: sorting[0]?.id,
+    sortDir: sorting[0]?.desc ? 'desc' : sorting[0] ? 'asc' : undefined,
+  });
   const apiClient = getApiClient();
   const queryClient = useQueryClient();
   const [toast, setToast] = useState<{ isOpen: boolean; title: string; message?: string; type?: 'success' | 'error' | 'warning' }>({
@@ -97,8 +112,6 @@ export default function ModelesPage() {
     title: '',
   });
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
-  const [dateMin, setDateMin] = useState<string>('');
-  const [dateMax, setDateMax] = useState<string>('');
 
   const handleNewModele = () => {
     navigate('/modeles/create');
@@ -345,13 +358,10 @@ export default function ModelesPage() {
   );
 
   // Get unique variable cibles for filter
-  const variableCibleOptions = useMemo(() => {
-    const uniqueVariables = Array.from(new Set(modeles.map(m => m.variable_cible)));
-    return uniqueVariables.map(variable => ({
-      label: variable,
-      value: variable,
-    }));
-  }, [modeles]);
+  const variableCibleOptions = useMemo(() =>
+    variableOptions.map((variable) => ({ label: variable, value: variable })),
+    [variableOptions]
+  );
 
   // Filter options for status
   const statusFilterOptions = useMemo(() => [
@@ -453,59 +463,52 @@ export default function ModelesPage() {
         pagination={{ currentPage: page, totalPages, pageSize }}
         onPageChange={setPage}
         onPageSizeChange={(size) => { setPageSize(size); setPage(0); }}
+        sorting={sorting}
+        onSortingChange={(next) => { setSorting(next.slice(0, 1)); setPage(0); }}
         toolbar={(table) => (
           <DataTableToolbar
             table={table}
             searchPlaceholder="Rechercher un modèle..."
-            searchKey="nom_modele"
-            filters={[
-              {
-                columnId: 'variable_cible',
-                title: 'Variable Cible',
-                options: variableCibleOptions,
-              },
-              {
-                columnId: 'locked',
-                title: 'Statut',
-                options: statusFilterOptions,
-              },
-            ]}
+            onSearchChange={(value) => { setSearchQuery(value); setPage(0); }}
+            searchValue={searchQuery}
+            hasExternalFilters={Boolean(variableFilter.length || statusFilter.length || dateMin || dateMax)}
             onReset={() => {
+              setSearchQuery('');
+              setVariableFilter([]);
+              setStatusFilter([]);
               setDateMin('');
               setDateMax('');
+              setPage(0);
             }}
           >
-            {/* Date range filter */}
+            {variableCibleOptions.length > 0 && (
+              <ServerFacetedFilter
+                title="Variable Cible"
+                options={variableCibleOptions}
+                selectedValues={variableFilter}
+                onSelectionChange={(values) => { setVariableFilter(values); setPage(0); }}
+              />
+            )}
+            <ServerFacetedFilter
+              title="Statut"
+              options={statusFilterOptions}
+              selectedValues={statusFilter}
+              onSelectionChange={(values) => { setStatusFilter(values); setPage(0); }}
+            />
             <Input
               type="date"
               value={dateMin}
-              onChange={(e) => {
-                const newDateMin = e.target.value;
-                setDateMin(newDateMin);
-                if (newDateMin || dateMax) {
-                  table.getColumn('date_creation')?.setFilterValue({ min: newDateMin, max: dateMax });
-                } else {
-                  table.getColumn('date_creation')?.setFilterValue(undefined);
-                }
-              }}
+              onChange={(e) => { setDateMin(e.target.value); setPage(0); }}
               max={dateMax || undefined}
-              placeholder="Date début"
+              aria-label="Date de création minimale"
               className="h-8 w-[150px]"
             />
             <Input
               type="date"
               value={dateMax}
-              onChange={(e) => {
-                const newDateMax = e.target.value;
-                setDateMax(newDateMax);
-                if (dateMin || newDateMax) {
-                  table.getColumn('date_creation')?.setFilterValue({ min: dateMin, max: newDateMax });
-                } else {
-                  table.getColumn('date_creation')?.setFilterValue(undefined);
-                }
-              }}
+              onChange={(e) => { setDateMax(e.target.value); setPage(0); }}
               min={dateMin || undefined}
-              placeholder="Date fin"
+              aria-label="Date de création maximale"
               className="h-8 w-[150px]"
             />
           </DataTableToolbar>

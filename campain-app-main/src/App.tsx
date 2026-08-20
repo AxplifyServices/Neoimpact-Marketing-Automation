@@ -2,22 +2,23 @@ import { lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import LoadingSpinner from './components/LoadingSpinner';
+import { routeLoaders } from './lib/route-preload';
 
-const CampagnesPage = lazy(() => import('./pages/CampagnesPage'));
-const ModelesPage = lazy(() => import('./pages/ModelesPage'));
-const CreateModelePage = lazy(() => import('./pages/CreateModelePage'));
-const ViewModelePage = lazy(() => import('./pages/ViewModelePage'));
-const CiblesPage = lazy(() => import('./pages/CiblesPage'));
-const CreateCiblePage = lazy(() => import('./pages/CreateCiblePage'));
-const ViewCiblePage = lazy(() => import('./pages/ViewCiblePage'));
-const ClientsPage = lazy(() => import('./pages/ClientsPage'));
-const CreateClientPage = lazy(() => import('./pages/CreateClientPage'));
-const ViewClientPage = lazy(() => import('./pages/ViewClientPage'));
-const CRCPage = lazy(() => import('./pages/CRCPage'));
-const TerrainPage = lazy(() => import('./pages/TerrainPage'));
-const HistoriquePage = lazy(() => import('./pages/HistoriquePage'));
-const DashboardPage = lazy(() => import('./pages/DashboardPage'));
-const ContactSupportPage = lazy(() => import('./pages/ContactSupportPage'));
+const CampagnesPage = lazy(routeLoaders.campagnes);
+const ModelesPage = lazy(routeLoaders.modeles);
+const CreateModelePage = lazy(routeLoaders.createModele);
+const ViewModelePage = lazy(routeLoaders.viewModele);
+const CiblesPage = lazy(routeLoaders.cibles);
+const CreateCiblePage = lazy(routeLoaders.createCible);
+const ViewCiblePage = lazy(routeLoaders.viewCible);
+const ClientsPage = lazy(routeLoaders.clients);
+const CreateClientPage = lazy(routeLoaders.createClient);
+const ViewClientPage = lazy(routeLoaders.viewClient);
+const CRCPage = lazy(routeLoaders.crc);
+const TerrainPage = lazy(routeLoaders.terrain);
+const HistoriquePage = lazy(routeLoaders.historique);
+const DashboardPage = lazy(routeLoaders.dashboard);
+const ContactSupportPage = lazy(routeLoaders.support);
 
 function RouteFallback() {
   return (

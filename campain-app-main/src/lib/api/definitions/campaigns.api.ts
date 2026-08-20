@@ -3,10 +3,18 @@ import type { TypeCampagne, VisitMode, VisitPurpose } from '@/types/campaign.typ
 
 export const campaignsApi = {
   // Get campaigns with server-side pagination. `offset` is the backend page index.
-  findAll: (params?: { limit?: number; offset?: number; pages?: number; etat?: string }): ApiRequest => ({
+  findAll: (params?: { limit?: number; offset?: number; pages?: number; etat?: string; q?: string; etats?: string; date_min?: string; date_max?: string }): ApiRequest => ({
     url: '/campagnes',
     method: 'GET',
     params,
+  }),
+
+
+  // Ultra-light polling while one or more campaigns are being prepared.
+  processingStatuses: (ids: string[]): ApiRequest => ({
+    url: '/campagnes/processing-statuses',
+    method: 'GET',
+    params: { ids },
   }),
 
   // Lightweight label/id lookups used by campaign cards.

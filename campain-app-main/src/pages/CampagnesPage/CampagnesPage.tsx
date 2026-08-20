@@ -1,10 +1,9 @@
 import { Search, TrendingUp, Users, Target, MoreVertical, Play, Pause, XCircle, X, Check, Copy, MapPin, Monitor } from 'lucide-react';
 import { useCampagnesData } from './useCampagnesData';
-import { lazy, Suspense, useState, useMemo, useRef, useEffect } from 'react';
+import { lazy, Suspense, useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { campaignsApi } from '@/lib/api/definitions/campaigns.api';
 import { getApiClient } from '@/lib/api/api-client';
-import { invalidateCampaignCaches } from '@/lib/api/cache-invalidation';
 import Toast from '../../components/Toast';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import LoadingSpinner from '../../components/LoadingSpinner';
@@ -16,28 +15,41 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Button } from '@/components/ui/button';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 
 const CreateCampaignModal = lazy(() => import('../../components/custom/CreateCampaignModal'));
 const WorkflowModal = lazy(() => import('../../components/custom/WorkflowModal'));
 
+const updateCachedCampaignState = (queryClient: ReturnType<typeof useQueryClient>, id: string, etat: string) => {
+  queryClient.setQueriesData({ queryKey: ['campaigns', 'infinite'] }, (oldData: any) => {
+    if (!oldData?.pages) return oldData;
+    return {
+      ...oldData,
+      pages: oldData.pages.map((page: any) => ({
+        ...page,
+        items: (page.items ?? []).map((item: any) =>
+          item.id_campagne === id ? { ...item, etat_campagne: etat } : item
+        ),
+      })),
+    };
+  });
+};
+
+const markCampaignDependentCachesStale = (queryClient: ReturnType<typeof useQueryClient>) => {
+  void queryClient.invalidateQueries({ queryKey: ['campaign-meta', 'active-choices'], refetchType: 'none' });
+  void queryClient.invalidateQueries({ queryKey: ['dashboard-filters'], refetchType: 'none' });
+  void queryClient.invalidateQueries({ queryKey: ['dashboard-compute'], refetchType: 'none' });
+};
+
 export default function CampagnesPage() {
-  const {
-    stats: statsData,
-    campaigns,
-    total,
-    isLoading,
-    isFetchingNextPage,
-    hasNextPage,
-    fetchNextPage,
-  } = useCampagnesData();
   const queryClient = useQueryClient();
   const apiClient = getApiClient();
   const [searchQuery, setSearchQuery] = useState('');
+  const deferredSearch = useDebouncedValue(searchQuery, 300);
   const [selectedStatuses, setSelectedStatuses] = useState<string[]>([]);
   const [dateMin, setDateMin] = useState<string>('');
   const [dateMax, setDateMax] = useState<string>('');
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [duplicateCampaign, setDuplicateCampaign] = useState<typeof campaigns[0] | null>(null);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [cancelDialog, setCancelDialog] = useState<{ isOpen: boolean; campaignId?: string; campaignTitle?: string }>({
     isOpen: false,
@@ -46,22 +58,52 @@ export default function CampagnesPage() {
     isOpen: boolean;
     modelId?: string;
     campaignId?: string;
-  }>({
-    isOpen: false,
-  });
+  }>({ isOpen: false });
   const [toast, setToast] = useState<{ isOpen: boolean; title: string; message?: string; type?: 'success' | 'error' | 'warning' }>({
     isOpen: false,
     title: '',
   });
 
-  // Infinite scroll is backed by real server-side pagination (9 campaigns per request).
+  const {
+    stats: statsData,
+    campaigns,
+    total,
+    isLoading,
+    isFetchingNextPage,
+    hasNextPage,
+    fetchNextPage,
+  } = useCampagnesData({
+    search: deferredSearch,
+    statuses: selectedStatuses,
+    dateMin,
+    dateMax,
+  });
+
+  const [duplicateCampaign, setDuplicateCampaign] = useState<typeof campaigns[0] | null>(null);
   const loadMoreRef = useRef<HTMLDivElement>(null);
 
-  // Cancel campaign mutation
+  const prefetchCreateCampaign = useCallback(() => {
+    void queryClient.prefetchQuery({
+      queryKey: ['campaign-meta', 'create-options'],
+      queryFn: () => apiClient.request(campaignsApi.createOptions()),
+      staleTime: 5 * 60_000,
+    });
+    void import('../../components/custom/CreateCampaignModal');
+  }, [apiClient, queryClient]);
+
+  // Lifecycle mutations are optimistic: the card changes immediately while
+  // the backend performs its single-row campaign update. On error we restore
+  // the previous query cache exactly.
   const cancelCampaignMutation = useMutation({
     mutationFn: (id: string) => apiClient.request(campaignsApi.cancel(id)),
+    onMutate: async (id) => {
+      await queryClient.cancelQueries({ queryKey: ['campaigns'] });
+      const snapshot = queryClient.getQueriesData({ queryKey: ['campaigns', 'infinite'] });
+      updateCachedCampaignState(queryClient, id, 'Annulée');
+      return { snapshot };
+    },
     onSuccess: () => {
-      void invalidateCampaignCaches(queryClient);
+      markCampaignDependentCachesStale(queryClient);
       setToast({
         isOpen: true,
         title: 'Campagne annulée',
@@ -70,109 +112,57 @@ export default function CampagnesPage() {
       });
       setCancelDialog({ isOpen: false });
     },
-    onError: () => {
-      setToast({
-        isOpen: true,
-        title: 'Erreur',
-        message: 'Une erreur est survenue lors de l\'annulation',
-        type: 'error',
-      });
+    onError: (_error, _id, context) => {
+      context?.snapshot?.forEach(([key, data]) => queryClient.setQueryData(key, data));
+      setToast({ isOpen: true, title: 'Erreur', message: "Une erreur est survenue lors de l'annulation", type: 'error' });
     },
   });
 
-  // Pause/Désactiver campaign mutation
   const pauseCampaignMutation = useMutation({
     mutationFn: (id: string) => apiClient.request(campaignsApi.pause(id)),
+    onMutate: async (id) => {
+      await queryClient.cancelQueries({ queryKey: ['campaigns'] });
+      const snapshot = queryClient.getQueriesData({ queryKey: ['campaigns', 'infinite'] });
+      updateCachedCampaignState(queryClient, id, 'En pause');
+      return { snapshot };
+    },
     onSuccess: () => {
-      void invalidateCampaignCaches(queryClient);
-      setToast({
-        isOpen: true,
-        title: 'Campagne désactivée',
-        message: 'La campagne a été désactivée avec succès',
-        type: 'success',
-      });
+      markCampaignDependentCachesStale(queryClient);
+      setToast({ isOpen: true, title: 'Campagne désactivée', message: 'La campagne a été désactivée avec succès', type: 'success' });
       setOpenMenuId(null);
     },
-    onError: () => {
-      setToast({
-        isOpen: true,
-        title: 'Erreur',
-        message: 'Une erreur est survenue',
-        type: 'error',
-      });
+    onError: (_error, _id, context) => {
+      context?.snapshot?.forEach(([key, data]) => queryClient.setQueryData(key, data));
+      setToast({ isOpen: true, title: 'Erreur', message: 'Une erreur est survenue', type: 'error' });
     },
   });
 
-  // Activate/Activer campaign mutation
   const activateCampaignMutation = useMutation({
-    mutationFn: (id: string) => apiClient.request(campaignsApi.activate(id)),
-    onSuccess: (data: any) => {
-      // Check if API returned ok: false
+    mutationFn: (id: string) => apiClient.request<any>(campaignsApi.activate(id)),
+    onMutate: async (id) => {
+      await queryClient.cancelQueries({ queryKey: ['campaigns'] });
+      const snapshot = queryClient.getQueriesData({ queryKey: ['campaigns', 'infinite'] });
+      updateCachedCampaignState(queryClient, id, 'En cours');
+      return { snapshot };
+    },
+    onSuccess: (data: any, _id, context) => {
       if (data && !data.ok && data.error) {
-        setToast({
-          isOpen: true,
-          title: 'Impossible d\'activer',
-          message: data.error,
-          type: 'error',
-        });
+        context?.snapshot?.forEach(([key, value]) => queryClient.setQueryData(key, value));
+        setToast({ isOpen: true, title: "Impossible d'activer", message: data.error, type: 'error' });
         return;
       }
-
-      void invalidateCampaignCaches(queryClient);
-      setToast({
-        isOpen: true,
-        title: 'Campagne activée',
-        message: 'La campagne a été activée avec succès',
-        type: 'success',
-      });
+      markCampaignDependentCachesStale(queryClient);
+      setToast({ isOpen: true, title: 'Campagne activée', message: 'La campagne a été activée avec succès', type: 'success' });
       setOpenMenuId(null);
     },
-    onError: (error: any) => {
+    onError: (error: any, _id, context) => {
+      context?.snapshot?.forEach(([key, value]) => queryClient.setQueryData(key, value));
       const errorMessage = error?.response?.data?.error || error?.message || 'Une erreur est survenue';
-      setToast({
-        isOpen: true,
-        title: 'Erreur',
-        message: errorMessage,
-        type: 'error',
-      });
+      setToast({ isOpen: true, title: 'Erreur', message: errorMessage, type: 'error' });
     },
   });
 
-  // Filter campaigns
-  const filteredCampaigns = useMemo(() => {
-    return campaigns.filter((campaign) => {
-      // Search filter
-      const matchesSearch =
-        campaign.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        campaign.code.toLowerCase().includes(searchQuery.toLowerCase());
-
-      // Status filter
-      const matchesStatus =
-        selectedStatuses.length === 0 || selectedStatuses.includes(campaign.status);
-
-      // Date filter (check if campaign overlaps with selected date range)
-      let matchesDate = true;
-      if (dateMin || dateMax) {
-        const campaignStart = new Date(campaign.startDate);
-        const campaignEnd = new Date(campaign.endDate);
-
-        if (dateMin && dateMax) {
-          const filterStart = new Date(dateMin);
-          const filterEnd = new Date(dateMax);
-          // Campaign overlaps with filter range
-          matchesDate = campaignStart <= filterEnd && campaignEnd >= filterStart;
-        } else if (dateMin) {
-          matchesDate = campaignEnd >= new Date(dateMin);
-        } else if (dateMax) {
-          matchesDate = campaignStart <= new Date(dateMax);
-        }
-      }
-
-      return matchesSearch && matchesStatus && matchesDate;
-    });
-  }, [campaigns, searchQuery, selectedStatuses, dateMin, dateMax]);
-
-  const displayedCampaigns = filteredCampaigns;
+  const displayedCampaigns = campaigns;
 
   // Load the next backend page only when the user reaches the end of the loaded list.
   useEffect(() => {
@@ -203,10 +193,12 @@ export default function CampagnesPage() {
   ], []);
 
   const handleNewCampaign = () => {
+    prefetchCreateCampaign();
     setIsCreateModalOpen(true);
   };
 
   const handleResetFilters = () => {
+    setSearchQuery('');
     setSelectedStatuses([]);
     setDateMin('');
     setDateMax('');
@@ -218,7 +210,7 @@ export default function CampagnesPage() {
     );
   };
 
-  const hasActiveFilters = selectedStatuses.length > 0 || dateMin || dateMax;
+  const hasActiveFilters = Boolean(searchQuery || selectedStatuses.length > 0 || dateMin || dateMax);
 
   const handleActivateCampaign = (campaignId: string) => {
     setOpenMenuId(null);
@@ -339,6 +331,9 @@ export default function CampagnesPage() {
         <button
           type="button"
           onClick={handleNewCampaign}
+          onMouseEnter={prefetchCreateCampaign}
+          onFocus={prefetchCreateCampaign}
+          onPointerDown={prefetchCreateCampaign}
           className="bg-slate-900 text-white px-4 py-2 rounded-xl font-medium hover:bg-slate-800 transition-colors flex items-center gap-2 cursor-pointer whitespace-nowrap"
         >
           <span className="text-xl">+</span>
@@ -474,7 +469,7 @@ export default function CampagnesPage() {
             <LoadingSpinner size="lg" />
             <p className="text-gray-500 mt-4">Chargement des campagnes...</p>
           </div>
-        ) : filteredCampaigns.length === 0 ? (
+        ) : displayedCampaigns.length === 0 ? (
           <div className="col-span-full text-center py-12">
             <p className="text-gray-500">Aucune campagne trouvée</p>
           </div>

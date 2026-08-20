@@ -2,7 +2,7 @@ import type { ApiRequest } from '../ApiRequest';
 
 export const ciblesApi = {
   // Get all cibles
-  findAll: (params?: { limit?: number; offset?: number; pages?: number }): ApiRequest => ({
+  findAll: (params?: { limit?: number; offset?: number; pages?: number; q?: string; source?: string; locked?: boolean; date_min?: string; date_max?: string; objectif_mode?: 'atteint' | 'non_atteint' | 'none'; objectif_campaign?: string; sort_by?: string; sort_dir?: 'asc' | 'desc' }): ApiRequest => ({
     url: '/cibles',
     method: 'GET',
     params,

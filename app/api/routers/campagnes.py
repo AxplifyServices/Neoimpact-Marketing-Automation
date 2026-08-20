@@ -1,7 +1,7 @@
 # app/api/routers/campagnes.py
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 import logging
 
 from fastapi import APIRouter, HTTPException, Query
@@ -196,6 +196,10 @@ def list_campagnes(
     limit: int = Query(default=500, ge=1, le=5000),
     offset: int = Query(default=0, ge=0),
     pages: int = Query(default=1, ge=1, le=10),
+    q: Optional[str] = Query(default=None, max_length=200),
+    etats: Optional[str] = Query(default=None, max_length=300),
+    date_min: Optional[str] = Query(default=None, max_length=32),
+    date_max: Optional[str] = Query(default=None, max_length=32),
 ):
     """
     Liste paginée des campagnes.
@@ -216,20 +220,29 @@ def list_campagnes(
     row_limit = per_page * nb_pages
     row_offset = page_start * per_page
 
-    where_sql = ""
+    where_parts: list[str] = []
     params: list[Any] = []
 
     if etat == "affichables":
-        # Reproduit le périmètre historique de l'écran Campagnes.
-        where_sql = """
-            WHERE COALESCE(etat_campagne, '') IN (
-                'En cours',
-                'Planifiée',
-                'En pause',
-                'Annulée',
-                'Terminée'
-            )
-        """
+        where_parts.append("COALESCE(etat_campagne, '') IN ('En cours','Planifiée','En pause','Annulée','Terminée')")
+    if q and q.strip():
+        where_parts.append("(id_campagne ILIKE %s OR nom_campagne ILIKE %s OR COALESCE(description,'') ILIKE %s)")
+        pattern = f"%{q.strip()}%"
+        params.extend([pattern, pattern, pattern])
+    if etats and etats.strip():
+        requested = [x.strip() for x in etats.split(',') if x.strip()]
+        if requested:
+            placeholders = ','.join(['%s'] * len(requested))
+            where_parts.append(f"etat_campagne IN ({placeholders})")
+            params.extend(requested)
+    if date_min and date_min.strip():
+        where_parts.append("date_fin::date >= %s::date")
+        params.append(date_min.strip())
+    if date_max and date_max.strip():
+        where_parts.append("date_debut::date <= %s::date")
+        params.append(date_max.strip())
+
+    where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
 
     with connection(dict_rows=True) as conn:
         with conn.cursor() as cur:
@@ -356,6 +369,34 @@ def activer_campagne(id_campagne: str):
     if not res.get("ok", True):
         raise HTTPException(status_code=400, detail=res.get("error", "Activation impossible"))
     return res
+
+
+@router.get("/campagnes/processing-statuses")
+def campaign_processing_statuses(ids: List[str] = Query(default=[])):
+    """Polling ultra-léger des campagnes encore en préparation.
+
+    Contrairement à l'endpoint diagnostic unitaire, celui-ci ne calcule ni
+    statistiques d'orchestration ni targeting. Il est conçu pour être appelé
+    quelques secondes par le frontend pendant une préparation volumineuse.
+    """
+    clean_ids = [str(x).strip() for x in ids if str(x).strip()][:100]
+    if not clean_ids:
+        return {"items": []}
+    placeholders = ",".join(["%s"] * len(clean_ids))
+    with connection(dict_rows=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT id_campagne, execution_status, population_count,
+                       target_count_initial, target_count_eligible,
+                       preparation_finished_at, execution_error
+                FROM campagnes
+                WHERE id_campagne IN ({placeholders})
+                """,
+                clean_ids,
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+    return {"items": rows}
 
 
 @router.get("/campagnes/{id_campagne}/processing-status")

@@ -1,4 +1,4 @@
-export const OBJECTIF_KEY = '_objectif_campagnes_';
+export const OBJECTIF_KEY = '__objectif_campagnes__';
 
 export type ObjectifMode = 'atteint' | 'non_atteint';
 

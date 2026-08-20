@@ -1,6 +1,7 @@
 import { Megaphone, Plus, Phone, History, LayoutDashboard, ChevronRight, Menu, X, FileText, Target, Users, MapPin } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useState } from 'react';
+import { preloadRoute } from '@/lib/route-preload';
 
 interface NavItem {
   icon: React.ReactNode;
@@ -74,6 +75,9 @@ export default function Sidebar() {
                   key={index}
                   type="button"
                   onClick={() => handleNavigation(item.path)}
+                  onMouseEnter={() => preloadRoute(item.path)}
+                  onFocus={() => preloadRoute(item.path)}
+                  onPointerDown={() => preloadRoute(item.path)}
                   className={`
                     w-full flex items-center justify-between
                     px-3 py-2 rounded-xl
@@ -105,6 +109,8 @@ export default function Sidebar() {
             <button
               type="button"
               onClick={() => handleNavigation('/support')}
+              onMouseEnter={() => preloadRoute('/support')}
+              onFocus={() => preloadRoute('/support')}
               className="text-blue-600 font-semibold text-xs flex items-center gap-2 hover:gap-3 transition-all"
             >
               Contact Support

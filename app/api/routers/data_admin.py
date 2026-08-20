@@ -356,6 +356,7 @@ CATEGORICAL_MAPPING: Dict[str, List[str]] = {
 class ReadTableIn(BaseModel):
     table: str
     filters: Optional[Dict[str, Any]] = None
+    columns: Optional[List[str]] = None
     limit: Optional[int] = 500
     offset: int = 0
     pages: Optional[int] = 1
@@ -554,7 +555,7 @@ def read_table(payload: ReadTableIn):
     row_limit = limit * pages
 
     total = db.count_table(payload.table, filters=db_filters)
-    df = db.read_table(payload.table, filters=db_filters, limit=row_limit, offset=row_offset)
+    df = db.read_table(payload.table, filters=db_filters, limit=row_limit, offset=row_offset, columns=payload.columns)
 
     return {
         "table": payload.table,

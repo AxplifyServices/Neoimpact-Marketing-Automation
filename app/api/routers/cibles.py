@@ -99,65 +99,181 @@ class CibleUpdateIn(BaseModel):
 # =========================================================
 @router.get("/cibles")
 def list_cibles(
-    limit: int = Query(default=200, ge=1, le=5000),  # taille page
-    offset: int = Query(default=0, ge=0),            # page_start
-    pages: Optional[int] = Query(default=None, ge=1, le=50),  # opt-in pagination
+    limit: int = Query(default=200, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+    pages: Optional[int] = Query(default=None, ge=1, le=50),
+    q: Optional[str] = Query(default=None, max_length=200),
+    source: Optional[str] = Query(default=None, max_length=20),
+    locked: Optional[bool] = Query(default=None),
+    date_min: Optional[str] = Query(default=None, max_length=32),
+    date_max: Optional[str] = Query(default=None, max_length=32),
+    objectif_mode: Optional[str] = Query(default=None, pattern='^(atteint|non_atteint|none)$'),
+    objectif_campaign: Optional[str] = Query(default=None, max_length=100),
+    sort_by: Optional[str] = Query(default=None, max_length=50),
+    sort_dir: str = Query(default='desc', pattern='^(asc|desc)$'),
 ):
+    """Liste des cibles avec vraie pagination/recherche SQL.
+
+    La compatibilité historique est conservée lorsque ``pages`` n'est pas
+    fourni. L'écran React utilise ``pages=1`` et ne matérialise donc plus
+    toutes les cibles avant de découper une page en Python.
     """
-    Ajoute locked + lock_reason pour l'UI.
-
-    Pagination (opt-in):
-      - si `pages` est fourni => renvoie un objet {items,total,...}
-      - sinon => renvoie la LISTE comme avant (compat front)
-    """
-    cibles = list_cibles_for_ui() or []
-
-    locked_ids, reasons = get_locked_cibles_for_ui()
-    locked_ids = set(locked_ids or [])
-    reasons = reasons or {}
-
-    for c in cibles:
-        if isinstance(c, dict):
-            cid = c.get("id_cible") or c.get("id") or c.get("ID")
-            is_locked = bool(cid in locked_ids)
-            c["locked"] = is_locked
-            c["lock_reason"] = (reasons.get(str(cid)) or reasons.get(cid)) if is_locked else None
-        else:
-            cid = getattr(c, "id_cible", None) or getattr(c, "id", None) or getattr(c, "ID", None)
-            is_locked = bool(cid in locked_ids)
-            try:
-                setattr(c, "locked", is_locked)
-                setattr(c, "lock_reason", (reasons.get(str(cid)) or reasons.get(cid)) if is_locked else None)
-            except Exception:
-                pass
-
-    # --- compat: si pages n'est pas fourni, on renvoie EXACTEMENT comme avant ---
-    if pages is None:
+    if pages is None and not any((q, source, locked is not None, date_min, date_max, objectif_mode, objectif_campaign)):
+        # Compatibilité des anciens consommateurs internes/Streamlit.
+        cibles = list_cibles_for_ui() or []
+        locked_ids, reasons = get_locked_cibles_for_ui()
+        locked_ids = set(locked_ids or [])
+        reasons = reasons or {}
+        for cible in cibles:
+            if not isinstance(cible, dict):
+                continue
+            cid = str(cible.get("id_cible") or "").strip()
+            cible["locked"] = cid in locked_ids
+            cible["lock_reason"] = reasons.get(cid) if cid in locked_ids else None
         return cibles
 
-    # --- pagination "pages" ---
     page_start = int(offset or 0)
     per_page = int(limit or 200)
     nb_pages = int(pages or 1)
+    row_limit = per_page * nb_pages
+    row_offset = page_start * per_page
 
-    start = page_start * per_page
-    end = start + (per_page * nb_pages)
+    where_parts: list[str] = []
+    params: list[Any] = []
+    if q and q.strip():
+        where_parts.append("(c.id_cible ILIKE %s OR c.nom_cible ILIKE %s)")
+        pattern = f"%{q.strip()}%"
+        params.extend([pattern, pattern])
+    if source and source.strip():
+        source_key = source.strip().lower()
+        source_value = {"db": "DB", "file": "Fichier plat"}.get(source_key, source.strip())
+        where_parts.append("c.source = %s")
+        params.append(source_value)
+    if date_min and date_min.strip():
+        where_parts.append("c.date_creation::date >= %s::date")
+        params.append(date_min.strip())
+    if date_max and date_max.strip():
+        where_parts.append("c.date_creation::date <= %s::date")
+        params.append(date_max.strip())
 
-    items = cibles[start:end]
+    # Les filtres objectif sont appliqués AVANT pagination. ``filtre`` est un
+    # TEXT historique ; la fonction SQL tolérante créée par la migration 014
+    # évite qu'une ancienne valeur mal formée casse toute la liste.
+    objective_json = "neoimpact_safe_jsonb(c.filtre) -> '__objectif_campagnes__'"
+    if objectif_mode == "none":
+        where_parts.append(f"NOT (neoimpact_safe_jsonb(c.filtre) ? '__objectif_campagnes__')")
+    elif objectif_mode in {"atteint", "non_atteint"}:
+        where_parts.append(f"COALESCE({objective_json} ->> 'mode', '') = %s")
+        params.append(objectif_mode)
+    if objectif_campaign and objectif_campaign.strip():
+        where_parts.append(
+            f"COALESCE({objective_json} -> 'values', '[]'::jsonb) ? %s"
+        )
+        params.append(objectif_campaign.strip())
 
+    locked_expr = "EXISTS (SELECT 1 FROM campagnes ac WHERE ac.id_cible = c.id_cible AND ac.etat_campagne IN ('En cours','Planifiée'))"
+    if locked is True:
+        where_parts.append(locked_expr)
+    elif locked is False:
+        where_parts.append(f"NOT {locked_expr}")
+
+    where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
+
+    sort_columns = {
+        'id_cible': 'c.id_cible',
+        'nom_cible': 'c.nom_cible',
+        'source': 'c.source',
+        'date_creation': 'c.date_creation',
+    }
+    order_col = sort_columns.get(str(sort_by or ''), 'c.date_creation')
+    order_dir = 'ASC' if str(sort_dir).lower() == 'asc' else 'DESC'
+
+    with connection(dict_rows=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) AS total FROM cibles c{where_sql}", params)
+            total_row = cur.fetchone()
+            total = int((total_row or {}).get("total") or 0)
+
+            cur.execute(
+                f"""
+                SELECT
+                    c.id_cible,
+                    c.nom_cible,
+                    c.date_creation,
+                    c.source,
+                    c.filtre,
+                    c.chemin,
+                    {locked_expr} AS locked,
+                    lock_camp.nom_campagne AS lock_campaign_name,
+                    lock_camp.etat_campagne AS lock_campaign_state
+                FROM cibles c
+                LEFT JOIN LATERAL (
+                    SELECT ac.nom_campagne, ac.etat_campagne
+                    FROM campagnes ac
+                    WHERE ac.id_cible = c.id_cible
+                      AND ac.etat_campagne IN ('En cours','Planifiée')
+                    ORDER BY ac.date_creation DESC NULLS LAST
+                    LIMIT 1
+                ) AS lock_camp ON TRUE
+                {where_sql}
+                ORDER BY {order_col} {order_dir} NULLS LAST, c.id_cible DESC
+                LIMIT %s OFFSET %s
+                """,
+                [*params, row_limit, row_offset],
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+
+            # Cartes statistiques globales: trois agrégats légers, indépendants
+            # des filtres actifs afin de garder le sens historique de l'écran.
+            cur.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE c.source = 'DB') AS db_total,
+                    COUNT(*) FILTER (WHERE c.source = 'Fichier plat') AS file_total,
+                    COUNT(*) FILTER (WHERE {locked_expr}) AS locked_total
+                FROM cibles c
+                """
+            )
+            stats_row = dict(cur.fetchone() or {})
+
+    items: list[dict[str, Any]] = []
+    import json
+    for row in rows:
+        row.pop("data_source_code", None)
+        if str(row.get("source") or "").strip().lower() == "db":
+            raw = row.get("filtre")
+            if isinstance(raw, str):
+                try:
+                    row["filtre"] = json.loads(raw or "{}")
+                except Exception:
+                    row["filtre"] = {}
+        else:
+            row["filtre"] = {}
+        if row.get("locked"):
+            name = str(row.pop("lock_campaign_name", "") or "").strip()
+            state = str(row.pop("lock_campaign_state", "") or "").strip()
+            row["lock_reason"] = f"Campagne '{name}' ({state})" if name or state else "Liée à une campagne active/planifiée"
+        else:
+            row.pop("lock_campaign_name", None)
+            row.pop("lock_campaign_state", None)
+            row["lock_reason"] = None
+        items.append(row)
+
+    consumed = row_offset + len(items)
     return {
         "items": items,
-        "count": int(len(items)),
-        "total": int(len(cibles)),
+        "count": len(items),
+        "total": total,
         "limit": per_page,
         "pages": nb_pages,
         "page_start": page_start,
-        "next_page_start": page_start + nb_pages if end < len(cibles) else None,
+        "next_page_start": page_start + nb_pages if consumed < total else None,
         "stats": {
-            "total": int(len(cibles)),
-            "locked_total": int(sum(1 for c in cibles if isinstance(c, dict) and bool(c.get("locked")))),
-            "db_total": int(sum(1 for c in cibles if isinstance(c, dict) and str(c.get("source") or "").strip().lower() == "db")),
-            "file_total": int(sum(1 for c in cibles if isinstance(c, dict) and str(c.get("source") or "").strip().lower() == "file")),
+            "total": int(stats_row.get("total") or 0),
+            "locked_total": int(stats_row.get("locked_total") or 0),
+            "db_total": int(stats_row.get("db_total") or 0),
+            "file_total": int(stats_row.get("file_total") or 0),
         },
     }
 

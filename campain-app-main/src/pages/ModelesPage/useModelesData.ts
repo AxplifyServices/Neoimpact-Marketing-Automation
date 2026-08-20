@@ -13,6 +13,16 @@ export interface ModeleData {
   locked?: boolean;
 }
 
+export interface ModeleListFilters {
+  search?: string;
+  status?: 'locked' | 'available' | '';
+  variable?: string;
+  dateMin?: string;
+  dateMax?: string;
+  sortBy?: string;
+  sortDir?: 'asc' | 'desc';
+}
+
 interface PaginatedResponse {
   items: ModeleData[];
   count: number;
@@ -22,24 +32,37 @@ interface PaginatedResponse {
   page_start: number;
   next_page_start: number | null;
   stats?: { total: number; locked_total: number; unique_variables: number };
+  filter_options?: { variables?: string[] };
 }
 
-export function useModelesData(page: number, pageSize: number) {
+export function useModelesData(page: number, pageSize: number, filters: ModeleListFilters = {}) {
   const apiClient = getApiClient();
   const query = useQuery({
-    queryKey: ['modeles', 'page', page, pageSize],
+    queryKey: ['modeles', 'page', page, pageSize, filters],
     queryFn: () => apiClient.request<PaginatedResponse>(
-      modelesApi.findAll({ limit: pageSize, offset: page, pages: 1 })
+      modelesApi.findAll({
+        limit: pageSize,
+        offset: page,
+        pages: 1,
+        q: filters.search?.trim() || undefined,
+        locked: filters.status ? filters.status === 'locked' : undefined,
+        variable: filters.variable || undefined,
+        date_min: filters.dateMin || undefined,
+        date_max: filters.dateMax || undefined,
+        sort_by: filters.sortBy || undefined,
+        sort_dir: filters.sortDir || undefined,
+      })
     ),
     placeholderData: keepPreviousData,
   });
 
   const response = query.data;
   const modeles = response?.items ?? [];
-  const total = response?.total ?? 0;
+  const filteredTotal = response?.total ?? 0;
+  const total = response?.stats?.total ?? filteredTotal;
   const lockedModels = modeles.filter((m) => m.locked === true).map((m) => m.id_modele);
   const lockedTotal = response?.stats?.locked_total ?? modeles.filter((m) => m.locked).length;
-  const uniqueVariables = response?.stats?.unique_variables ?? new Set(modeles.map((m) => m.variable_cible)).size;
+  const uniqueVariables = response?.stats?.unique_variables ?? new Set(modeles.map((m) => m.variable_cible).filter(Boolean)).size;
 
   return {
     modeles,
@@ -49,9 +72,10 @@ export function useModelesData(page: number, pageSize: number) {
     refetch: query.refetch,
     lockedModels,
     total,
-    totalPages: Math.max(Math.ceil(total / pageSize), 1),
+    totalPages: Math.max(Math.ceil(filteredTotal / pageSize), 1),
     usedCount: lockedTotal,
-    unusedCount: Math.max(total - lockedTotal, 0),
+    unusedCount: Math.max((response?.stats?.total ?? total) - lockedTotal, 0),
     uniqueVariables,
+    variableOptions: response?.filter_options?.variables ?? [],
   };
 }

@@ -41,6 +41,7 @@ export const FileUpload: React.FC<FileUploadProps> = ({
   disabled = false,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const previewWorkerRef = useRef<Worker | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [previewData, setPreviewData] = useState<PreviewData | null>(null);
   const [isLoadingPreview, setIsLoadingPreview] = useState(false);
@@ -71,37 +72,38 @@ export const FileUpload: React.FC<FileUploadProps> = ({
     return null;
   };
 
-  const parseFilePreview = async (file: File) => {
+  const parseFilePreview = (file: File) => {
+    previewWorkerRef.current?.terminate();
     setIsLoadingPreview(true);
-    try {
-      const [{ read, utils }, arrayBuffer] = await Promise.all([
-        import('xlsx'),
-        file.arrayBuffer(),
-      ]);
-      const workbook = read(arrayBuffer, { type: 'array' });
-      const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-      const jsonData = utils.sheet_to_json(firstSheet, { header: 1 }) as string[][];
 
-      if (jsonData.length === 0) {
+    const worker = new Worker(new URL('../../workers/file-preview.worker.ts', import.meta.url), {
+      type: 'module',
+    });
+    previewWorkerRef.current = worker;
+
+    worker.onmessage = (event: MessageEvent<{ ok: boolean; data?: PreviewData | null; error?: string }>) => {
+      if (previewWorkerRef.current !== worker) return;
+      if (event.data.ok) {
+        setPreviewData(event.data.data ?? null);
+      } else {
+        console.error('Error parsing file preview:', event.data.error);
         setPreviewData(null);
-        return;
       }
-
-      const headers = jsonData[0] || [];
-      const dataRows = jsonData.slice(1, 6); // Show first 5 rows
-      const totalRows = jsonData.length - 1; // Exclude header
-
-      setPreviewData({
-        headers: headers.map(h => String(h)),
-        rows: dataRows.map(row => row.map(cell => String(cell || ''))),
-        totalRows,
-      });
-    } catch (error) {
-      console.error('Error parsing file:', error);
-      setPreviewData(null);
-    } finally {
       setIsLoadingPreview(false);
-    }
+      worker.terminate();
+      if (previewWorkerRef.current === worker) previewWorkerRef.current = null;
+    };
+
+    worker.onerror = (event) => {
+      if (previewWorkerRef.current !== worker) return;
+      console.error('File preview worker error:', event.message);
+      setPreviewData(null);
+      setIsLoadingPreview(false);
+      worker.terminate();
+      previewWorkerRef.current = null;
+    };
+
+    worker.postMessage({ file });
   };
 
   useEffect(() => {
@@ -109,9 +111,17 @@ export const FileUpload: React.FC<FileUploadProps> = ({
       parseFilePreview(selectedFile);
       setShowPreview(true);
     } else {
+      previewWorkerRef.current?.terminate();
+      previewWorkerRef.current = null;
       setPreviewData(null);
       setShowPreview(false);
+      setIsLoadingPreview(false);
     }
+
+    return () => {
+      previewWorkerRef.current?.terminate();
+      previewWorkerRef.current = null;
+    };
   }, [selectedFile]);
 
   const handleFileChange = (file: File | null) => {

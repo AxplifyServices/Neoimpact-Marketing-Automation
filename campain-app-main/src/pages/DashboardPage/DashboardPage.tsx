@@ -392,6 +392,7 @@ export default function DashboardPage() {
                       campaignId={dashboardData.graph.campaign_id}
                       analyticsData={dashboardData}
                       layout={workflowLayout}
+                      autoLayoutEngine="simple"
                       showHeader={false}
                       showFrame={false}
                       height={500}

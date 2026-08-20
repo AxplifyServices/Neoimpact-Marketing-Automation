@@ -29,6 +29,8 @@ type DataTableToolbarProps<TData> = {
   children?: React.ReactNode
   /** Callback when reset button is clicked */
   onReset?: () => void
+  /** Server-side filters that live outside TanStack column state. */
+  hasExternalFilters?: boolean
 }
 
 export function DataTableToolbar<TData>({
@@ -41,6 +43,7 @@ export function DataTableToolbar<TData>({
   searchValue,
   children,
   onReset,
+  hasExternalFilters = false,
 }: DataTableToolbarProps<TData>) {
   const [localSearch, setLocalSearch] = useState(searchValue ?? '')
   const isFirstRender = useRef(true)
@@ -72,7 +75,8 @@ export function DataTableToolbar<TData>({
   const isFiltered =
     table.getState().columnFilters.length > 0 ||
     table.getState().globalFilter ||
-    (isServerSideSearch && localSearch)
+    (isServerSideSearch && localSearch) ||
+    hasExternalFilters
 
   const handleReset = () => {
     table.resetColumnFilters()

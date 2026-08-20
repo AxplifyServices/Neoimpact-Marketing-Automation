@@ -14,11 +14,12 @@ const readObjectif = (filtre: CibleData['filtre']) => {
 };
 import Toast from '../../components/Toast';
 import ConfirmDialog from '../../components/ConfirmDialog';
-import { type ColumnDef } from '@tanstack/react-table';
+import { type ColumnDef, type SortingState } from '@tanstack/react-table';
 import { DataTable } from '@/components/data-table/data-table';
 import { DataTableToolbar } from '@/components/data-table/toolbar';
 import { DataTablePagination } from '@/components/data-table/pagination';
 import { DataTableColumnHeader } from '@/components/data-table/column-header';
+import { ServerFacetedFilter } from '@/components/data-table/server-faceted-filter';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -37,7 +38,25 @@ export default function CiblesPage() {
   const apiClient = getApiClient();
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(20);
-  const { cibles, isLoading, lockedCibles, total, totalPages, usedCount, dbCount, fileCount } = useCiblesData(page, pageSize);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [sourceFilter, setSourceFilter] = useState<string[]>([]);
+  const [statusFilter, setStatusFilter] = useState<string[]>([]);
+  const [dateMin, setDateMin] = useState<string>('');
+  const [dateMax, setDateMax] = useState<string>('');
+  const [objectifFilter, setObjectifFilter] = useState<string[]>([]);
+  const [campaignFilter, setCampaignFilter] = useState<string[]>([]);
+  const [sorting, setSorting] = useState<SortingState>([]);
+  const { cibles, isLoading, lockedCibles, total, totalPages, usedCount, dbCount, fileCount } = useCiblesData(page, pageSize, {
+    search: searchQuery,
+    source: sourceFilter[0] || '',
+    status: (statusFilter[0] as 'locked' | 'available' | undefined) || '',
+    dateMin,
+    dateMax,
+    objectifMode: (objectifFilter[0] as 'atteint' | 'non_atteint' | 'none' | undefined) || '',
+    objectifCampaign: campaignFilter[0] || '',
+    sortBy: sorting[0]?.id,
+    sortDir: sorting[0]?.desc ? 'desc' : sorting[0] ? 'asc' : undefined,
+  });
   const [toast, setToast] = useState<{
     isOpen: boolean;
     title: string;
@@ -54,9 +73,6 @@ export default function CiblesPage() {
   }>({
     isOpen: false,
   });
-  const [dateMin, setDateMin] = useState<string>('');
-  const [dateMax, setDateMax] = useState<string>('');
-
   const { data: campaignList = [] } = useQuery({
     queryKey: ['cibles', 'objective-campaigns'],
     queryFn: () => apiClient.request<{ items: Array<{ id_campagne: string; nom_campagne: string; etat?: string }> }>(
@@ -555,73 +571,69 @@ export default function CiblesPage() {
         pagination={{ currentPage: page, totalPages, pageSize }}
         onPageChange={setPage}
         onPageSizeChange={(size) => { setPageSize(size); setPage(0); }}
+        sorting={sorting}
+        onSortingChange={(next) => { setSorting(next.slice(0, 1)); setPage(0); }}
         toolbar={(table) => (
           <DataTableToolbar
             table={table}
             searchPlaceholder="Rechercher une cible..."
-            searchKey="nom_cible"
-            filters={[
-              {
-                columnId: 'source',
-                title: 'Source',
-                options: sourceFilterOptions,
-              },
-              {
-                columnId: 'locked',
-                title: 'Statut',
-                options: statusFilterOptions,
-              },
-              {
-                columnId: 'objectif_mode',
-                title: 'Objectif',
-                options: objectifFilterOptions,
-              },
-              ...(campaignFilterOptions.length > 0
-                ? [
-                    {
-                      columnId: 'objectif_campagnes',
-                      title: 'Campagne',
-                      options: campaignFilterOptions,
-                    },
-                  ]
-                : []),
-            ]}
+            onSearchChange={(value) => { setSearchQuery(value); setPage(0); }}
+            searchValue={searchQuery}
+            hasExternalFilters={Boolean(
+              sourceFilter.length || statusFilter.length || objectifFilter.length ||
+              campaignFilter.length || dateMin || dateMax
+            )}
             onReset={() => {
+              setSearchQuery('');
+              setSourceFilter([]);
+              setStatusFilter([]);
+              setObjectifFilter([]);
+              setCampaignFilter([]);
               setDateMin('');
               setDateMax('');
+              setPage(0);
             }}
           >
-            {/* Date range filter */}
+            <ServerFacetedFilter
+              title="Objectif"
+              options={objectifFilterOptions}
+              selectedValues={objectifFilter}
+              onSelectionChange={(values) => { setObjectifFilter(values); setPage(0); }}
+            />
+            {campaignFilterOptions.length > 0 && (
+              <ServerFacetedFilter
+                title="Campagne"
+                options={campaignFilterOptions}
+                selectedValues={campaignFilter}
+                onSelectionChange={(values) => { setCampaignFilter(values); setPage(0); }}
+              />
+            )}
+            <ServerFacetedFilter
+              title="Source"
+              options={sourceFilterOptions}
+              selectedValues={sourceFilter}
+              onSelectionChange={(values) => { setSourceFilter(values); setPage(0); }}
+            />
+            <ServerFacetedFilter
+              title="Statut"
+              options={statusFilterOptions}
+              selectedValues={statusFilter}
+              onSelectionChange={(values) => { setStatusFilter(values); setPage(0); }}
+            />
             <Input
               type="date"
               value={dateMin}
-              onChange={(e) => {
-                const newDateMin = e.target.value;
-                setDateMin(newDateMin);
-                if (newDateMin || dateMax) {
-                  table.getColumn('date_creation')?.setFilterValue({ min: newDateMin, max: dateMax });
-                } else {
-                  table.getColumn('date_creation')?.setFilterValue(undefined);
-                }
-              }}
+              onChange={(e) => { setDateMin(e.target.value); setPage(0); }}
               max={dateMax || undefined}
-              placeholder="Date début"
+              aria-label="Date de création minimale"
               className="h-8 w-[150px]"
             />
             <Input
               type="date"
               value={dateMax}
-              onChange={(e) => {
-                const newDateMax = e.target.value;
-                setDateMax(newDateMax);
-                if (dateMin || newDateMax) {
-                  table.getColumn('date_creation')?.setFilterValue({ min: dateMin, max: newDateMax });
-                } else {
-                  table.getColumn('date_creation')?.setFilterValue(undefined);
-                }
-              }}
+              onChange={(e) => { setDateMax(e.target.value); setPage(0); }}
               min={dateMin || undefined}
-              placeholder="Date fin"
+              aria-label="Date de création maximale"
               className="h-8 w-[150px]"
             />
           </DataTableToolbar>

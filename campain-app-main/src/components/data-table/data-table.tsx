@@ -16,10 +16,13 @@ import {
   type Table as TableType,
 } from '@tanstack/react-table'
 import { DataTableSkeleton } from './skeleton'
+import { useIsMobile } from '@/hooks/use-mobile'
 
 interface PaginationCallbacks {
   onPageChange?: (page: number) => void
   onPageSizeChange?: (pageSize: number) => void
+  sorting?: SortingState
+  onSortingChange?: (sorting: SortingState) => void
 }
 
 interface DataTableProps<TData, TValue> {
@@ -35,6 +38,8 @@ interface DataTableProps<TData, TValue> {
   }
   onPageChange?: (page: number) => void
   onPageSizeChange?: (pageSize: number) => void
+  sorting?: SortingState
+  onSortingChange?: (sorting: SortingState) => void
   toolbar?: (table: TableType<TData>) => ReactNode
   bulkActions?: (table: TableType<TData>) => ReactNode
   paginationComponent?: (table: TableType<TData>, callbacks?: PaginationCallbacks) => ReactNode
@@ -49,11 +54,14 @@ export function DataTable<TData, TValue>({
   pagination,
   onPageChange,
   onPageSizeChange,
+  sorting: controlledSorting,
+  onSortingChange: controlledSortingChange,
   toolbar,
   bulkActions,
   paginationComponent,
 }: DataTableProps<TData, TValue>) {
   const [sorting, setSorting] = useState<SortingState>([])
+  const effectiveSorting = controlledSorting ?? sorting
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
 
   // Initialize column visibility with default hidden columns
@@ -73,6 +81,7 @@ export function DataTable<TData, TValue>({
   const [globalFilter, setGlobalFilter] = useState('')
   const [paginationState, setPaginationState] = useState({ pageIndex: 0, pageSize: 10 })
   const isManualPagination = !!pagination
+  const isMobile = useIsMobile()
 
   // Clear row selection when page changes
   useEffect(() => {
@@ -84,7 +93,7 @@ export function DataTable<TData, TValue>({
     columns,
     pageCount: pagination ? pagination.totalPages : undefined,
     state: {
-      sorting,
+      sorting: effectiveSorting,
       columnFilters,
       columnVisibility,
       rowSelection,
@@ -100,7 +109,12 @@ export function DataTable<TData, TValue>({
     enableRowSelection: true,
     onPaginationChange: isManualPagination ? undefined : setPaginationState,
     onRowSelectionChange: setRowSelection,
-    onSortingChange: setSorting,
+    manualSorting: !!controlledSortingChange,
+    onSortingChange: (updater) => {
+      const next = typeof updater === 'function' ? updater(effectiveSorting) : updater
+      if (controlledSortingChange) controlledSortingChange(next)
+      else setSorting(next)
+    },
     onColumnFiltersChange: setColumnFilters,
     onColumnVisibilityChange: setColumnVisibility,
     onGlobalFilterChange: setGlobalFilter,
@@ -116,8 +130,9 @@ export function DataTable<TData, TValue>({
     <div className='space-y-4'>
       {toolbar && toolbar(table)}
 
-      {/* Desktop/Tablet: Table View */}
-      <div className='hidden md:block rounded-md border overflow-hidden'>
+      {/* Desktop/Tablet: mount only one representation to halve DOM/render work. */}
+      {!isMobile && (
+      <div className='rounded-md border overflow-hidden'>
         <div className='overflow-x-auto'>
           <table className='w-full'>
             <thead className='bg-white'>
@@ -173,9 +188,11 @@ export function DataTable<TData, TValue>({
           </table>
         </div>
       </div>
+      )}
 
-      {/* Mobile: Card View */}
-      <div className='md:hidden space-y-4'>
+      {/* Mobile: cards only; the desktop table is not mounted in parallel. */}
+      {isMobile && (
+      <div className='space-y-4'>
         {isError ? (
           <div className='rounded-md border p-8'>
             <div className='flex flex-col items-center gap-2'>
@@ -224,6 +241,7 @@ export function DataTable<TData, TValue>({
           </div>
         )}
       </div>
+      )}
 
       {paginationComponent && paginationComponent(table, { onPageChange, onPageSizeChange })}
 

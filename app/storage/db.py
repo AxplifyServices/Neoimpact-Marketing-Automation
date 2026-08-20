@@ -100,9 +100,22 @@ def read_table(
     filters: Optional[Dict[str, ColumnFilter]] = None,
     limit: Optional[int] = None,
     offset: int = 0,
+    columns: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     _validate_table_column(table)
-    columns = [name for name, _ in get_table_columns(table)]
+    all_columns = [name for name, _ in get_table_columns(table)]
+    if columns:
+        requested = []
+        seen = set()
+        for name in columns:
+            col = str(name)
+            _validate_table_column(table, col)
+            if col in all_columns and col not in seen:
+                requested.append(col)
+                seen.add(col)
+        selected_columns = requested or all_columns
+    else:
+        selected_columns = all_columns
     identity_columns = get_row_identity_columns(table)
     if not identity_columns:
         raise RuntimeError(
@@ -135,7 +148,11 @@ def read_table(
                 )
                 params.extend(values)
 
-    query = sql.SQL("SELECT * FROM {}").format(sql.Identifier(table))
+    query_columns = list(dict.fromkeys([*identity_columns, *selected_columns]))
+    query = sql.SQL("SELECT {} FROM {}").format(
+        sql.SQL(", ").join(sql.Identifier(name) for name in query_columns),
+        sql.Identifier(table),
+    )
     if where_parts:
         query += sql.SQL(" WHERE ") + sql.SQL(" AND ").join(where_parts)
     if limit is not None:
@@ -154,7 +171,7 @@ def read_table(
         _remember_identity(token, table, identity)
         output.append({"__rowid__": token, **row})
 
-    return pd.DataFrame(output, columns=["__rowid__", *columns])
+    return pd.DataFrame(output, columns=["__rowid__", *selected_columns])
 
 
 

@@ -24,6 +24,7 @@ export const dataApi = {
   readTableData: (data: {
     table: string;
     filters?: Record<string, { categorical?: string[]; numeric?: { min?: number; max?: number } }>;
+    columns?: string[];
     limit?: number;
     offset?: number;
   }): ApiRequest => ({

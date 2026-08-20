@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
+from app.storage.postgres_db import connection
 
 from app.domain.canaux import (
     list_canaux,
@@ -61,66 +62,116 @@ class ModeleSaveIn(BaseModel):
 # =========================================================
 @router.get("/modeles")
 def list_modeles(
-    limit: int = Query(default=200, ge=1, le=5000),   # taille page
-    offset: int = Query(default=0, ge=0),             # page_start (0,1,2,...)
-    pages: int = Query(default=1, ge=1, le=50),       # nb pages consécutives
+    limit: int = Query(default=200, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+    pages: int = Query(default=1, ge=1, le=50),
+    q: Optional[str] = Query(default=None, max_length=200),
+    locked: Optional[bool] = Query(default=None),
+    date_min: Optional[str] = Query(default=None, max_length=32),
+    date_max: Optional[str] = Query(default=None, max_length=32),
+    variable: Optional[str] = Query(default=None, max_length=200),
+    sort_by: Optional[str] = Query(default=None, max_length=50),
+    sort_dir: str = Query(default='desc', pattern='^(asc|desc)$'),
 ):
-    """
-    Retourne la liste des modèles + champ `locked` (True/False)
-    + pagination "pages" pour éviter de surcharger l'UI.
-
-    Pagination:
-      - limit = nb éléments par page
-      - offset = page_start (0,1,2,...)
-      - pages = nb pages consécutives
-      - total max renvoyé = limit * pages
-    """
-    modeles = list_modeles_for_ui() or []
-    locked_ids: Set[str] = set(str(x).strip() for x in (get_locked_modele_ids_for_ui() or []))
-
-    # enrichissement locked (inchangé)
-    for m in modeles:
-        if isinstance(m, dict):
-            mid = (m.get("id_modele") or m.get("id") or m.get("ID") or "").strip()
-            m["locked"] = bool(mid and mid in locked_ids)
-        else:
-            mid = (
-                getattr(m, "id_modele", None)
-                or getattr(m, "id", None)
-                or getattr(m, "ID", None)
-                or ""
-            )
-            mid = str(mid).strip()
-            try:
-                setattr(m, "locked", bool(mid and mid in locked_ids))
-            except Exception:
-                pass
-
-    # pagination "pages"
+    """Liste paginée des modèles sans charger toute la table en Python."""
     page_start = int(offset or 0)
     per_page = int(limit or 200)
     nb_pages = int(pages or 1)
+    row_limit = per_page * nb_pages
+    row_offset = page_start * per_page
 
-    start = page_start * per_page
-    end = start + (per_page * nb_pages)
+    locked_expr = "EXISTS (SELECT 1 FROM campagnes c WHERE c.id_modele = m.id_modele AND c.etat_campagne IN ('En cours','Planifiée'))"
+    where_parts: list[str] = []
+    params: list[Any] = []
+    if q and q.strip():
+        where_parts.append("(m.id_modele ILIKE %s OR m.nom_modele ILIKE %s)")
+        pattern = f"%{q.strip()}%"
+        params.extend([pattern, pattern])
+    if date_min and date_min.strip():
+        where_parts.append("m.date_creation::date >= %s::date")
+        params.append(date_min.strip())
+    if date_max and date_max.strip():
+        where_parts.append("m.date_creation::date <= %s::date")
+        params.append(date_max.strip())
+    if variable and variable.strip():
+        where_parts.append("COALESCE(m.variable_cible,'') = %s")
+        params.append(variable.strip())
+    if locked is True:
+        where_parts.append(locked_expr)
+    elif locked is False:
+        where_parts.append(f"NOT {locked_expr}")
+    where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
 
-    items = modeles[start:end]
+    sort_columns = {
+        'id_modele': 'm.id_modele',
+        'nom_modele': 'm.nom_modele',
+        'variable_cible': 'm.variable_cible',
+        'date_creation': 'm.date_creation',
+    }
+    order_col = sort_columns.get(str(sort_by or ''), 'm.date_creation')
+    order_dir = 'ASC' if str(sort_dir).lower() == 'asc' else 'DESC'
 
+    with connection(dict_rows=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) AS total FROM modeles m{where_sql}", params)
+            total = int((cur.fetchone() or {}).get("total") or 0)
+            cur.execute(
+                f"""
+                SELECT
+                    m.id_modele,
+                    m.nom_modele,
+                    m.date_creation,
+                    m.variable_cible,
+                    m.objectif,
+                    m.liste_action,
+                    m.graphe_json,
+                    m.ui_positions,
+                    {locked_expr} AS locked
+                FROM modeles m
+                {where_sql}
+                ORDER BY {order_col} {order_dir} NULLS LAST, m.id_modele DESC
+                LIMIT %s OFFSET %s
+                """,
+                [*params, row_limit, row_offset],
+            )
+            items = [dict(row) for row in cur.fetchall()]
+            cur.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE {locked_expr}) AS locked_total,
+                    COUNT(DISTINCT NULLIF(TRIM(COALESCE(m.variable_cible,'')), '')) AS unique_variables
+                FROM modeles m
+                """
+            )
+            stats = dict(cur.fetchone() or {})
+            cur.execute(
+                """
+                SELECT DISTINCT TRIM(variable_cible) AS value
+                FROM modeles
+                WHERE NULLIF(TRIM(COALESCE(variable_cible,'')), '') IS NOT NULL
+                ORDER BY value
+                LIMIT 500
+                """
+            )
+            variable_options = [str(row.get("value")) for row in cur.fetchall() if row.get("value")]
+
+    consumed = row_offset + len(items)
     return {
         "items": items,
-        "count": int(len(items)),
-        "total": int(len(modeles)),
+        "count": len(items),
+        "total": total,
         "limit": per_page,
         "pages": nb_pages,
         "page_start": page_start,
-        "next_page_start": page_start + nb_pages if end < len(modeles) else None,
+        "next_page_start": page_start + nb_pages if consumed < total else None,
         "stats": {
-            "total": int(len(modeles)),
-            "locked_total": int(sum(1 for m in modeles if isinstance(m, dict) and bool(m.get("locked")))),
-            "unique_variables": int(len({str(m.get("variable_cible") or "").strip() for m in modeles if isinstance(m, dict) and str(m.get("variable_cible") or "").strip()})),
+            "total": int(stats.get("total") or 0),
+            "locked_total": int(stats.get("locked_total") or 0),
+            "unique_variables": int(stats.get("unique_variables") or 0),
         },
+        "filter_options": {"variables": variable_options},
     }
-
 
 @router.get("/modeles/locked")
 def locked_modeles():

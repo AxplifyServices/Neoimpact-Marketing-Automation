@@ -2,7 +2,7 @@ import type { ApiRequest } from '../ApiRequest';
 
 export const modelesApi = {
   // Get all modeles
-  findAll: (params?: { limit?: number; offset?: number; pages?: number }): ApiRequest => ({
+  findAll: (params?: { limit?: number; offset?: number; pages?: number; q?: string; locked?: boolean; date_min?: string; date_max?: string; variable?: string; sort_by?: string; sort_dir?: 'asc' | 'desc' }): ApiRequest => ({
     url: '/modeles',
     method: 'GET',
     params,

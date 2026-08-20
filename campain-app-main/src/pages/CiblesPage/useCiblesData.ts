@@ -14,6 +14,18 @@ export interface CibleData {
   lock_reason?: string | null;
 }
 
+export interface CibleListFilters {
+  search?: string;
+  source?: string;
+  status?: 'locked' | 'available' | '';
+  dateMin?: string;
+  dateMax?: string;
+  objectifMode?: 'atteint' | 'non_atteint' | 'none' | '';
+  objectifCampaign?: string;
+  sortBy?: string;
+  sortDir?: 'asc' | 'desc';
+}
+
 interface PaginatedResponse {
   items: CibleData[];
   count: number;
@@ -25,19 +37,33 @@ interface PaginatedResponse {
   stats?: { total: number; locked_total: number; db_total: number; file_total: number };
 }
 
-export function useCiblesData(page: number, pageSize: number) {
+export function useCiblesData(page: number, pageSize: number, filters: CibleListFilters = {}) {
   const apiClient = getApiClient();
   const query = useQuery({
-    queryKey: ['cibles', 'page', page, pageSize],
+    queryKey: ['cibles', 'page', page, pageSize, filters],
     queryFn: () => apiClient.request<PaginatedResponse>(
-      ciblesApi.findAll({ limit: pageSize, offset: page, pages: 1 })
+      ciblesApi.findAll({
+        limit: pageSize,
+        offset: page,
+        pages: 1,
+        q: filters.search?.trim() || undefined,
+        source: filters.source || undefined,
+        locked: filters.status ? filters.status === 'locked' : undefined,
+        date_min: filters.dateMin || undefined,
+        date_max: filters.dateMax || undefined,
+        objectif_mode: filters.objectifMode || undefined,
+        objectif_campaign: filters.objectifCampaign || undefined,
+        sort_by: filters.sortBy || undefined,
+        sort_dir: filters.sortDir || undefined,
+      })
     ),
     placeholderData: keepPreviousData,
   });
 
   const response = query.data;
   const cibles = response?.items ?? [];
-  const total = response?.total ?? 0;
+  const filteredTotal = response?.total ?? 0;
+  const total = response?.stats?.total ?? filteredTotal;
   const lockedCibles = cibles.filter((c) => c.locked === true).map((c) => c.id_cible);
 
   return {
@@ -48,7 +74,7 @@ export function useCiblesData(page: number, pageSize: number) {
     refetch: query.refetch,
     lockedCibles,
     total,
-    totalPages: Math.max(Math.ceil(total / pageSize), 1),
+    totalPages: Math.max(Math.ceil(filteredTotal / pageSize), 1),
     usedCount: response?.stats?.locked_total ?? cibles.filter((c) => c.locked).length,
     dbCount: response?.stats?.db_total ?? cibles.filter((c) => c.source?.toLowerCase() === 'db').length,
     fileCount: response?.stats?.file_total ?? cibles.filter((c) => c.source?.toLowerCase() === 'file').length,
