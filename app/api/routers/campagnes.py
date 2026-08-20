@@ -28,6 +28,7 @@ from app.domain.campagne_service import (
 
 from app.domain.terrain_visit_webhook import dispatch_pending_visits_for_campaign, get_terrain_dispatch_status
 from app.orchestration.job_store import get_campaign_job_status, orchestration_stats
+from app.targeting.store import get_campaign_state as get_targeting_sync_state
 
 logger = logging.getLogger(__name__)
 
@@ -380,6 +381,7 @@ def campaign_processing_status(id_campagne: str):
         "campaign": dict(campaign),
         "job": get_campaign_job_status(id_campagne),
         "orchestration": orchestration_stats(),
+        "targeting": get_targeting_sync_state(id_campagne),
     }
 
 @router.post("/campagnes/{id_campagne}/dispatch-terrain")

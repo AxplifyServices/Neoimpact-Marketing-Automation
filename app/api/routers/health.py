@@ -9,6 +9,7 @@ from app.outbound.worker import worker_status as outbound_worker_status
 from app.outbound.store import stats as outbound_stats
 from app.inbound.worker import worker_status as inbound_worker_status
 from app.inbound.store import stats as inbound_stats
+from app.targeting.store import targeting_stats
 
 router = APIRouter()
 
@@ -39,6 +40,7 @@ def health():
                 "workers": inbound_worker_status(),
                 "events": inbound_stats(),
             },
+            "targeting": targeting_stats(),
         }
     except Exception as exc:
         raise HTTPException(

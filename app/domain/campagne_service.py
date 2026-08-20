@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Sequence
 import json
 import re
 import unicodedata
@@ -403,7 +403,12 @@ def prepare_campagne_execution(
     current_bloc_init = find_bloc_by_id(liste_action, id_action_init) or root
 
     # 2) Requête de cible : le volume reste dans PostgreSQL.
+    # Le watermark est capturé AVANT le premier SELECT massif. Tout changement
+    # concurrent recevra un seq supérieur et sera repris incrémentalement.
+    from app.targeting.store import current_change_seq, initialize_campaign_state
+
     id_cible = _norm_str(campagne.get("id_cible"))
+    target_sync_start_seq = current_change_seq()
     db_select_all = build_db_cible_radicals_query(id_cible, exclude_rupture_relation=False)
     db_select_filtered = build_db_cible_radicals_query(id_cible, exclude_rupture_relation=True)
     if db_select_all is None or db_select_filtered is None:
@@ -468,6 +473,7 @@ def prepare_campagne_execution(
             only_new=True,
         )
     set_execution_status(id_campagne, "processing", population_count=nb_apres)
+    initialize_campaign_state(id_campagne, target_sync_start_seq)
     _progress(2, "Population préparée")
 
     # Si pause/annulation a eu lieu pendant l'INSERT massif, réaligner seulement
@@ -812,24 +818,20 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
     if new_etat == "En cours":
         # NEW: sync nouveaux clients depuis la cible (INSERT ONLY) avant mail/rebuild
         try:
-            conn = connect_runtime()
-            try:
-                sync_result = sync_new_clients_from_cible_for_campaign(
-                    conn,
+            from app.targeting.incremental import sync_target_changes_for_campaign
+
+            with heavy_workload("interactive"):
+                sync_result = sync_target_changes_for_campaign(
                     id_campagne,
+                    bootstrap_if_needed=True,
+                    wait_for_lock=True,
                 )
-
-                if sync_result.get("ok"):
-                    new_clients_added = int(
-                        sync_result.get("new_clients_campagne") or 0
-                    )
-                    conn.commit()
-                else:
-                    new_clients_added = 0
-                    conn.rollback()
-
-            finally:
-                conn.close()
+            if sync_result.get("ok"):
+                new_clients_added = int(
+                    sync_result.get("new_clients_campagne") or 0
+                )
+            else:
+                new_clients_added = 0
 
             set_clients_etat_for_campagne(
                 id_campagne,
@@ -904,9 +906,18 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
         "external_dispatch_after_activation": external_dispatch_after_activation,
     }
 
-def sync_new_clients_from_cible_for_campaign(conn: RuntimeConnection, id_campagne: str) -> Dict[str, Any]:
+def sync_new_clients_from_cible_for_campaign(
+    conn: RuntimeConnection | None,
+    id_campagne: str,
+    *,
+    candidate_radicals: Sequence[str] | None = None,
+) -> Dict[str, Any]:
     """
     Synchronisation insert-only de la cible vers la campagne.
+
+    Si ``candidate_radicals`` est fourni, PostgreSQL n'évalue les filtres que
+    sur ce lot de clients modifiés. Sans candidat, le comportement historique
+    de rescan complet reste disponible pour le bootstrap et la préparation.
 
     Les cibles internes (DB ou fichier matérialisé) utilisent INSERT ... SELECT
     directement dans PostgreSQL. Les datamarts externes sont volontairement
@@ -992,6 +1003,7 @@ def sync_new_clients_from_cible_for_campaign(conn: RuntimeConnection, id_campagn
     db_select = build_db_cible_radicals_query(
         id_cible,
         exclude_rupture_relation=True,
+        candidate_radicals=candidate_radicals,
     )
 
     if db_select is None:

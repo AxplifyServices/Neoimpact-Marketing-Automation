@@ -10,6 +10,7 @@ from app.batch.batch_runner import BatchAlreadyRunningError, run_batch_with_lock
 from app.batch.scheduler import get_batch_scheduler_status
 from app.core.workload_governor import workload_snapshot
 from app.orchestration.job_store import orchestration_stats
+from app.targeting.store import targeting_stats
 
 router = APIRouter()
 
@@ -95,7 +96,14 @@ def run_batch(
 def batch_status() -> Dict[str, Any]:
     with _manual_guard:
         state = dict(_manual_state)
-    return {"ok": True, "manual": state, "schedule": get_batch_scheduler_status(), "workload": workload_snapshot(), "orchestration": orchestration_stats()}
+    return {
+        "ok": True,
+        "manual": state,
+        "schedule": get_batch_scheduler_status(),
+        "workload": workload_snapshot(),
+        "orchestration": orchestration_stats(),
+        "targeting": targeting_stats(),
+    }
 
 
 @router.get("/batch/schedule")

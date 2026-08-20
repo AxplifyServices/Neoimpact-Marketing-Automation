@@ -297,4 +297,14 @@ def materialize_file_members(id_cible: str, file_path: str, batch_size: int = DE
                 """,
                 (cible_id,),
             )
-            return int(cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0)
+            inserted = int(cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0)
+
+    if replace:
+        # Une cible fichier modifiée peut rendre éligibles des clients qui
+        # n'ont eux-mêmes subi aucun UPDATE dans le datamart. On force donc un
+        # bootstrap complet unique pour ses campagnes lors du prochain sync.
+        from app.targeting.store import invalidate_campaigns_for_cible
+
+        invalidate_campaigns_for_cible(cible_id)
+
+    return inserted

@@ -17,7 +17,8 @@ from app.storage.clients_campagnes_store_sqlite import (
     set_clients_etat_for_campagne,
 )
 
-from app.domain.campagne_service import sync_new_clients_from_cible_for_campaign
+from app.targeting.incremental import sync_target_changes_for_campaign
+from app.targeting.store import prune_processed_changes
 from app.domain.conversion_service import mark_converted, record_objective_entry
 
 from app.storage.crc_input_store_sqlite import (
@@ -870,7 +871,7 @@ def run_batch_manuel() -> Dict[str, Any]:
     2. Mise à jour temporelle des campagnes.
     3. Recalcul des compteurs.
     4. Progression En attente / Objectif.
-    5. Synchronisation insert-only des cibles.
+    5. Synchronisation incrémentale insert-only des cibles.
     6. Calcul des échéances.
     7. Traitement mail.
     8. Reconstruction des outputs.
@@ -898,6 +899,9 @@ def run_batch_manuel() -> Dict[str, Any]:
             "campaigns_processed": 0,
             "campaigns_succeeded": 0,
             "campaigns_failed": 0,
+            "changes_processed": 0,
+            "bootstrap_campaigns": 0,
+            "pruned_changes": 0,
             "details": [],
         },
         "mails_processed": None,
@@ -972,15 +976,19 @@ def run_batch_manuel() -> Dict[str, Any]:
 
             try:
                 with heavy_workload("batch"):
-                    result = sync_new_clients_from_cible_for_campaign(
-                        conn,
+                    result = sync_target_changes_for_campaign(
                         id_campagne,
+                        bootstrap_if_needed=True,
+                        wait_for_lock=True,
                     )
 
                 detail = {
                     "id_campagne": id_campagne,
                     "etat": _get_campaign_state(campagne),
                     "ok": bool(result.get("ok")),
+                    "bootstrap": bool(result.get("bootstrap")),
+                    "changes_processed": int(result.get("changes_processed") or 0),
+                    "watermark": int(result.get("watermark") or 0),
                     "new_cible_members": int(
                         result.get("new_cible_members") or 0
                     ),
@@ -991,6 +999,9 @@ def run_batch_manuel() -> Dict[str, Any]:
 
                 if result.get("ok"):
                     out["target_sync"]["campaigns_succeeded"] += 1
+                    out["target_sync"]["changes_processed"] += detail["changes_processed"]
+                    if detail["bootstrap"]:
+                        out["target_sync"]["bootstrap_campaigns"] += 1
                     out["new_cible_members"] += detail["new_cible_members"]
                     out["new_clients_added_from_cibles"] += detail[
                         "new_clients_campagne"
@@ -1018,6 +1029,14 @@ def run_batch_manuel() -> Dict[str, Any]:
                         "error": str(exc),
                     }
                 )
+
+        # Les changements dont toutes les campagnes suivies ont dépassé le
+        # watermark peuvent être purgés. La table reste donc bornée au volume
+        # réellement en retard, pas à l'historique complet des modifications.
+        try:
+            out["target_sync"]["pruned_changes"] = int(prune_processed_changes() or 0)
+        except Exception as exc:
+            out["target_sync"]["prune_error"] = str(exc)
 
         # 6) Calcul des échéances.
         for campagne in actives:

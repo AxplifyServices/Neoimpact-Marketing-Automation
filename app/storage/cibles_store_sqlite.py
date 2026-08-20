@@ -5,7 +5,7 @@ import os
 import re
 import shutil
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Sequence
 
 import pandas as pd
 from psycopg import sql
@@ -1434,6 +1434,7 @@ def build_db_cible_radicals_query(
     id_cible: str,
     *,
     exclude_rupture_relation: bool = False,
+    candidate_radicals: Sequence[str] | None = None,
 ):
     """Construit un SELECT de clés exécutable dans le PostgreSQL interne.
 
@@ -1449,31 +1450,46 @@ def build_db_cible_radicals_query(
     source = str(cible.get("source") or "").strip()
     source_code = str(cible.get("data_source_code") or "internal").strip() or "internal"
 
+    normalized_candidates = [
+        str(value or "").strip()
+        for value in (candidate_radicals or [])
+        if str(value or "").strip()
+    ]
+    restrict_candidates = candidate_radicals is not None
+
     if source == "Fichier plat":
+        where_parts = [sql.SQL('cc."ID_CIBLE" = %s')]
         params: List[Any] = [id_cible]
+        if restrict_candidates:
+            if not normalized_candidates:
+                where_parts.append(sql.SQL("FALSE"))
+            else:
+                where_parts.append(sql.SQL('cc."Radical_compte" = ANY(%s::text[])'))
+                params.append(normalized_candidates)
         if exclude_rupture_relation:
-            return (
+            where_parts.append(
                 sql.SQL(
-                    """
-                    SELECT cc."Radical_compte" AS "Radical_compte"
-                    FROM clients_cibles AS cc
-                    JOIN clients AS c ON c.radical_compte = cc."Radical_compte"
-                    WHERE cc."ID_CIBLE" = %s
-                      AND LOWER(TRIM(COALESCE(c."STATUT_CLIENT"::text, ''))) <> LOWER(%s)
-                    """
-                ),
-                [id_cible, "Rupture de relation"],
+                    "LOWER(TRIM(COALESCE(c.\"STATUT_CLIENT\"::text, ''))) <> LOWER(%s)"
+                )
             )
-        return (
-            sql.SQL(
+            params.append("Rupture de relation")
+            query = sql.SQL(
                 """
                 SELECT cc."Radical_compte" AS "Radical_compte"
                 FROM clients_cibles AS cc
-                WHERE cc."ID_CIBLE" = %s
+                JOIN clients AS c ON c.radical_compte = cc."Radical_compte"
+                WHERE {where_clause}
                 """
-            ),
-            params,
-        )
+            ).format(where_clause=sql.SQL(" AND " ).join(where_parts))
+        else:
+            query = sql.SQL(
+                """
+                SELECT cc."Radical_compte" AS "Radical_compte"
+                FROM clients_cibles AS cc
+                WHERE {where_clause}
+                """
+            ).format(where_clause=sql.SQL(" AND " ).join(where_parts))
+        return query, params
 
     if source != "DB":
         raise ValueError(f"Source cible invalide : {source}")
@@ -1494,6 +1510,17 @@ def build_db_cible_radicals_query(
         normal_filtre, objectif_campagne_ids, objectif_mode = _split_objectif_campaign_filter(filtre or {})
         where_clauses = []
         params: List[Any] = []
+
+        if restrict_candidates:
+            if normalized_candidates:
+                where_clauses.append(
+                    sql.SQL("c.{radical} = ANY(%s::text[])").format(
+                        radical=sql.Identifier(radical_column)
+                    )
+                )
+                params.append(normalized_candidates)
+            else:
+                where_clauses.append(sql.SQL("FALSE"))
 
         for field, payload in (normal_filtre or {}).items():
             if not isinstance(payload, dict):
