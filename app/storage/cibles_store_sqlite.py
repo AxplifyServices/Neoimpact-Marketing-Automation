@@ -1861,3 +1861,67 @@ def load_clients_df_for_cible(
     raise ValueError(
         f"Source cible invalide : {source}"
     )
+# ============================================================
+# BOUNDED PREVIEW
+# ============================================================
+
+def preview_clients_for_cible(
+    id_cible: str,
+    limit: int = 200,
+) -> tuple[pd.DataFrame, int]:
+    """Retourne un aperçu borné d'une cible sans charger une cible DB entière."""
+    cible = get_cible(id_cible)
+    if not cible:
+        raise ValueError(f"Cible introuvable : {id_cible}")
+
+    lim = max(1, min(int(limit or 200), 2000))
+    source = str(cible.get("source") or "").strip()
+
+    if source != "DB":
+        # Compatibilité des fichiers plats ; leur import streaming fait l'objet
+        # d'un lot séparé car les formats xls/json ne sont pas tous streamables.
+        df = load_clients_df_for_cible(id_cible)
+        return df.head(lim), int(len(df))
+
+    built = build_db_cible_radicals_query(
+        id_cible,
+        exclude_rupture_relation=False,
+    )
+    if built is None:
+        return pd.DataFrame(), 0
+
+    radical_select, params = built
+
+    with connection() as conn:
+        table = _detect_clients_table(conn)
+        radical_column = _detect_radical_column(conn, table)
+
+        count_query = sql.SQL(
+            "SELECT COUNT(*) FROM ({radical_select}) AS target"
+        ).format(radical_select=radical_select)
+
+        preview_query = sql.SQL(
+            """
+            SELECT c.*
+            FROM {table} AS c
+            JOIN ({radical_select}) AS target
+              ON target."Radical_compte" = c.{radical}
+            LIMIT %s
+            """
+        ).format(
+            table=sql.Identifier(table),
+            radical_select=radical_select,
+            radical=sql.Identifier(radical_column),
+        )
+
+        with conn.cursor() as cur:
+            cur.execute(count_query, params or [])
+            count_row = cur.fetchone()
+            total = int(count_row[0] or 0) if count_row else 0
+
+            cur.execute(preview_query, [*(params or []), lim])
+            rows = cur.fetchall()
+            columns = [description.name for description in (cur.description or [])]
+
+    return pd.DataFrame(rows, columns=columns), total
+

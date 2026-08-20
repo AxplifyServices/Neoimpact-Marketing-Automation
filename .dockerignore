@@ -12,3 +12,13 @@ venv/
 
 # Frontend has its own Docker build context.
 campain-app-main/
+
+# Secrets must be injected at runtime (compose env_file / secret manager)
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+cle_git
+cle_git.*

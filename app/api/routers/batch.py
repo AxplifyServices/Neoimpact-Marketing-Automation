@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.batch.batch_runner import BatchAlreadyRunningError, run_batch_with_lock
 from app.batch.scheduler import get_batch_scheduler_status
+from app.core.workload_governor import workload_snapshot
 
 router = APIRouter()
 
@@ -93,7 +94,7 @@ def run_batch(
 def batch_status() -> Dict[str, Any]:
     with _manual_guard:
         state = dict(_manual_state)
-    return {"ok": True, "manual": state, "schedule": get_batch_scheduler_status()}
+    return {"ok": True, "manual": state, "schedule": get_batch_scheduler_status(), "workload": workload_snapshot()}
 
 
 @router.get("/batch/schedule")

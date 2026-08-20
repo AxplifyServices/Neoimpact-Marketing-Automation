@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import unicodedata
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from app.storage.runtime_db import RuntimeConnection, connect_runtime
+from app.core.workload_governor import heavy_workload
 from app.storage.postgres_db import get_column_names, table_exists
 from app.storage.campagnes_store_sqlite import list_all_campagnes, update_etat
 from app.storage.clients_campagnes_store_sqlite import (
@@ -51,6 +53,7 @@ CLIENTS_CAMPAGNES_TABLE = "clients_campagnes"
 CAMPAGNES_TABLE = "campagnes"
 MODELES_TABLE = "modeles"
 CLIENTS_TABLE = "clients"
+BATCH_ROW_CHUNK_SIZE = max(50, int(os.getenv("BATCH_ROW_CHUNK_SIZE", "500")))
 
 
 # =========================================================
@@ -509,144 +512,168 @@ def _advance_en_attente_rows(
     id_campagne: str,
     liste_action: List[Dict[str, Any]],
 ) -> int:
+    """
+    Fait progresser les lignes En attente/Objectif avec une mémoire bornée.
+
+    L'ancienne version chargeait toute la campagne avec ``fetchall()`` et
+    ``to_jsonb(cl)``. Une campagne de plusieurs centaines de milliers de
+    clients pouvait donc occuper plusieurs Go de RAM Python.
+
+    Cette version utilise une pagination keyset sur la PK technique et commit
+    entre les lots. Le slot batch est relâché à chaque lot, ce qui permet aux
+    opérations interactives de passer en priorité.
+    """
     if not isinstance(liste_action, list) or not liste_action:
         return 0
 
     has_conversion = _cc_has_col(conn, "conversion")
-    cur = conn.cursor()
+    has_id_action = _cc_has_col(conn, "ID_Action")
+    has_canal = _cc_has_col(conn, "Canal")
+    has_action = _cc_has_col(conn, "Action")
 
-    cur.execute(
-        f"""
-        SELECT
-            cc.rowid AS __rid,
-            cc.*,
-            to_jsonb(cl) AS __client_row
-        FROM {CLIENTS_CAMPAGNES_TABLE} cc
-        LEFT JOIN {CLIENTS_TABLE} cl
-          ON cl.radical_compte = cc.Radical_compte
-        WHERE cc.ID_CAMPAGNE = ?
-          AND COALESCE(cc.Etat_campagne,'') = 'En cours'
-          AND COALESCE(cc.conversion, 0) <> 1
-          AND COALESCE(cc.Action,'') IN ('En attente', 'Objectif')
-        """,
-        (id_campagne,),
-    )
-
-    rows = [dict(row) for row in cur.fetchall()]
     changed = 0
+    last_rid = 0
 
-    for row in rows:
-        rid = int(row["__rid"])
-        id_action = _norm_str(row.get("ID_Action"))
-
-        client_row = row.pop("__client_row", None)
-        if isinstance(client_row, dict):
-            _inject_client_fields(row, client_row)
-
-        current = find_bloc_by_id(liste_action, id_action)
-        if not current:
-            continue
-
-        if is_objective_bloc(current):
-            cur_id = _norm_str(current.get("ID")) or id_action
-
-            must_update = (
-                (_cc_has_col(conn, "ID_Action") and _norm_str(row.get("ID_Action")) != cur_id)
-                or (_cc_has_col(conn, "Canal") and _norm_str(row.get("Canal")) != "Objectif")
-                or (_cc_has_col(conn, "Action") and _norm_str(row.get("Action")) != "Objectif")
+    while True:
+        with heavy_workload("batch"):
+            cur = conn.cursor()
+            cur.execute(
+                f"""
+                SELECT
+                    cc.rowid AS __rid,
+                    cc.*,
+                    to_jsonb(cl) AS __client_row
+                FROM {CLIENTS_CAMPAGNES_TABLE} cc
+                LEFT JOIN {CLIENTS_TABLE} cl
+                  ON cl.radical_compte = cc.Radical_compte
+                WHERE cc.ID_CAMPAGNE = ?
+                  AND cc.rowid > ?
+                  AND COALESCE(cc.Etat_campagne,'') = 'En cours'
+                  AND COALESCE(cc.conversion, 0) <> 1
+                  AND COALESCE(cc.Action,'') IN ('En attente', 'Objectif')
+                ORDER BY cc.rowid
+                LIMIT ?
+                """,
+                (id_campagne, int(last_rid), int(BATCH_ROW_CHUNK_SIZE)),
             )
 
-            if must_update:
-                set_parts: List[str] = []
-                params: List[Any] = []
+            rows = cur.fetchall()
+            if not rows:
+                break
 
-                if _cc_has_col(conn, "ID_Action"):
-                    set_parts.append("ID_Action = ?")
-                    params.append(cur_id)
-                if _cc_has_col(conn, "Canal"):
-                    set_parts.append("Canal = 'Objectif'")
-                if _cc_has_col(conn, "Action"):
-                    set_parts.append("Action = 'Objectif'")
+            for source_row in rows:
+                row = dict(source_row)
+                rid = int(row["__rid"])
+                last_rid = max(last_rid, rid)
+                id_action = _norm_str(row.get("ID_Action"))
 
-                update_sql = (
-                    f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET "
-                    + ", ".join(set_parts)
-                    + " WHERE rowid = ?"
-                )
-                params.append(rid)
-                cur.execute(update_sql, params)
-                changed += int(cur.rowcount or 0)
+                client_row = row.pop("__client_row", None)
+                if isinstance(client_row, dict):
+                    _inject_client_fields(row, client_row)
 
-                row["ID_Action"] = cur_id
-                row["Canal"] = "Objectif"
-                row["Action"] = "Objectif"
+                current = find_bloc_by_id(liste_action, id_action)
+                if not current:
+                    continue
 
-            if has_conversion:
-                branch = objective_branch(current, row)
-                if branch == "Oui":
-                    try:
-                        conv_val = int(row.get("conversion") or 0)
-                    except Exception:
-                        conv_val = 0
+                if is_objective_bloc(current):
+                    cur_id = _norm_str(current.get("ID")) or id_action
 
-                    if conv_val != 1:
-                        converted_now = mark_converted(
-                            conn,
-                            rid,
-                            objective_id_action=cur_id,
+                    must_update = (
+                        (has_id_action and _norm_str(row.get("ID_Action")) != cur_id)
+                        or (has_canal and _norm_str(row.get("Canal")) != "Objectif")
+                        or (has_action and _norm_str(row.get("Action")) != "Objectif")
+                    )
+
+                    if must_update:
+                        set_parts: List[str] = []
+                        params: List[Any] = []
+
+                        if has_id_action:
+                            set_parts.append("ID_Action = ?")
+                            params.append(cur_id)
+                        if has_canal:
+                            set_parts.append("Canal = 'Objectif'")
+                        if has_action:
+                            set_parts.append("Action = 'Objectif'")
+
+                        update_sql = (
+                            f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET "
+                            + ", ".join(set_parts)
+                            + " WHERE rowid = ?"
                         )
-                        if converted_now:
-                            changed += 1
-                        row["conversion"] = 1
+                        params.append(rid)
+                        cur.execute(update_sql, params)
+                        changed += int(cur.rowcount or 0)
 
-                    # Une conversion est terminale pour ce client :
-                    # aucune navigation supplémentaire n'est autorisée.
-                    if int(row.get("conversion") or 0) == 1:
-                        continue
+                        row["ID_Action"] = cur_id
+                        row["Canal"] = "Objectif"
+                        row["Action"] = "Objectif"
 
-        nxt = pick_next_child(liste_action, current, row)
+                    if has_conversion:
+                        branch = objective_branch(current, row)
+                        if branch == "Oui":
+                            try:
+                                conv_val = int(row.get("conversion") or 0)
+                            except Exception:
+                                conv_val = 0
 
-        if not nxt:
-            if (
-                _cc_has_col(conn, "Action")
-                and _norm_str(row.get("Action")) != "En attente"
-            ):
+                            if conv_val != 1:
+                                converted_now = mark_converted(
+                                    conn,
+                                    rid,
+                                    objective_id_action=cur_id,
+                                )
+                                if converted_now:
+                                    changed += 1
+                                row["conversion"] = 1
+
+                            if int(row.get("conversion") or 0) == 1:
+                                continue
+
+                nxt = pick_next_child(liste_action, current, row)
+
+                if not nxt:
+                    if has_action and _norm_str(row.get("Action")) != "En attente":
+                        cur.execute(
+                            f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET Action='En attente' WHERE rowid = ?",
+                            (rid,),
+                        )
+                        changed += int(cur.rowcount or 0)
+                    continue
+
+                new_id = _norm_str(nxt.get("ID"))
+                if is_objective_bloc(nxt):
+                    record_objective_entry(
+                        conn,
+                        rid,
+                        source_id_action=id_action,
+                        source_canal=_norm_str(row.get("Canal")),
+                    )
+                    new_canal = "Objectif"
+                    new_action = "Objectif"
+                else:
+                    new_canal = _norm_str(nxt.get("Canal"))
+                    new_action = _norm_str(nxt.get("Action"))
+
+                if not new_id or not new_action:
+                    continue
+
                 cur.execute(
-                    f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET Action='En attente' WHERE rowid = ?",
-                    (rid,),
+                    f"""
+                    UPDATE {CLIENTS_CAMPAGNES_TABLE}
+                    SET ID_Action = ?, Canal = ?, Action = ?
+                    WHERE rowid = ?
+                    """,
+                    (new_id, new_canal, new_action, rid),
                 )
                 changed += int(cur.rowcount or 0)
-            continue
 
-        new_id = _norm_str(nxt.get("ID"))
-        if is_objective_bloc(nxt):
-            record_objective_entry(
-                conn,
-                rid,
-                source_id_action=id_action,
-                source_canal=_norm_str(row.get("Canal")),
-            )
-            new_canal = "Objectif"
-            new_action = "Objectif"
-        else:
-            new_canal = _norm_str(nxt.get("Canal"))
-            new_action = _norm_str(nxt.get("Action"))
-
-        if not new_id or not new_action:
-            continue
-
-        cur.execute(
-            f"""
-            UPDATE {CLIENTS_CAMPAGNES_TABLE}
-            SET ID_Action = ?, Canal = ?, Action = ?
-            WHERE rowid = ?
-            """,
-            (new_id, new_canal, new_action, rid),
-        )
-        changed += int(cur.rowcount or 0)
+            # Les objets du lot peuvent être libérés et les opérations
+            # interactives peuvent prendre le slot avant le lot suivant.
+            conn.commit()
+            del rows
 
     return int(changed)
-
 
 def _update_arriv_eche_for_campaign(
     conn: RuntimeConnection,
@@ -775,21 +802,16 @@ def _rebuild_outputs_for_all_en_cours(
     conn: RuntimeConnection,
     campagnes: List[Dict[str, Any]],
 ) -> Dict[str, int]:
+    """Reconstruit les sorties campagne par campagne sans DELETE global.
+
+    Le DELETE global historique pouvait supprimer les sorties qu'une requête
+    interactive venait de créer en parallèle. Il forçait aussi une grosse
+    reconstruction monolithique. Chaque campagne est désormais isolée et
+    passe par un slot batch court.
+    """
     ensure_crc_input_table()
     ensure_vers_da_table()
     ensure_vers_cc_table()
-
-    clear_crc_input()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM vers_da")
-    cur.execute("DELETE FROM vers_cc")
-
-    if _table_exists(conn, "vers_da_terrain"):
-        cur.execute("DELETE FROM vers_da_terrain")
-    if _table_exists(conn, "vers_cc_terrain"):
-        cur.execute("DELETE FROM vers_cc_terrain")
-
-    conn.commit()
 
     n_crc = 0
     n_da = 0
@@ -812,9 +834,21 @@ def _rebuild_outputs_for_all_en_cours(
             or "sans_action_terrain"
         )
 
-        n_crc += int(
-            fill_crc_input_from_clients_campagnes(id_campagne) or 0
-        )
+        # Les écritures DB massives sont sérialisées avec les autres travaux
+        # lourds, mais le slot est libéré avant les appels réseau terrain.
+        with heavy_workload("batch"):
+            _delete_outputs_for_campagne(id_campagne)
+            n_crc += int(
+                fill_crc_input_from_clients_campagnes(id_campagne) or 0
+            )
+
+            if type_campagne != "avec_action_terrain":
+                n_da += int(
+                    fill_action_vers_da_from_clients_campagnes(id_campagne) or 0
+                )
+                n_cc += int(
+                    fill_action_vers_cc_from_clients_campagnes(id_campagne) or 0
+                )
 
         if type_campagne == "avec_action_terrain":
             dispatch = dispatch_pending_visits_for_campaign(id_campagne)
@@ -822,13 +856,6 @@ def _rebuild_outputs_for_all_en_cours(
             n_external_pending += int(dispatch.get("pending") or 0)
             n_external_sent += int(dispatch.get("sent") or 0)
             n_external_errors += int(dispatch.get("errors") or 0)
-        else:
-            n_da += int(
-                fill_action_vers_da_from_clients_campagnes(id_campagne) or 0
-            )
-            n_cc += int(
-                fill_action_vers_cc_from_clients_campagnes(id_campagne) or 0
-            )
 
     return {
         "crc_input": n_crc,
@@ -952,10 +979,11 @@ def run_batch_manuel() -> Dict[str, Any]:
             out["target_sync"]["campaigns_processed"] += 1
 
             try:
-                result = sync_new_clients_from_cible_for_campaign(
-                    conn,
-                    id_campagne,
-                )
+                with heavy_workload("batch"):
+                    result = sync_new_clients_from_cible_for_campaign(
+                        conn,
+                        id_campagne,
+                    )
 
                 detail = {
                     "id_campagne": id_campagne,
@@ -1018,7 +1046,7 @@ def run_batch_manuel() -> Dict[str, Any]:
         # 7) Traitement mail.
         out["mails_processed"] = run_mail_meta_loop(
             max_passes=10,
-            limit_rows_per_pass=5000,
+            limit_rows_per_pass=500,
         )
 
         # 8) Reconstruction des outputs.

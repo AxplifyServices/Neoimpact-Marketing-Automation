@@ -708,44 +708,454 @@ def build_graph_payload_for_single_campaign(df: pd.DataFrame, campagne_id: str) 
     }
 
 
+
+# =========================================================
+# SQL-native dashboard aggregation
+# =========================================================
+def _dashboard_where(
+    filters: DashboardFilters,
+    forced_campaign_id: Optional[str] = None,
+) -> tuple[str, List[object]]:
+    where = [
+        "COALESCE(c.etat_campagne,'') <> 'Annulée'",
+        "COALESCE(c.etat_campagne,'') IN ('Planifiée','En cours','En pause','Terminée')",
+    ]
+    params: List[object] = []
+
+    campaign_ids = [forced_campaign_id] if forced_campaign_id else (filters.campagne_ids or [])
+    campaign_ids = [_clean_campagne_id(x) for x in campaign_ids if _clean_campagne_id(x)]
+    if campaign_ids:
+        placeholders = ",".join(["?"] * len(campaign_ids))
+        where.append(f"cc.ID_CAMPAGNE IN ({placeholders})")
+        params.extend(campaign_ids)
+
+    if filters.etats_campagne:
+        etats = [str(x).strip() for x in filters.etats_campagne if str(x).strip()]
+        if etats:
+            placeholders = ",".join(["?"] * len(etats))
+            where.append(f"c.etat_campagne IN ({placeholders})")
+            params.extend(etats)
+
+    if filters.gestionnaires:
+        gestionnaires = [str(x).strip() for x in filters.gestionnaires if str(x).strip()]
+        if gestionnaires:
+            placeholders = ",".join(["?"] * len(gestionnaires))
+            where.append(f"COALESCE(cl.Gestionnaire,'') IN ({placeholders})")
+            params.extend(gestionnaires)
+
+    valid_last_action_date = (
+        "CASE WHEN COALESCE(cc.Date_last_action,'') ~ '^\\d{4}-\\d{2}-\\d{2}' "
+        "THEN SUBSTRING(cc.Date_last_action FROM 1 FOR 10)::date END"
+    )
+    if filters.date_min is not None:
+        where.append(f"({valid_last_action_date}) >= ?::date")
+        params.append(filters.date_min.isoformat())
+    if filters.date_max is not None:
+        where.append(f"({valid_last_action_date}) <= ?::date")
+        params.append(filters.date_max.isoformat())
+
+    return " AND ".join(where), params
+
+
+def _dashboard_from_sql(where_sql: str) -> str:
+    return f"""
+        FROM {CLIENTS_TABLE} cc
+        LEFT JOIN {CLIENTS_DIM_TABLE} cl
+          ON cl.radical_compte = cc.Radical_compte
+        LEFT JOIN {CAMPAGNES_TABLE} c
+          ON c.id_campagne = cc.ID_CAMPAGNE
+        WHERE {where_sql}
+    """
+
+
+def _fetch_one_dict(sql_text: str, params: List[object]) -> Dict[str, Any]:
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(sql_text, params)
+        row = cur.fetchone()
+        return dict(row) if row else {}
+    finally:
+        conn.close()
+
+
+def _fetch_all_dict(sql_text: str, params: List[object]) -> List[Dict[str, Any]]:
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(sql_text, params)
+        return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def _dashboard_treated_expr(alias: str = "cc") -> str:
+    cols = [
+        "NB_appel", "NB_mail", "NB_sms", "NB_message",
+        "NB_approche_commercial", "NB_da", "NB_cc", "NB_push",
+    ]
+    return "(" + " + ".join(f"COALESCE({alias}.{col},0)" for col in cols) + ") > 0"
+
+
+def _dashboard_graph_payload_sql(
+    filters: DashboardFilters,
+    campagne_id: str,
+) -> Dict[str, Any]:
+    campagne_id = _clean_campagne_id(campagne_id)
+    modele = _load_modele_for_campagne(campagne_id)
+    if not modele:
+        return {
+            "campaign_id": campagne_id,
+            "modele_id": "",
+            "modele_nom": "",
+            "nodes": [],
+            "edges": [],
+        }
+
+    where_sql, params = _dashboard_where(filters, forced_campaign_id=campagne_id)
+    base = _dashboard_from_sql(where_sql)
+
+    count_rows = _fetch_all_dict(
+        f"""
+        SELECT COALESCE(cc.ID_Action::text,'') AS node_id, COUNT(*) AS clients
+        {base}
+        GROUP BY COALESCE(cc.ID_Action::text,'')
+        """,
+        list(params),
+    )
+    counts = {
+        _norm_str(row.get("node_id")): int(row.get("clients") or 0)
+        for row in count_rows
+        if _norm_str(row.get("node_id"))
+    }
+
+    conv_rows = _fetch_all_dict(
+        f"""
+        SELECT COALESCE(cc.conversion_id_action::text,'') AS node_id, COUNT(*) AS clients
+        {base}
+          AND COALESCE(cc.conversion,0) = 1
+          AND COALESCE(cc.conversion_id_action::text,'') <> ''
+        GROUP BY COALESCE(cc.conversion_id_action::text,'')
+        """,
+        list(params),
+    )
+    conv_counts = {
+        _norm_str(row.get("node_id")): int(row.get("clients") or 0)
+        for row in conv_rows
+        if _norm_str(row.get("node_id"))
+    }
+
+    graphe = _safe_json_loads(modele.get("graphe_json"), {"nodes": [], "edges": []})
+    liste_action = _safe_json_loads(modele.get("liste_action"), [])
+
+    id_to_meta: Dict[str, Dict[str, str]] = {}
+    if isinstance(liste_action, list):
+        for action in liste_action:
+            if not isinstance(action, dict):
+                continue
+            nid = _norm_str(action.get("ID") or action.get("id"))
+            if nid:
+                id_to_meta[nid] = {
+                    "canal": _norm_str(action.get("Canal")),
+                    "action": _norm_str(action.get("Action")),
+                }
+
+    nodes: List[Dict[str, Any]] = []
+    edges: List[Dict[str, str]] = []
+
+    if isinstance(graphe, dict) and isinstance(graphe.get("nodes"), list) and graphe.get("nodes"):
+        for node in graphe.get("nodes", []):
+            nid = _norm_str(node.get("id") or node.get("ID") or node.get("node_id"))
+            meta = id_to_meta.get(nid, {})
+            canal = _norm_str(node.get("canal") or node.get("Canal")) or _norm_str(meta.get("canal"))
+            action = _norm_str(node.get("action") or node.get("Action")) or _norm_str(meta.get("action"))
+            cnt = int(counts.get(nid, 0))
+            conv = int(conv_counts.get(nid, 0))
+
+            base_label = _norm_str(node.get("label"))
+            if not base_label:
+                base_label = f"{nid} | {canal} | {action}".strip(" |")
+            else:
+                if canal and canal not in base_label:
+                    base_label = f"{base_label} | {canal}"
+                if action and action not in base_label:
+                    base_label = f"{base_label} | {action}"
+
+            nodes.append({
+                "id": nid,
+                "label": f"{base_label} ({cnt} | {conv} conv)",
+                "count": cnt,
+                "converted_count": conv,
+                "canal": canal,
+                "action": action,
+            })
+
+        for edge in graphe.get("edges", []):
+            fr = _norm_str(edge.get("from") or edge.get("source") or edge.get("src"))
+            to = _norm_str(edge.get("to") or edge.get("target") or edge.get("dst"))
+            if fr and to:
+                edges.append({"from": fr, "to": to})
+    elif isinstance(liste_action, list):
+        for action_node in liste_action:
+            if not isinstance(action_node, dict):
+                continue
+            nid = _norm_str(action_node.get("ID") or action_node.get("id"))
+            canal = _norm_str(action_node.get("Canal"))
+            action = _norm_str(action_node.get("Action"))
+            parent = _norm_str(
+                action_node.get("Bloc_mère")
+                or action_node.get("bloc_mere")
+                or action_node.get("parent")
+            )
+            cnt = int(counts.get(nid, 0))
+            conv = int(conv_counts.get(nid, 0))
+            nodes.append({
+                "id": nid,
+                "label": f"{nid} | {canal} | {action} ({cnt} | {conv} conv)",
+                "count": cnt,
+                "converted_count": conv,
+                "canal": canal,
+                "action": action,
+            })
+            if parent:
+                edges.append({"from": parent, "to": nid})
+
+    return {
+        "campaign_id": campagne_id,
+        "modele_id": _norm_str(modele.get("id_modele")),
+        "modele_nom": _norm_str(modele.get("nom_modele")),
+        "nodes": nodes,
+        "edges": edges,
+    }
+
+
+def _compute_dashboard_payload_sql(
+    filters: DashboardFilters,
+    *,
+    forced_campaign_id: Optional[str] = None,
+    include_graph: bool = False,
+) -> Dict[str, Any]:
+    where_sql, params = _dashboard_where(filters, forced_campaign_id=forced_campaign_id)
+    base = _dashboard_from_sql(where_sql)
+    treated = _dashboard_treated_expr("cc")
+    conversion = "COALESCE(cc.conversion,0) = 1"
+
+    aggregate = _fetch_one_dict(
+        f"""
+        SELECT
+            COUNT(*) AS transmis,
+            COUNT(*) FILTER (WHERE {treated}) AS contactes_total,
+            COUNT(*) FILTER (WHERE {conversion}) AS closing_total,
+            COALESCE(SUM(
+                COALESCE(cc.NB_appel,0)
+              + COALESCE(cc.NB_mail,0)
+              + COALESCE(cc.NB_sms,0)
+              + COALESCE(cc.NB_message,0)
+              + COALESCE(cc.NB_da,0)
+              + COALESCE(cc.NB_cc,0)
+              + COALESCE(cc.NB_push,0)
+            ),0) AS traitements_total,
+            COUNT(*) FILTER (
+                WHERE LOWER(TRIM(COALESCE(cc.arriv_eche,''))) = 'oui'
+            ) AS arriv_eche
+        {base}
+        """,
+        list(params),
+    )
+
+    transmis = int(aggregate.get("transmis") or 0)
+    contactes_total = int(aggregate.get("contactes_total") or 0)
+    closing_total = int(aggregate.get("closing_total") or 0)
+    traitements_total = int(aggregate.get("traitements_total") or 0)
+    arriv_eche = int(aggregate.get("arriv_eche") or 0)
+
+    kpis = {
+        "transmis": transmis,
+        "contactes_total": contactes_total,
+        "closing_total": closing_total,
+        "traitements_total": traitements_total,
+        "arriv_eche": arriv_eche,
+        "taux_contact_total": float(contactes_total / transmis) if transmis else 0.0,
+        "taux_closing_sur_affectes": float(closing_total / transmis) if transmis else 0.0,
+        "taux_closing_sur_traitements_total": float(closing_total / traitements_total) if traitements_total else 0.0,
+    }
+
+    channel_exprs: List[str] = []
+    for index, (canal, column) in enumerate(CHANNEL_COLS):
+        channel_exprs.extend([
+            f"COALESCE(SUM(COALESCE(cc.{column},0)),0) AS tr_{index}",
+            f"COUNT(*) FILTER (WHERE COALESCE(cc.{column},0) > 0) AS contacted_{index}",
+            f"COUNT(*) FILTER (WHERE {conversion} AND COALESCE(cc.conversion_canal,'') = ?) AS conv_{index}",
+        ])
+
+    channel_params = list(params)
+    # Les placeholders des expressions SELECT apparaissent avant ceux du WHERE.
+    select_channel_params = [canal for canal, _ in CHANNEL_COLS]
+    channel_row = _fetch_one_dict(
+        "SELECT " + ", ".join(channel_exprs) + " " + base,
+        [*select_channel_params, *channel_params],
+    )
+
+    by_channel: List[Dict[str, Any]] = []
+    for index, (canal, _column) in enumerate(CHANNEL_COLS):
+        tr = int(channel_row.get(f"tr_{index}") or 0)
+        contacted = int(channel_row.get(f"contacted_{index}") or 0)
+        conv = int(channel_row.get(f"conv_{index}") or 0)
+        by_channel.append({
+            "Canal": canal,
+            "Traitements": tr,
+            "Closing": conv,
+            "Taux_closing_sur_traitements": float(conv / tr) if tr else 0.0,
+            "Clients_contactes": contacted,
+            "Taux_contact_sur_transmis": float(contacted / transmis) if transmis else 0.0,
+        })
+
+    by_channel.append({
+        "Canal": "Total",
+        "Traitements": traitements_total,
+        "Closing": closing_total,
+        "Taux_closing_sur_traitements": float(closing_total / traitements_total) if traitements_total else 0.0,
+        "Clients_contactes": contactes_total,
+        "Taux_contact_sur_transmis": float(contactes_total / transmis) if transmis else 0.0,
+    })
+
+    region_rows = _fetch_all_dict(
+        f"""
+        SELECT
+            COALESCE(NULLIF(TRIM(cl.Region::text),''), 'Inconnue') AS "Region",
+            COUNT(*) AS "Transmis",
+            COUNT(*) FILTER (WHERE {conversion}) AS "Closed"
+        {base}
+        GROUP BY COALESCE(NULLIF(TRIM(cl.Region::text),''), 'Inconnue')
+        ORDER BY COUNT(*) DESC
+        """,
+        list(params),
+    )
+    region_series = [{
+        "Region": _norm_str(row.get("Region")) or "Inconnue",
+        "Transmis": int(row.get("Transmis") or 0),
+        "Closed": int(row.get("Closed") or 0),
+    } for row in region_rows]
+
+    funnel_rows = _fetch_all_dict(
+        f"""
+        SELECT COALESCE(cc.ID_Action::text,'') AS "ID_Action", COUNT(*) AS "Clients"
+        {base}
+        GROUP BY COALESCE(cc.ID_Action::text,'')
+        """,
+        list(params),
+    )
+    def _funnel_sort(row: Dict[str, Any]):
+        value = _norm_str(row.get("ID_Action"))
+        try:
+            return (0, int(value))
+        except Exception:
+            return (1, value)
+    funnel_series = sorted(({
+        "ID_Action": _norm_str(row.get("ID_Action")),
+        "Clients": int(row.get("Clients") or 0),
+    } for row in funnel_rows), key=_funnel_sort)
+
+    last_date_expr = (
+        "CASE WHEN COALESCE(cc.Date_last_action,'') ~ '^\\d{4}-\\d{2}-\\d{2}' "
+        "THEN SUBSTRING(cc.Date_last_action FROM 1 FOR 10)::date END"
+    )
+    conversion_date_expr = (
+        "CASE WHEN COALESCE(cc.conversion_date,'') ~ '^\\d{4}-\\d{2}-\\d{2}' "
+        "THEN SUBSTRING(cc.conversion_date FROM 1 FOR 10)::date END"
+    )
+
+    treatment_days = _fetch_all_dict(
+        f"""
+        SELECT ({last_date_expr}) AS day, COUNT(*) AS total
+        {base}
+          AND {treated}
+          AND ({last_date_expr}) IS NOT NULL
+        GROUP BY ({last_date_expr})
+        """,
+        list(params),
+    )
+    conversion_days = _fetch_all_dict(
+        f"""
+        SELECT ({conversion_date_expr}) AS day, COUNT(*) AS total
+        {base}
+          AND {conversion}
+          AND ({conversion_date_expr}) IS NOT NULL
+        GROUP BY ({conversion_date_expr})
+        """,
+        list(params),
+    )
+
+    daily_map: Dict[str, Dict[str, Any]] = {}
+    for row in treatment_days:
+        day = row.get("day")
+        key = day.isoformat() if hasattr(day, "isoformat") else _norm_str(day)
+        if key:
+            daily_map.setdefault(key, {"Date": key, "Traitements": 0, "Closed": 0})["Traitements"] = int(row.get("total") or 0)
+    for row in conversion_days:
+        day = row.get("day")
+        key = day.isoformat() if hasattr(day, "isoformat") else _norm_str(day)
+        if key:
+            daily_map.setdefault(key, {"Date": key, "Traitements": 0, "Closed": 0})["Closed"] = int(row.get("total") or 0)
+    daily_series = [daily_map[key] for key in sorted(daily_map)]
+
+    payload: Dict[str, Any] = {
+        "kpis": kpis,
+        "tables": {"by_channel": by_channel},
+        "series": {
+            "region_transmit_closed": region_series,
+            "funnel_by_id_action": funnel_series,
+            "daily_treatments_closed": daily_series,
+        },
+    }
+
+    graph_campaign_id = forced_campaign_id
+    if not graph_campaign_id and filters.campagne_ids and len(filters.campagne_ids) == 1:
+        graph_campaign_id = _clean_campagne_id(filters.campagne_ids[0])
+    if include_graph and graph_campaign_id:
+        payload["graph"] = _dashboard_graph_payload_sql(filters, graph_campaign_id)
+
+    return payload
+
+
 # =========================================================
 # Orchestrator (Streamlit + API)
 # =========================================================
 def compute_dashboard_payload(filters: DashboardFilters, include_by_campaign: bool = True) -> Dict[str, Any]:
-    df = load_clients_campagnes_df(filters)
+    """Calcule le dashboard en agrégations PostgreSQL, sans DataFrame population."""
+    single_campaign = bool(filters.campagne_ids and len(filters.campagne_ids) == 1)
+    payload = _compute_dashboard_payload_sql(
+        filters,
+        include_graph=single_campaign,
+    )
 
-    kpis = compute_kpis_compact(df)
-    table_canal = compute_table_by_channel(df)
-    region_mix = compute_region_transmit_closed(df)
-    funnel = compute_funnel_by_id_action(df)
-    daily = compute_daily_treatments_and_closed(df)
-
-    payload: Dict[str, Any] = {
-        "filters_applied": {
-            "campagne_ids": filters.campagne_ids or [],
-            "etats_campagne": filters.etats_campagne or [],
-            "date_min": filters.date_min.isoformat() if filters.date_min else None,
-            "date_max": filters.date_max.isoformat() if filters.date_max else None,
-        },
-        "kpis": kpis,
-        "tables": {"by_channel": table_canal.to_dict(orient="records")},
-        "series": {
-            "region_transmit_closed": region_mix.to_dict(orient="records"),
-            "funnel_by_id_action": funnel.to_dict(orient="records"),
-            "daily_treatments_closed": daily.to_dict(orient="records"),
-        },
+    payload["filters_applied"] = {
+        "campagne_ids": filters.campagne_ids or [],
+        "etats_campagne": filters.etats_campagne or [],
+        "date_min": filters.date_min.isoformat() if filters.date_min else None,
+        "date_max": filters.date_max.isoformat() if filters.date_max else None,
     }
-
-    if filters.campagne_ids and len(filters.campagne_ids) == 1:
-        payload["graph"] = build_graph_payload_for_single_campaign(df, _clean_campagne_id(filters.campagne_ids[0]))
 
     if include_by_campaign and filters.campagne_ids:
         by_campaign: Dict[str, Any] = {}
-        for raw in (filters.campagne_ids or []):
+        for raw in filters.campagne_ids:
             cid = _clean_campagne_id(raw)
             if not cid:
                 continue
-            by_campaign[cid] = _compute_payload_isolated_for_campaign(df, cid)
+            sub_filters = DashboardFilters(
+                campagne_ids=[cid],
+                etats_campagne=filters.etats_campagne,
+                date_min=filters.date_min,
+                date_max=filters.date_max,
+                gestionnaires=filters.gestionnaires,
+            )
+            isolated = _compute_dashboard_payload_sql(
+                sub_filters,
+                forced_campaign_id=cid,
+                include_graph=True,
+            )
+            isolated["campagne_id"] = cid
+            by_campaign[cid] = isolated
         payload["by_campaign"] = by_campaign
 
     return payload

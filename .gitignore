@@ -27,3 +27,13 @@ database.db
 *.db
 *.sqlite
 *.sqlite3
+# Secrets / runtime configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+cle_git
+cle_git.*

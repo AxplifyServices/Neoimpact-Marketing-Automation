@@ -69,51 +69,22 @@ def ensure_table() -> None:
 def insert_only_members(
     id_cible: str,
     radicals: Iterable[str],
+    *,
+    chunk_size: int = 2000,
 ) -> int:
+    """Ajoute les membres en lots bornés sans dupliquer toute la population.
+
+    Les doublons inter-lots sont laissés à la contrainte UNIQUE PostgreSQL via
+    ON CONFLICT DO NOTHING. Seul le lot courant est dédupliqué en Python.
     """
-    Ajoute uniquement les nouveaux couples :
-
-        (ID_CIBLE, Radical_compte)
-
-    Aucun membre existant n'est supprimé.
-
-    Les doublons sont ignorés grâce à la contrainte UNIQUE
-    PostgreSQL existante.
-    """
-
     ensure_table()
 
-    id_cible = str(
-        id_cible or ""
-    ).strip()
-
+    id_cible = str(id_cible or "").strip()
     if not id_cible:
         return 0
 
-    now = datetime.now().strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
-
-    # Normalisation + déduplication du batch fourni.
-    unique_radicals = list(
-        dict.fromkeys(
-            str(rc).strip()
-            for rc in radicals
-            if str(rc).strip()
-        )
-    )
-
-    if not unique_radicals:
-        return 0
-
-    data = [
-        (
-            id_cible,
-            radical,
-            now,
-        )
-        for radical in unique_radicals
-    ]
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    chunk_size = max(100, int(chunk_size or 2000))
 
     query = """
         INSERT INTO clients_cibles (
@@ -129,18 +100,32 @@ def insert_only_members(
         DO NOTHING
     """
 
+    inserted_total = 0
+    batch = []
+    seen_in_batch = set()
+
     with connection() as conn:
         with conn.cursor() as cur:
-            cur.executemany(
-                query,
-                data,
-            )
+            for raw in radicals:
+                radical = str(raw or "").strip()
+                if not radical or radical in seen_in_batch:
+                    continue
+                seen_in_batch.add(radical)
+                batch.append((id_cible, radical, now))
 
-            inserted = int(
-                cur.rowcount or 0
-            )
+                if len(batch) >= chunk_size:
+                    cur.executemany(query, batch)
+                    if cur.rowcount is not None and cur.rowcount >= 0:
+                        inserted_total += int(cur.rowcount)
+                    batch.clear()
+                    seen_in_batch.clear()
 
-    return inserted
+            if batch:
+                cur.executemany(query, batch)
+                if cur.rowcount is not None and cur.rowcount >= 0:
+                    inserted_total += int(cur.rowcount)
+
+    return inserted_total
 
 
 

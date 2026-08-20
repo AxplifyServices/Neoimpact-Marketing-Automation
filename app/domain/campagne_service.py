@@ -10,6 +10,7 @@ import time
 import pandas as pd
 
 from app.storage.runtime_db import RuntimeConnection, connect_runtime
+from app.core.workload_governor import heavy_workload
 from app.storage.postgres_db import table_exists, connection as pg_connection
 from app.storage.campagnes_store_sqlite import insert_campagne, update_etat
 from app.storage.clients_campagnes_store_sqlite import (
@@ -245,21 +246,32 @@ def _route_outputs_for_campaign_bulk(
     id_campagne: str,
     type_campagne: str,
 ) -> Dict[str, int]:
-    """
-    Reconstruit les outputs avec des INSERT ... SELECT PostgreSQL.
+    """Reconstruit les sorties en bulk sans chevaucher un batch lourd.
 
-    Les files CRC/CC/DA sont remplies en masse. Les visites terrain restent
-    confiées au dispatcher externe, car elles impliquent un appel HTTP par client.
+    Le slot ne couvre que les écritures PostgreSQL. Les appels réseau terrain
+    restent hors du gouverneur afin de ne pas bloquer un batch pendant une I/O.
     """
-    _delete_outputs_for_campagne(id_campagne)
-
     counts = {
-        "crc": int(fill_crc_input_from_clients_campagnes(id_campagne) or 0),
+        "crc": 0,
         "cc": 0,
         "da": 0,
         "cc_terrain": 0,
         "da_terrain": 0,
     }
+
+    with heavy_workload("interactive"):
+        _delete_outputs_for_campagne(id_campagne)
+        counts["crc"] = int(
+            fill_crc_input_from_clients_campagnes(id_campagne) or 0
+        )
+
+        if _norm_str(type_campagne) != "avec_action_terrain":
+            counts["da"] = int(
+                fill_action_vers_da_from_clients_campagnes(id_campagne) or 0
+            )
+            counts["cc"] = int(
+                fill_action_vers_cc_from_clients_campagnes(id_campagne) or 0
+            )
 
     if _norm_str(type_campagne) == "avec_action_terrain":
         dispatch = dispatch_pending_visits_for_campaign(id_campagne)
@@ -268,9 +280,6 @@ def _route_outputs_for_campaign_bulk(
         counts["external_visit_sent"] = int(dispatch.get("sent") or 0)
         counts["external_visit_skipped"] = int(dispatch.get("skipped") or 0)
         counts["external_visit_errors"] = int(dispatch.get("errors") or 0)
-    else:
-        counts["da"] = int(fill_action_vers_da_from_clients_campagnes(id_campagne) or 0)
-        counts["cc"] = int(fill_action_vers_cc_from_clients_campagnes(id_campagne) or 0)
 
     return counts
 
@@ -383,8 +392,9 @@ def create_campagne(
     if db_select_all is not None and db_select_filtered is not None:
         raw_query, raw_params = db_select_all
         filtered_query, filtered_params = db_select_filtered
-        nb_init = _count_radical_select(raw_query, raw_params)
-        nb_apres = _count_radical_select(filtered_query, filtered_params)
+        with heavy_workload("interactive"):
+            nb_init = _count_radical_select(raw_query, raw_params)
+            nb_apres = _count_radical_select(filtered_query, filtered_params)
         removed_rupture = max(0, nb_init - nb_apres)
     else:
         # Fallback inchangé pour les cibles fichier plat.
@@ -452,12 +462,13 @@ def create_campagne(
 
     # 6) Affectation massive
     if filtered_query is not None:
-        inserted_clients = bulk_insert_clients_from_radical_select(
-            filtered_query,
-            filtered_params,
-            row_template,
-            only_new=False,
-        )
+        with heavy_workload("interactive"):
+            inserted_clients = bulk_insert_clients_from_radical_select(
+                filtered_query,
+                filtered_params,
+                row_template,
+                only_new=False,
+            )
     else:
         radical_col = _detect_radical_col(df) if df is not None else ""
         rows: List[Dict[str, Any]] = []
@@ -483,7 +494,7 @@ def create_campagne(
         if _is_first_action_mail(canal_init, action_init):
             try:
                 from app.engine.traitement_mail_engine import run_mail_meta_loop
-                mail_summary = run_mail_meta_loop(max_passes=20, limit_rows_per_pass=9999)
+                mail_summary = run_mail_meta_loop(max_passes=20, limit_rows_per_pass=500, id_campagne=id_campagne)
             except Exception as e:
                 mail_summary = {"error": "mail_meta_loop_failed", "details": str(e)}
 
@@ -817,8 +828,7 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
         if _campagne_has_mail_action(id_campagne):
             try:
                 from app.engine.traitement_mail_engine import run_mail_meta_loop
-                # NOTE: la meta-loop traite tous les mails En cours (pas uniquement cette campagne)
-                mail_summary = run_mail_meta_loop(max_passes=20, limit_rows_per_pass=9999)
+                mail_summary = run_mail_meta_loop(max_passes=20, limit_rows_per_pass=500, id_campagne=id_campagne)
             except Exception as e:
                 mail_summary = {"error": "mail_meta_loop_failed", "details": str(e)}
 

@@ -139,17 +139,30 @@ class RuntimeCursor:
         if isinstance(query, str):
             query = _prepare_sql(query)
 
+        # Ne matérialise pas toute la séquence de paramètres en mémoire.
+        # psycopg consomme l'itérable progressivement.
         self._cursor.executemany(
             query,
-            [tuple(params) for params in params_seq],
+            (tuple(params) for params in params_seq),
         )
         return self
 
     def fetchone(self) -> Any:
         return _hybridize(self._cursor.fetchone())
 
+    def fetchmany(self, size: int = 1000) -> Any:
+        rows = self._cursor.fetchmany(max(1, int(size)))
+        for index, row in enumerate(rows):
+            rows[index] = _hybridize(row)
+        return rows
+
     def fetchall(self) -> Any:
-        return [_hybridize(row) for row in self._cursor.fetchall()]
+        # Conserve une seule liste de résultats : l'ancienne compréhension
+        # créait une seconde liste complète au-dessus du fetchall psycopg.
+        rows = self._cursor.fetchall()
+        for index, row in enumerate(rows):
+            rows[index] = _hybridize(row)
+        return rows
 
     @property
     def rowcount(self) -> int:

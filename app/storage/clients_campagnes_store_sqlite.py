@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from itertools import chain
+from typing import Any, Dict, Iterable, List
 
 from psycopg import sql
 
@@ -45,40 +46,45 @@ def ensure_table() -> None:
     ensure_table_columns(TABLE_NAME, ["id", *COLUMNS])
 
 
-def bulk_insert_clients(rows: List[Dict[str, Any]]) -> int:
-    if not rows:
+def bulk_insert_clients(rows: Iterable[Dict[str, Any]]) -> int:
+    """Insère un flux de lignes sans construire une seconde matrice en mémoire."""
+    iterator = iter(rows)
+    try:
+        first = next(iterator)
+    except StopIteration:
         return 0
+
     ensure_table()
 
-    values = []
-    for source in rows:
-        row = dict(source)
-        row.setdefault("arriv_eche", "Non")
-        if row.get("arriv_eche") is None:
-            row["arriv_eche"] = "Non"
-        row.setdefault("date_debut_campagne", None)
-        if row.get("nb_jour_debut_campagne") is None:
-            row["nb_jour_debut_campagne"] = 0
-        if row.get("conversion") is None:
-            row["conversion"] = 0
-        row.setdefault("conversion_date", None)
-        row.setdefault("conversion_id_action", None)
-        row.setdefault("conversion_canal", None)
-        row.setdefault("objective_source_id_action", None)
-        row.setdefault("objective_source_canal", None)
-        values.append([row.get(column) for column in COLUMNS])
+    def _iter_values():
+        for source in chain((first,), iterator):
+            row = dict(source)
+            row.setdefault("arriv_eche", "Non")
+            if row.get("arriv_eche") is None:
+                row["arriv_eche"] = "Non"
+            row.setdefault("date_debut_campagne", None)
+            if row.get("nb_jour_debut_campagne") is None:
+                row["nb_jour_debut_campagne"] = 0
+            if row.get("conversion") is None:
+                row["conversion"] = 0
+            row.setdefault("conversion_date", None)
+            row.setdefault("conversion_id_action", None)
+            row.setdefault("conversion_canal", None)
+            row.setdefault("objective_source_id_action", None)
+            row.setdefault("objective_source_canal", None)
+            yield tuple(row.get(column) for column in COLUMNS)
 
     query = sql.SQL("INSERT INTO {table} ({columns}) VALUES ({placeholders})").format(
         table=sql.Identifier(TABLE_NAME),
-        columns=sql.SQL(", ").join(sql.Identifier(c) for c in COLUMNS),
-        placeholders=sql.SQL(", ").join(sql.Placeholder() for _ in COLUMNS),
+        columns=sql.SQL(", " ).join(sql.Identifier(c) for c in COLUMNS),
+        placeholders=sql.SQL(", " ).join(sql.Placeholder() for _ in COLUMNS),
     )
 
     with connection() as conn:
         with conn.cursor() as cur:
-            cur.executemany(query, values)
+            cur.executemany(query, _iter_values())
             count = cur.rowcount
-    return int(count if count is not None and count >= 0 else len(values))
+    return int(count if count is not None and count >= 0 else 0)
 
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import smtplib
@@ -55,6 +56,17 @@ def _now_iso() -> str:
 
 def _canon(s: str) -> str:
     return (s or "").strip()
+
+
+def _payload_fingerprint(to_email: str, subject: str, body: str, id_action: str) -> str:
+    """Empreinte fixe pour éviter de conserver les contenus Mail en mémoire."""
+    payload = "\x1f".join((
+        (to_email or "").strip().lower(),
+        _canon(subject),
+        _canon(body),
+        (id_action or "").strip(),
+    )).encode("utf-8", errors="replace")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _norm_str(x: Any) -> str:
@@ -183,19 +195,38 @@ def _get_liste_action_for_modele(conn: RuntimeConnection, id_modele: str) -> Lis
 # =========================================================
 # Sous-action 1 : sélectionner les lignes candidates Mail (avec rowid unique)
 # =========================================================
-def _select_mail_candidates(conn: RuntimeConnection, limit_rows: int = 5000) -> List[Dict[str, Any]]:
+def _select_mail_candidates(
+    conn: RuntimeConnection,
+    limit_rows: int = 500,
+    id_campagne: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Sélectionne un lot léger et, si demandé, isolé à une campagne."""
     cur = conn.cursor()
+    campaign_clause = ""
+    params: List[Any] = []
+    campaign_id = _norm_str(id_campagne)
+    if campaign_id:
+        campaign_clause = "AND ID_CAMPAGNE = ?"
+        params.append(campaign_id)
+
+    params.append(max(1, int(limit_rows)))
     cur.execute(
         f"""
-        SELECT rowid AS __rid, *
+        SELECT
+            rowid AS __rid,
+            ID_CAMPAGNE,
+            ID_Action,
+            Radical_compte
         FROM {CLIENTS_CAMPAGNES_TABLE}
         WHERE COALESCE(Etat_campagne,'') = 'En cours'
           AND COALESCE(conversion, 0) <> 1
           AND COALESCE(Canal,'') = 'Mail'
           AND COALESCE(Action,'') IN ('Message', 'Mail')
+          {campaign_clause}
+        ORDER BY rowid
         LIMIT ?
         """,
-        (int(limit_rows),),
+        params,
     )
     return [dict(r) for r in cur.fetchall()]
 
@@ -356,7 +387,7 @@ def _advance_workflow_after_mail_by_rid(
 # =========================================================
 # PASS : traite une passe de noeuds Mail
 # =========================================================
-def run_mail_pass(limit_rows: int = 5000, seen_payloads: Optional[Set[Tuple[str, str, str, str]]] = None) -> Dict[str, int]:
+def run_mail_pass(limit_rows: int = 500, seen_payloads: Optional[Set[str]] = None, id_campagne: Optional[str] = None) -> Dict[str, int]:
     if seen_payloads is None:
         seen_payloads = set()
 
@@ -379,7 +410,7 @@ def run_mail_pass(limit_rows: int = 5000, seen_payloads: Optional[Set[Tuple[str,
     try:
         cur = conn.cursor()
 
-        candidates = _select_mail_candidates(conn, limit_rows=limit_rows)
+        candidates = _select_mail_candidates(conn, limit_rows=limit_rows, id_campagne=id_campagne)
         stats["candidates"] = len(candidates)
         if not candidates:
             return stats
@@ -413,7 +444,7 @@ def run_mail_pass(limit_rows: int = 5000, seen_payloads: Optional[Set[Tuple[str,
                 touched_rids.append(rid)
                 continue
 
-            key = (to_email.strip().lower(), _canon(subject), _canon(body), id_action)
+            key = _payload_fingerprint(to_email, subject, body, id_action)
 
             if key in seen_payloads:
                 _update_after_mail_by_rid(conn, rid, OK_LABEL, 0, now)
@@ -469,7 +500,7 @@ def run_mail_pass(limit_rows: int = 5000, seen_payloads: Optional[Set[Tuple[str,
 # =========================================================
 # META : boucle jusqu'à stabilisation
 # =========================================================
-def run_mail_meta_loop(max_passes: int = 20, limit_rows_per_pass: int = 5000) -> Dict[str, Any]:
+def run_mail_meta_loop(max_passes: int = 20, limit_rows_per_pass: int = 500, id_campagne: Optional[str] = None) -> Dict[str, Any]:
     summary: Dict[str, Any] = {
         "passes": 0,
         "total_candidates": 0,
@@ -482,10 +513,10 @@ def run_mail_meta_loop(max_passes: int = 20, limit_rows_per_pass: int = 5000) ->
         "pass_stats": [],
     }
 
-    seen_payloads: Set[Tuple[str, str, str, str]] = set()
+    seen_payloads: Set[str] = set()
 
     for _ in range(int(max_passes)):
-        stats = run_mail_pass(limit_rows=limit_rows_per_pass, seen_payloads=seen_payloads)
+        stats = run_mail_pass(limit_rows=limit_rows_per_pass, seen_payloads=seen_payloads, id_campagne=id_campagne)
 
         summary["passes"] += 1
         summary["total_candidates"] += int(stats.get("candidates", 0))

@@ -17,6 +17,7 @@ from app.storage.cibles_store_sqlite import (
     import_leads_into_clients,
     get_distinct_values_clients,
     load_clients_df_for_cible,
+    preview_clients_for_cible,
 )
 from app.storage.campagnes_store_sqlite import list_campagnes_active, list_all_campagnes
 from app.domain.cible import Cible
@@ -241,10 +242,7 @@ def preview_cible_for_ui(id_cible: str, limit: int = 200) -> Tuple[pd.DataFrame,
     if not id_cible:
         raise ValueError("id_cible manquant")
 
-    df = load_clients_df_for_cible(id_cible)  # source DB ou fichier plat (géré dans storage)
-    total = int(len(df))
-    lim = int(limit) if int(limit) > 0 else 200
-    return df.head(lim), total
+    return preview_clients_for_cible(id_cible, limit=limit)
 
 
 def preview_file_path_for_ui(path: str, limit: int = 200) -> Tuple[pd.DataFrame, int]:
