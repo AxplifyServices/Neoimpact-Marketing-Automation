@@ -1,8 +1,26 @@
+x-backend-runtime: &backend-runtime
+  image: neoimpact-marketing-backend:latest
+  restart: unless-stopped
+  env_file:
+    - .env
+  environment: &backend-environment
+    DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    POSTGRES_PORT: "5432"
+    WORKER_HEARTBEAT_SECONDS: "5"
+    WORKER_RUNTIME_STALE_SECONDS: "30"
+  depends_on:
+    postgres:
+      condition: service_healthy
+  networks:
+    - marketing-db
+  stop_grace_period: 30s
+
 services:
   postgres:
     image: postgres:17
     container_name: neoimpact-postgres
     restart: unless-stopped
+    cpu_shares: 1024
 
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
@@ -23,35 +41,31 @@ services:
     networks:
       - marketing-db
 
+  # API HTTP uniquement : aucun batch, campaign worker ou appel réseau lourd
+  # ne tourne dans ce conteneur.
   marketing_app:
+    <<: *backend-runtime
     build:
       context: .
       dockerfile: Dockerfile
     container_name: marketing_app
-    restart: unless-stopped
-
-    env_file:
-      - .env
-
+    command: ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    cpu_shares: 1024
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      POSTGRES_PORT: "5432"
-
-    depends_on:
-      postgres:
-        condition: service_healthy
-
+      <<: *backend-environment
+      APP_PROCESS_ROLE: api
+      POSTGRES_POOL_MIN_SIZE: "1"
+      POSTGRES_POOL_MAX_SIZE: "6"
+      POSTGRES_POOL_TIMEOUT_SECONDS: "5"
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/health >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/health/ready >/dev/null || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 12
       start_period: 10s
-
     networks:
       - marketing-db
       - traefik-public
-
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=traefik-public"
@@ -59,6 +73,79 @@ services:
       - "traefik.http.routers.marketing-automation-api.entrypoints=websecure"
       - "traefik.http.routers.marketing-automation-api.tls.certresolver=letsencrypt"
       - "traefik.http.services.marketing-automation-api.loadbalancer.server.port=8000"
+
+  marketing_campaign_worker:
+    <<: *backend-runtime
+    command: ["python", "-m", "app.workers.runner", "campaign"]
+    cpu_shares: 768
+    environment:
+      <<: *backend-environment
+      APP_PROCESS_ROLE: campaign_worker
+      ORCHESTRATION_WORKER_ENABLED: "true"
+      ORCHESTRATION_JOB_HEARTBEAT_SECONDS: "15"
+      ORCHESTRATION_JOB_STALE_SECONDS: "120"
+      POSTGRES_POOL_MIN_SIZE: "0"
+      POSTGRES_POOL_MAX_SIZE: "2"
+      POSTGRES_POOL_TIMEOUT_SECONDS: "10"
+    healthcheck:
+      test: ["CMD-SHELL", "python -m app.workers.healthcheck campaign"]
+      interval: 10s
+      timeout: 8s
+      retries: 6
+      start_period: 15s
+
+  marketing_outbound_worker:
+    <<: *backend-runtime
+    command: ["python", "-m", "app.workers.runner", "outbound"]
+    cpu_shares: 512
+    environment:
+      <<: *backend-environment
+      APP_PROCESS_ROLE: outbound_worker
+      OUTBOUND_WORKER_ENABLED: "true"
+      POSTGRES_POOL_MIN_SIZE: "0"
+      POSTGRES_POOL_MAX_SIZE: "4"
+      POSTGRES_POOL_TIMEOUT_SECONDS: "10"
+    healthcheck:
+      test: ["CMD-SHELL", "python -m app.workers.healthcheck outbound"]
+      interval: 10s
+      timeout: 8s
+      retries: 6
+      start_period: 15s
+
+  marketing_inbound_worker:
+    <<: *backend-runtime
+    command: ["python", "-m", "app.workers.runner", "inbound"]
+    cpu_shares: 768
+    environment:
+      <<: *backend-environment
+      APP_PROCESS_ROLE: inbound_worker
+      INBOUND_WORKER_ENABLED: "true"
+      POSTGRES_POOL_MIN_SIZE: "0"
+      POSTGRES_POOL_MAX_SIZE: "3"
+      POSTGRES_POOL_TIMEOUT_SECONDS: "10"
+    healthcheck:
+      test: ["CMD-SHELL", "python -m app.workers.healthcheck inbound"]
+      interval: 10s
+      timeout: 8s
+      retries: 6
+      start_period: 15s
+
+  marketing_batch_worker:
+    <<: *backend-runtime
+    command: ["python", "-m", "app.workers.runner", "batch"]
+    cpu_shares: 256
+    environment:
+      <<: *backend-environment
+      APP_PROCESS_ROLE: batch_worker
+      POSTGRES_POOL_MIN_SIZE: "0"
+      POSTGRES_POOL_MAX_SIZE: "3"
+      POSTGRES_POOL_TIMEOUT_SECONDS: "15"
+    healthcheck:
+      test: ["CMD-SHELL", "python -m app.workers.healthcheck batch"]
+      interval: 10s
+      timeout: 8s
+      retries: 6
+      start_period: 15s
 
   marketing_frontend:
     build:
@@ -69,6 +156,7 @@ services:
         VITE_AUTH_URL: https://marketing-automation-api.axplitest.com/api
     container_name: marketing_frontend
     restart: unless-stopped
+    cpu_shares: 512
 
     depends_on:
       marketing_app:

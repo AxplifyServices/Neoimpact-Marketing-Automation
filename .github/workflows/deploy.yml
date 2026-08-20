@@ -81,7 +81,7 @@ jobs:
             backend_ok=0
             for i in $(seq 1 60); do
               if docker compose -f "$COMPOSE_FILE" exec -T marketing_app \
-                curl -fsS http://127.0.0.1:8000/api/health \
+                curl -fsS http://127.0.0.1:8000/api/health/ready \
                 >/dev/null 2>&1; then
                 backend_ok=1
                 break
@@ -100,7 +100,45 @@ jobs:
 
             echo "Backend is healthy."
 
-            # Le frontend n'est remplacé qu'une fois le nouveau backend prêt.
+            # Les moteurs de fond utilisent exactement la même image Python que
+            # l'API, mais vivent dans des conteneurs séparés. L'ancien backend
+            # embarqué a déjà été remplacé ci-dessus, donc il n'y a pas de fenêtre
+            # avec deux jeux de workers actifs dans le même conteneur API.
+            echo "Starting dedicated workers..."
+            docker compose -f "$COMPOSE_FILE" up -d --no-deps --force-recreate \
+              marketing_campaign_worker \
+              marketing_outbound_worker \
+              marketing_inbound_worker \
+              marketing_batch_worker
+
+            wait_worker() {
+              service="$1"
+              role="$2"
+              worker_ok=0
+              for i in $(seq 1 60); do
+                if docker compose -f "$COMPOSE_FILE" exec -T "$service" \
+                  python -m app.workers.healthcheck "$role" \
+                  >/dev/null 2>&1; then
+                  worker_ok=1
+                  break
+                fi
+                sleep 2
+              done
+              if [ "$worker_ok" -ne 1 ]; then
+                echo "Worker did not become healthy: $service ($role)"
+                docker compose -f "$COMPOSE_FILE" ps "$service" || true
+                docker compose -f "$COMPOSE_FILE" logs --tail 250 "$service" || true
+                exit 1
+              fi
+              echo "Worker is healthy: $service ($role)"
+            }
+
+            wait_worker marketing_campaign_worker campaign
+            wait_worker marketing_outbound_worker outbound
+            wait_worker marketing_inbound_worker inbound
+            wait_worker marketing_batch_worker batch
+
+            # Le frontend n'est remplacé qu'une fois l'API ET les moteurs prêts.
             echo "Starting frontend..."
             docker compose -f "$COMPOSE_FILE" up -d \
               --no-deps --force-recreate marketing_frontend
@@ -136,6 +174,13 @@ jobs:
 
             echo "Backend logs:"
             docker logs marketing_app --tail 50
+
+            echo "Worker logs:"
+            docker compose -f "$COMPOSE_FILE" logs --tail 30 \
+              marketing_campaign_worker \
+              marketing_outbound_worker \
+              marketing_inbound_worker \
+              marketing_batch_worker
 
             echo "Frontend logs:"
             docker logs marketing_frontend --tail 50
