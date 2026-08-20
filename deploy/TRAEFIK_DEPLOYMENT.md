@@ -30,11 +30,19 @@ docker compose up -d --build
 
 Production:
 
-GitHub Actions uses:
+GitHub Actions deploys in this order to keep the application available and to guarantee schema compatibility:
 
-```bash
-docker compose -f docker-compose.prod.yml up -d --build --force-recreate --remove-orphans
+```text
+build images
+→ ensure PostgreSQL is ready
+→ apply pending SQL migrations
+→ recreate backend
+→ wait for backend health
+→ recreate frontend
+→ cleanup orphans
 ```
+
+Migrations are applied by `deploy/apply_migrations.sh`. Applied files are recorded in `schema_migrations`; never edit an already-applied migration, create a new numbered SQL migration instead.
 
 DNS prerequisite:
 `marketing-automation.axplitest.com` must resolve to the VPS public IP.

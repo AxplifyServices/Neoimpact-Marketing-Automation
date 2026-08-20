@@ -17,12 +17,14 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
-            set -e
+            set -Eeuo pipefail
 
             cd /opt/apps/marketing-automation/repo
 
             git fetch origin
             git reset --hard origin/main
+
+            COMPOSE_FILE=docker-compose.prod.yml
 
             # Transition depuis un éventuel ancien projet Compose.
             for container in marketing_app marketing_frontend neoimpact-postgres; do
@@ -35,33 +37,52 @@ jobs:
               fi
             done
 
-            # Même principe que le projet Hire :
-            # Traefik route directement les conteneurs via traefik-public.
-            docker compose -f docker-compose.prod.yml up -d --build --force-recreate --remove-orphans
+            # Vérifie la configuration avant de toucher aux services en production.
+            docker compose -f "$COMPOSE_FILE" config -q
+
+            # Construit les nouvelles images sans arrêter les conteneurs applicatifs
+            # actuellement en service.
+            docker compose -f "$COMPOSE_FILE" build marketing_app marketing_frontend
+
+            # PostgreSQL doit être disponible AVANT les migrations et AVANT le
+            # démarrage du nouveau backend. On ne le force plus à être recréé à
+            # chaque push : le volume et le cache restent stables.
+            docker compose -f "$COMPOSE_FILE" up -d postgres
 
             echo "Waiting for PostgreSQL..."
-            until docker compose -f docker-compose.prod.yml exec -T postgres sh -lc               'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'               >/dev/null 2>&1; do
+            postgres_ok=0
+            for i in $(seq 1 60); do
+              if docker compose -f "$COMPOSE_FILE" exec -T postgres sh -lc \
+                'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+                >/dev/null 2>&1; then
+                postgres_ok=1
+                break
+              fi
               sleep 2
             done
 
-            # 001_schema.sql est exécuté automatiquement seulement
-            # lors de l'initialisation d'un volume PostgreSQL neuf.
-            for migration in database/init/*.sql; do
-              [ -f "$migration" ] || continue
+            if [ "$postgres_ok" -ne 1 ]; then
+              echo "PostgreSQL did not become ready."
+              docker compose -f "$COMPOSE_FILE" ps postgres || true
+              docker logs neoimpact-postgres --tail 200 || true
+              exit 1
+            fi
 
-              if [ "$(basename "$migration")" = "001_schema.sql" ]; then
-                continue
-              fi
+            # IMPORTANT : le schéma est mis à niveau avant le nouveau backend.
+            # Ainsi /api/health et les workers peuvent utiliser immédiatement les
+            # tables/colonnes du commit en cours (ex. orchestration_jobs de 009).
+            COMPOSE_FILE="$COMPOSE_FILE" bash deploy/apply_migrations.sh
 
-              echo "Applying migration: $migration"
-
-              docker compose -f docker-compose.prod.yml exec -T postgres sh -lc                 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'                 < "$migration"
-            done
+            echo "Starting backend..."
+            docker compose -f "$COMPOSE_FILE" up -d \
+              --no-deps --force-recreate marketing_app
 
             echo "Waiting for backend health..."
             backend_ok=0
-            for i in $(seq 1 30); do
-              if docker compose -f docker-compose.prod.yml exec -T marketing_app                 curl -fsS http://127.0.0.1:8000/api/health >/dev/null 2>&1; then
+            for i in $(seq 1 60); do
+              if docker compose -f "$COMPOSE_FILE" exec -T marketing_app \
+                curl -fsS http://127.0.0.1:8000/api/health \
+                >/dev/null 2>&1; then
                 backend_ok=1
                 break
               fi
@@ -71,18 +92,25 @@ jobs:
             if [ "$backend_ok" -ne 1 ]; then
               echo "Backend did not become healthy."
               echo "Backend container status:"
-              docker compose -f docker-compose.prod.yml ps marketing_app || true
+              docker compose -f "$COMPOSE_FILE" ps marketing_app || true
               echo "Backend logs:"
-              docker logs marketing_app --tail 200 || true
+              docker logs marketing_app --tail 250 || true
               exit 1
             fi
 
             echo "Backend is healthy."
 
+            # Le frontend n'est remplacé qu'une fois le nouveau backend prêt.
+            echo "Starting frontend..."
+            docker compose -f "$COMPOSE_FILE" up -d \
+              --no-deps --force-recreate marketing_frontend
+
             echo "Waiting for frontend health..."
             frontend_ok=0
-            for i in $(seq 1 30); do
-              if docker compose -f docker-compose.prod.yml exec -T marketing_frontend                 wget -q -O - http://127.0.0.1/health >/dev/null 2>&1; then
+            for i in $(seq 1 60); do
+              if docker compose -f "$COMPOSE_FILE" exec -T marketing_frontend \
+                wget -q -O - http://127.0.0.1/health \
+                >/dev/null 2>&1; then
                 frontend_ok=1
                 break
               fi
@@ -92,16 +120,19 @@ jobs:
             if [ "$frontend_ok" -ne 1 ]; then
               echo "Frontend did not become healthy."
               echo "Frontend container status:"
-              docker compose -f docker-compose.prod.yml ps marketing_frontend || true
+              docker compose -f "$COMPOSE_FILE" ps marketing_frontend || true
               echo "Frontend logs:"
-              docker logs marketing_frontend --tail 200 || true
+              docker logs marketing_frontend --tail 250 || true
               exit 1
             fi
 
             echo "Frontend is healthy."
 
+            # Nettoyage uniquement après un déploiement sain.
+            docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
+
             echo "Deployment status:"
-            docker compose -f docker-compose.prod.yml ps
+            docker compose -f "$COMPOSE_FILE" ps
 
             echo "Backend logs:"
             docker logs marketing_app --tail 50
