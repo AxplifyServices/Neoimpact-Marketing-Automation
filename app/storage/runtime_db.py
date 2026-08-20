@@ -6,7 +6,7 @@ from typing import Any, Iterable, Optional
 from psycopg import Connection
 from psycopg.rows import dict_row
 
-from app.storage.postgres_db import get_connection
+from app.storage.postgres_db import acquire_pooled_connection, release_pooled_connection
 
 
 # Colonnes historiques créées avec une casse explicite dans PostgreSQL.
@@ -196,7 +196,8 @@ class RuntimeConnection:
     """
 
     def __init__(self) -> None:
-        self._conn: Connection = get_connection(dict_rows=True)
+        self._conn: Connection = acquire_pooled_connection(dict_rows=True)
+        self._released = False
 
     def cursor(self, *args: Any, **kwargs: Any) -> RuntimeCursor:
         return RuntimeCursor(
@@ -210,7 +211,17 @@ class RuntimeConnection:
         self._conn.rollback()
 
     def close(self) -> None:
-        self._conn.close()
+        if self._released:
+            return
+        try:
+            # Un simple SELECT ouvre aussi une transaction psycopg. On la
+            # nettoie avant restitution afin qu'aucun état ne fuite au prochain
+            # emprunteur du pool.
+            self._conn.rollback()
+        except Exception:
+            pass
+        release_pooled_connection(self._conn, dict_rows=True)
+        self._released = True
 
     def __enter__(self) -> "RuntimeConnection":
         return self

@@ -539,3 +539,134 @@ def run_mail_meta_loop(max_passes: int = 20, limit_rows_per_pass: int = 500, id_
         summary["stopped_reason"] = "max_passes_reached"
 
     return summary
+
+# =========================================================
+# API Outbound : un seul bloc Mail, sans boucle globale
+# =========================================================
+def prepare_mail_dispatch(
+    id_campagne: str,
+    radical_compte: str,
+    block_id: str,
+    occurrence: int,
+) -> Dict[str, Any]:
+    """Résout le payload Mail au dernier moment depuis le datamart courant."""
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"""
+            SELECT rowid AS __rid, ID_CAMPAGNE, Radical_compte, ID_Action,
+                   Canal, Action, Etat_campagne, conversion,
+                   COALESCE(action_execution_seq,0) AS action_execution_seq
+            FROM {CLIENTS_CAMPAGNES_TABLE}
+            WHERE ID_CAMPAGNE=? AND Radical_compte=?
+            LIMIT 1
+            """,
+            (id_campagne, radical_compte),
+        )
+        row = cur.fetchone()
+        if not row:
+            return {"ok": False, "obsolete": True, "reason": "client_campagne_not_found"}
+        cc = dict(row)
+        if _norm_str(cc.get("Etat_campagne")) != "En cours" or int(cc.get("conversion") or 0) == 1:
+            return {"ok": False, "obsolete": True, "reason": "campaign_or_client_inactive"}
+        if _norm_str(cc.get("ID_Action")) != _norm_str(block_id) or int(cc.get("action_execution_seq") or 0) != int(occurrence):
+            return {"ok": False, "obsolete": True, "reason": "workflow_moved"}
+        if _norm_str(cc.get("Canal")) != "Mail" or _norm_str(cc.get("Action")) not in {"Message", "Mail"}:
+            return {"ok": False, "obsolete": True, "reason": "not_mail_action"}
+
+        id_modele = _get_id_modele_for_campagne(conn, id_campagne) or ""
+        actions = _get_liste_action_for_modele(conn, id_modele) if id_modele else []
+        to_email, subject, body = _build_mail_for_row(conn, cc, actions)
+        sender, password = _get_credentials()
+        if not to_email:
+            return {"ok": False, "permanent": True, "reason": "missing_recipient"}
+        if not sender or not password:
+            return {"ok": False, "permanent": False, "reason": "mail_credentials_missing"}
+        return {
+            "ok": True,
+            "rid": int(cc["__rid"]),
+            "sender": sender,
+            "password": password,
+            "to_email": to_email,
+            "subject": subject,
+            "body": body,
+        }
+    finally:
+        conn.close()
+
+
+def send_mail_dispatch(payload: Dict[str, Any]) -> Tuple[bool, str]:
+    return _send_email(
+        _norm_str(payload.get("sender")),
+        _norm_str(payload.get("password")),
+        _norm_str(payload.get("to_email")),
+        str(payload.get("subject") or ""),
+        str(payload.get("body") or ""),
+    )
+
+
+def finalize_mail_dispatch(
+    id_campagne: str,
+    radical_compte: str,
+    block_id: str,
+    occurrence: int,
+    *,
+    delivered: bool,
+) -> Dict[str, Any]:
+    """Applique une seule fois le résultat Mail puis avance le workflow.
+
+    La vérification bloc+occurrence rend la finalisation idempotente : un retry de
+    finalisation après crash ne recompte pas un mail déjà appliqué.
+    """
+    mail_results = resultats_for_canal("Mail")
+    ok_label = mail_results[0] if len(mail_results) >= 1 else "Transmis"
+    ko_label = mail_results[1] if len(mail_results) >= 2 else "Non transmis"
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"""
+            SELECT rowid AS __rid, *
+            FROM {CLIENTS_CAMPAGNES_TABLE}
+            WHERE ID_CAMPAGNE=? AND Radical_compte=?
+            FOR UPDATE
+            """,
+            (id_campagne, radical_compte),
+        )
+        row = cur.fetchone()
+        if not row:
+            conn.rollback()
+            return {"ok": False, "obsolete": True, "reason": "client_campagne_not_found"}
+        cc = dict(row)
+        current_seq = int(cc.get("action_execution_seq") or 0)
+        if _norm_str(cc.get("ID_Action")) != _norm_str(block_id) or current_seq != int(occurrence):
+            conn.rollback()
+            return {"ok": True, "already_applied": True}
+
+        rid = int(cc["__rid"])
+        _update_after_mail_by_rid(
+            conn,
+            rid,
+            ok_label if delivered else ko_label,
+            1 if delivered else 0,
+            _now_iso(),
+        )
+        cur.execute(
+            f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET action_execution_seq=COALESCE(action_execution_seq,0)+1 WHERE rowid=?",
+            (rid,),
+        )
+
+        id_modele = _get_id_modele_for_campagne(conn, id_campagne) or ""
+        actions = _get_liste_action_for_modele(conn, id_modele) if id_modele else []
+        cur.execute(f"SELECT rowid AS __rid,* FROM {CLIENTS_CAMPAGNES_TABLE} WHERE rowid=?", (rid,))
+        after = cur.fetchone()
+        if after:
+            _advance_workflow_after_mail_by_rid(conn, rid, dict(after), actions)
+        conn.commit()
+        return {"ok": True, "delivered": bool(delivered)}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()

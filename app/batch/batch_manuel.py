@@ -34,8 +34,6 @@ from app.storage.action_vers_cc_store_sqlite import (
     fill_action_vers_cc_from_clients_campagnes,
 )
 
-from app.engine.traitement_mail_engine import run_mail_meta_loop
-
 from app.domain.workflow_nav import (
     find_bloc_by_id,
     pick_next_child,
@@ -44,10 +42,7 @@ from app.domain.workflow_nav import (
     objective_branch,
 )
 
-from app.domain.terrain_visit_webhook import (
-    cancel_visits_for_campaign,
-    dispatch_pending_visits_for_campaign,
-)
+from app.domain.terrain_visit_webhook import cancel_visits_for_campaign
 
 CLIENTS_CAMPAGNES_TABLE = "clients_campagnes"
 CAMPAGNES_TABLE = "campagnes"
@@ -851,12 +846,8 @@ def _rebuild_outputs_for_all_en_cours(
                     fill_action_vers_cc_from_clients_campagnes(id_campagne) or 0
                 )
 
-        if type_campagne == "avec_action_terrain":
-            dispatch = dispatch_pending_visits_for_campaign(id_campagne)
-            n_external_queued += int(dispatch.get("queued") or 0)
-            n_external_pending += int(dispatch.get("pending") or 0)
-            n_external_sent += int(dispatch.get("sent") or 0)
-            n_external_errors += int(dispatch.get("errors") or 0)
+        # Les sorties Terrain externes sont publiées progressivement par
+        # l'Outbound Producer global. Le batch ne préremplit pas une file géante.
 
     return {
         "crc_input": n_crc,
@@ -1044,13 +1035,11 @@ def run_batch_manuel() -> Dict[str, Any]:
 
         conn.commit()
 
-        # 7) Traitement mail.
-        out["mails_processed"] = run_mail_meta_loop(
-            max_passes=10,
-            limit_rows_per_pass=500,
-        )
+        # 7) Mail/Terrain sont pris en charge par l'Outbound Engine. Le batch
+        # ne fait plus d'I/O réseau et libère rapidement ses ressources.
+        out["mails_processed"] = {"delegated_to_outbound": True}
 
-        # 8) Reconstruction des outputs.
+        # 8) Reconstruction des outputs internes.
         out["outputs_rebuilt"] = _rebuild_outputs_for_all_en_cours(
             conn,
             campagnes,

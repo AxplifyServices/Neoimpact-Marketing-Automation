@@ -20,8 +20,10 @@ from app.api.routers.modeles import router as modeles_router
 from app.api.routers.queues import router as queues_router
 from app.api.routers.terrain_queues import router as terrain_queues_router
 from app.batch.scheduler import start_batch_scheduler, stop_batch_scheduler
-from app.domain.terrain_visit_webhook import start_terrain_dispatch_worker, stop_terrain_dispatch_worker
 from app.orchestration.campaign_worker import start_orchestration_worker, stop_orchestration_worker
+from app.outbound.worker import start_outbound_workers, stop_outbound_workers
+from app.inbound.worker import start_inbound_workers, stop_inbound_workers
+from app.storage.postgres_db import close_pools
 
 API_PREFIX = "/api"
 
@@ -42,15 +44,18 @@ async def lifespan(app: FastAPI):
     """Cycle de vie API : démarre et arrête le scheduler quotidien."""
     _ = app
     start_batch_scheduler()
-    start_terrain_dispatch_worker()
     start_orchestration_worker()
+    start_outbound_workers()
+    start_inbound_workers()
 
     try:
         yield
     finally:
+        stop_inbound_workers()
+        stop_outbound_workers()
         stop_orchestration_worker()
-        stop_terrain_dispatch_worker()
         stop_batch_scheduler()
+        close_pools()
 
 
 app = FastAPI(

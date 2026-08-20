@@ -392,199 +392,146 @@ def _send_mail_for_one_client_and_advance(id_campagne: str, radical_compte: str,
 # Public API : résultat depuis une queue
 # =========================
 def apply_result_from_queue(row: Dict[str, Any], resultat_label: str, queue_table: str) -> Dict[str, Any]:
-    """
-    Bouton résultat (CRC/DA/CC):
-    - MAJ clients_campagnes:
-        Resultat_last_action = bouton
-        Last_action = Action actuelle (avant changement)
-        Date_last_action = now
-        incr compteur selon Canal
-    - un objectif atteint positionne conversion=1 lors de son évaluation
-    - navigation graphe (fils):
-        si condition ok -> ID_Action/Canal/Action = noeud fils
-        sinon -> Action='En attente'
-    - supprime la ligne de la queue
-    - route immédiat (queues ou mail)
+    """Applique un résultat de canal et avance le workflow.
+
+    `outbound_dispatches` est la source générique des callbacks externes depuis
+    la migration 010. `external_visit_dispatches` reste accepté uniquement pour
+    compatibilité avec les visites historiques déjà émises.
     """
     id_campagne = _norm_str(row.get("ID_CAMPAGNE"))
     radical = _norm_str(row.get("Radical_compte"))
-
-    if not id_campagne or not radical:
+    block_id = _norm_str(row.get("ID_Action"))
+    if not id_campagne or not radical or not block_id:
         return {"ok": False, "error": "missing_keys"}
 
     now = _now_iso()
+    generic_external = queue_table == "outbound_dispatches"
+    legacy_external = queue_table == "external_visit_dispatches"
+    external = generic_external or legacy_external
 
     conn = _connect()
     try:
         cur = conn.cursor()
 
-        block_id = _norm_str(row.get("ID_Action"))
-
-        # Un callback terrain n'est recevable que si un dispatch correspondant
-        # a réellement été envoyé et attend encore son callback.
-        if queue_table == "external_visit_dispatches":
+        dispatch_id = None
+        if generic_external:
             cur.execute(
                 """
-                SELECT id, status
-                FROM external_visit_dispatches
-                WHERE id_campagne = ?
-                  AND radical_compte = ?
-                  AND block_id = ?
+                SELECT id,status
+                FROM outbound_dispatches
+                WHERE id_campagne=? AND radical_compte=? AND block_id=?
+                  AND channel='TERRAIN'
+                ORDER BY occurrence DESC,id DESC
+                LIMIT 1
                 FOR UPDATE
                 """,
                 (id_campagne, radical, block_id),
             )
             dispatch_row = cur.fetchone()
-
             if not dispatch_row:
-                return {
-                    "ok": False,
-                    "error": "dispatch_not_found",
-                    "id_campagne": id_campagne,
-                    "radical_compte": radical,
-                    "block_id": block_id,
-                }
-
+                conn.rollback()
+                return {"ok": False, "error": "dispatch_not_found"}
+            dispatch_id = int(dispatch_row["id"])
+            dispatch_status = _norm_str(dispatch_row.get("status"))
+            if dispatch_status == "completed":
+                conn.rollback()
+                return {"ok": False, "error": "dispatch_already_completed"}
+            if dispatch_status not in {"waiting_callback", "sent"}:
+                conn.rollback()
+                return {"ok": False, "error": "dispatch_not_pending", "status": dispatch_status}
+        elif legacy_external:
+            cur.execute(
+                """
+                SELECT id,status FROM external_visit_dispatches
+                WHERE id_campagne=? AND radical_compte=? AND block_id=?
+                FOR UPDATE
+                """,
+                (id_campagne, radical, block_id),
+            )
+            dispatch_row = cur.fetchone()
+            if not dispatch_row:
+                conn.rollback()
+                return {"ok": False, "error": "dispatch_not_found"}
             dispatch_status = _norm_str(dispatch_row.get("status"))
             if dispatch_status != "sent":
-                return {
-                    "ok": False,
-                    "error": "dispatch_not_pending",
-                    "status": dispatch_status,
-                    "id_campagne": id_campagne,
-                    "radical_compte": radical,
-                    "block_id": block_id,
-                }
+                conn.rollback()
+                return {"ok": False, "error": "dispatch_not_pending", "status": dispatch_status}
 
         cur.execute(
             f"""
-            SELECT rowid as __rid, *
+            SELECT rowid AS __rid,*
             FROM {CLIENTS_CAMPAGNES_TABLE}
-            WHERE ID_CAMPAGNE = ?
-              AND Radical_compte = ?
-              AND ID_Action = ?
+            WHERE ID_CAMPAGNE=? AND Radical_compte=? AND ID_Action=?
+            FOR UPDATE
             """,
             (id_campagne, radical, block_id),
         )
-
         r = cur.fetchone()
         if not r:
-            if queue_table == "external_visit_dispatches":
+            if generic_external and dispatch_id is not None:
                 cur.execute(
-                    """
-                    UPDATE external_visit_dispatches
-                    SET status = 'callback_not_matched'
-                    WHERE id_campagne = ?
-                      AND radical_compte = ?
-                      AND block_id = ?
-                    """,
+                    "UPDATE outbound_dispatches SET status='obsolete',last_error='callback_not_matched',completed_at=NOW(),updated_at=NOW() WHERE id=?",
+                    (dispatch_id,),
+                )
+            elif legacy_external:
+                cur.execute(
+                    "UPDATE external_visit_dispatches SET status='callback_not_matched' WHERE id_campagne=? AND radical_compte=? AND block_id=?",
                     (id_campagne, radical, block_id),
                 )
-            else:
-                cur.execute(
-                    f"DELETE FROM {queue_table} WHERE ID_CAMPAGNE=? AND Radical_compte=?",
-                    (id_campagne, radical),
-                )
-
+            elif not external:
+                cur.execute(f"DELETE FROM {queue_table} WHERE ID_CAMPAGNE=? AND Radical_compte=?", (id_campagne, radical))
             conn.commit()
-            return {
-                "ok": False,
-                "error": "client_campagne_not_found_or_not_on_this_block",
-                "id_campagne": id_campagne,
-                "radical_compte": radical,
-                "block_id": block_id,
-            }
+            return {"ok": False, "error": "client_campagne_not_found_or_not_on_this_block"}
 
         cc = dict(r)
         rid = int(cc["__rid"])
         canal = _norm_str(cc.get("Canal"))
         action_actuelle = _norm_str(cc.get("Action"))
-
-        try:
-            already_converted = int(cc.get("conversion") or 0) == 1
-        except Exception:
-            already_converted = False
-
-        if already_converted:
-            if queue_table == "external_visit_dispatches":
+        if int(cc.get("conversion") or 0) == 1:
+            if generic_external and dispatch_id is not None:
                 cur.execute(
-                    """
-                    UPDATE external_visit_dispatches
-                    SET status = 'callback_ignored_converted'
-                    WHERE id_campagne = ?
-                      AND radical_compte = ?
-                      AND block_id = ?
-                      AND status = 'sent'
-                    """,
+                    "UPDATE outbound_dispatches SET status='completed',completed_at=NOW(),last_error='callback_ignored_converted',updated_at=NOW() WHERE id=?",
+                    (dispatch_id,),
+                )
+            elif legacy_external:
+                cur.execute(
+                    "UPDATE external_visit_dispatches SET status='callback_ignored_converted' WHERE id_campagne=? AND radical_compte=? AND block_id=?",
                     (id_campagne, radical, block_id),
                 )
-            else:
-                cur.execute(
-                    f"DELETE FROM {queue_table} WHERE ID_CAMPAGNE=? AND Radical_compte=?",
-                    (id_campagne, radical),
-                )
             conn.commit()
-            return {
-                "ok": False,
-                "error": "client_already_converted",
-                "id_campagne": id_campagne,
-                "radical_compte": radical,
-            }
+            return {"ok": False, "error": "client_already_converted"}
 
-        # Compteur spécifique au canal.
-        # Pour DA/CC, NB_approche_commercial reste également incrémenté
-        # comme compteur global de compatibilité/historique.
         compteur_col = compteur_for_canal(canal) or ""
-        incr_parts: List[str] = []
-
+        incr_parts: List[str] = ["action_execution_seq = COALESCE(action_execution_seq,0) + 1"]
         if compteur_col:
-            incr_parts.append(
-                f"{compteur_col} = COALESCE({compteur_col}, 0) + 1"
-            )
-
+            incr_parts.append(f"{compteur_col} = COALESCE({compteur_col},0) + 1")
         if canal in ("Directeur d'agence", "Conseiller client"):
-            incr_parts.append(
-                "NB_approche_commercial = COALESCE(NB_approche_commercial, 0) + 1"
-            )
-
-        incr_sql = (", " + ", ".join(incr_parts)) if incr_parts else ""
-
-        sql = f"""
+            incr_parts.append("NB_approche_commercial = COALESCE(NB_approche_commercial,0) + 1")
+        incr_sql = ", " + ", ".join(incr_parts)
+        cur.execute(
+            f"""
             UPDATE {CLIENTS_CAMPAGNES_TABLE}
-            SET
-                Resultat_last_action = ?,
-                Last_action = ?,
-                Date_last_action = ?,
-                NB_jour_last_action = 0,
-                arriv_eche = 'Non'
-                {incr_sql}
-            WHERE rowid = ?
-        """
-        params: List[Any] = [resultat_label, action_actuelle, now, rid]
-        cur.execute(sql, params)
-        conn.commit()
+            SET Resultat_last_action=?, Last_action=?, Date_last_action=?,
+                NB_jour_last_action=0, arriv_eche='Non' {incr_sql}
+            WHERE rowid=?
+            """,
+            (resultat_label, action_actuelle, now, rid),
+        )
 
-        # charger modèle
         id_modele = _get_id_modele_for_campagne(conn, id_campagne) or ""
         liste_action = _get_liste_action_for_modele(conn, id_modele) if id_modele else []
-
-        # re-read
-        cur.execute(f"SELECT rowid as __rid, * FROM {CLIENTS_CAMPAGNES_TABLE} WHERE rowid=?", (rid,))
+        cur.execute(f"SELECT rowid AS __rid,* FROM {CLIENTS_CAMPAGNES_TABLE} WHERE rowid=?", (rid,))
         r2 = cur.fetchone()
         if not r2:
+            conn.rollback()
             return {"ok": False, "error": "row_missing_after_update"}
         row_after = _enrich_row_with_client_fields(conn, dict(r2))
-
-        # navigation fils
         current = find_bloc_by_id(liste_action, _norm_str(row_after.get("ID_Action")))
         nxt = pick_next_child(liste_action, current, row_after) if current else None
-
         if not nxt:
             cur.execute(f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET Action=? WHERE rowid=?", ("En attente", rid))
-            conn.commit()
         else:
             new_id = _norm_str(nxt.get("ID"))
-
             if is_objective_bloc(nxt):
                 record_objective_entry(
                     conn,
@@ -592,47 +539,38 @@ def apply_result_from_queue(row: Dict[str, Any], resultat_label: str, queue_tabl
                     source_id_action=_norm_str(row_after.get("ID_Action")),
                     source_canal=_norm_str(row_after.get("Canal")),
                 )
-                new_canal = "Objectif"
-                new_action = "Objectif"
+                new_canal, new_action = "Objectif", "Objectif"
             else:
                 new_canal = _norm_str(nxt.get("Canal"))
                 new_action = _norm_str(nxt.get("Action"))
-
             if not new_id or not new_action:
                 cur.execute(f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET Action=? WHERE rowid=?", ("En attente", rid))
-                conn.commit()
             else:
                 cur.execute(
-                    f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET ID_Action=?, Canal=?, Action=? WHERE rowid=?",
+                    f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET ID_Action=?,Canal=?,Action=? WHERE rowid=?",
                     (new_id, new_canal, new_action, rid),
                 )
-                conn.commit()
 
-
-        # suppression / marquage source
-        if queue_table == "external_visit_dispatches":
+        if generic_external and dispatch_id is not None:
             cur.execute(
-                """
-                UPDATE external_visit_dispatches
-                SET status = 'callback_received'
-                WHERE id_campagne = ?
-                  AND radical_compte = ?
-                  AND block_id = ?
-                """,
+                "UPDATE outbound_dispatches SET status='completed',completed_at=NOW(),last_error=NULL,updated_at=NOW() WHERE id=? AND status IN ('waiting_callback','sent')",
+                (dispatch_id,),
+            )
+        elif legacy_external:
+            cur.execute(
+                "UPDATE external_visit_dispatches SET status='callback_received' WHERE id_campagne=? AND radical_compte=? AND block_id=?",
                 (id_campagne, radical, block_id),
             )
-        else:
-            cur.execute(
-                f"DELETE FROM {queue_table} WHERE ID_CAMPAGNE=? AND Radical_compte=?",
-                (id_campagne, radical),
-            )
+        elif not external:
+            cur.execute(f"DELETE FROM {queue_table} WHERE ID_CAMPAGNE=? AND Radical_compte=?", (id_campagne, radical))
 
         conn.commit()
-
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
-    # routage immédiat
     return route_after_update(id_campagne, radical)
 
 def _resolve_queue_for_action(action: str, type_campagne: str) -> str:
@@ -693,12 +631,9 @@ def route_after_update(id_campagne: str, radical_compte: str) -> Dict[str, Any]:
         conn.close()
 
     if type_campagne == "avec_action_terrain" and action in ("Directeur d'agence", "Conseiller client"):
-        dispatch = send_visit_for_client(id_campagne, radical_compte)
-        return {
-            "ok": bool(dispatch.get("ok")),
-            "routed_to": "external_visit_webhook",
-            "dispatch": dispatch,
-        }
+        from app.outbound.store import enqueue_single
+        dispatch = enqueue_single(id_campagne, radical_compte, channel="TERRAIN")
+        return {"ok": bool(dispatch.get("ok")), "routed_to": "outbound:TERRAIN", "dispatch": dispatch}
 
     queue_name = _resolve_queue_for_action(action, type_campagne)
     if queue_name:
@@ -706,9 +641,9 @@ def route_after_update(id_campagne: str, radical_compte: str) -> Dict[str, Any]:
         return {"ok": True, "routed_to": queue_name}
 
     if _is_mail_node(canal, action):
-        mail_summary = _send_mail_for_one_client_and_advance(id_campagne, radical_compte, max_steps=10)
-        post = route_after_update(id_campagne, radical_compte)
-        return {"ok": True, "routed_to": "mail", "mail": mail_summary, "post_mail": post}
+        from app.outbound.store import enqueue_single
+        dispatch = enqueue_single(id_campagne, radical_compte, channel="MAIL")
+        return {"ok": bool(dispatch.get("ok")), "routed_to": "outbound:MAIL", "dispatch": dispatch}
 
     return {"ok": True, "routed_to": "none", "action": action, "canal": canal}
 

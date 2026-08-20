@@ -2,14 +2,81 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
+import threading
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import psycopg
 from dotenv import load_dotenv
 from psycopg import Connection, sql
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 
 load_dotenv()
+
+_POOL_LOCK = threading.Lock()
+_POOLS: Dict[bool, ConnectionPool] = {}
+
+
+def _pool(dict_rows: bool = False) -> ConnectionPool:
+    """Pool borné partagé par type de row_factory.
+
+    Le pool est volontairement petit : l'API et les workers exercent une
+    back-pressure naturelle plutôt que d'ouvrir un nombre de connexions
+    proportionnel au nombre de threads.
+    """
+    key = bool(dict_rows)
+    with _POOL_LOCK:
+        pool = _POOLS.get(key)
+        if pool is None:
+            min_size = max(0, int(os.getenv("POSTGRES_POOL_MIN_SIZE", "1") or "1"))
+            max_size = max(2, int(os.getenv("POSTGRES_POOL_MAX_SIZE", "12") or "12"))
+            timeout = max(1.0, float(os.getenv("POSTGRES_POOL_TIMEOUT_SECONDS", "10") or "10"))
+            kwargs: Dict[str, Any] = {"connect_timeout": 5}
+            if dict_rows:
+                kwargs["row_factory"] = dict_row
+            pool = ConnectionPool(
+                conninfo=get_database_url(),
+                min_size=min(min_size, max_size),
+                max_size=max_size,
+                timeout=timeout,
+                kwargs=kwargs,
+                open=True,
+                name="runtime-dict" if dict_rows else "runtime-tuple",
+            )
+            _POOLS[key] = pool
+        return pool
+
+
+def acquire_pooled_connection(*, dict_rows: bool = False) -> Connection:
+    return _pool(dict_rows).getconn()
+
+
+def release_pooled_connection(conn: Connection, *, dict_rows: bool = False) -> None:
+    _pool(dict_rows).putconn(conn)
+
+
+def pool_stats() -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    with _POOL_LOCK:
+        items = list(_POOLS.items())
+    for dict_rows, pool in items:
+        try:
+            result["dict" if dict_rows else "tuple"] = dict(pool.get_stats())
+        except Exception:
+            result["dict" if dict_rows else "tuple"] = {"available": False}
+    return result
+
+
+def close_pools() -> None:
+    global _POOLS
+    with _POOL_LOCK:
+        pools = list(_POOLS.values())
+        _POOLS = {}
+    for pool in pools:
+        try:
+            pool.close()
+        except Exception:
+            pass
 
 
 def _env(name: str, default: Optional[str] = None) -> str:
@@ -45,7 +112,12 @@ def get_connection(*, dict_rows: bool = False, autocommit: bool = False) -> Conn
 
 @contextmanager
 def connection(*, dict_rows: bool = False, autocommit: bool = False) -> Iterator[Connection]:
-    conn = get_connection(dict_rows=dict_rows, autocommit=autocommit)
+    if autocommit:
+        conn = get_connection(dict_rows=dict_rows, autocommit=True)
+        pooled = False
+    else:
+        conn = acquire_pooled_connection(dict_rows=dict_rows)
+        pooled = True
     try:
         yield conn
         if not autocommit:
@@ -55,7 +127,10 @@ def connection(*, dict_rows: bool = False, autocommit: bool = False) -> Iterator
             conn.rollback()
         raise
     finally:
-        conn.close()
+        if pooled:
+            release_pooled_connection(conn, dict_rows=dict_rows)
+        else:
+            conn.close()
 
 
 def identifier(name: str) -> sql.Identifier:

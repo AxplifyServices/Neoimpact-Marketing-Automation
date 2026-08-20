@@ -540,3 +540,169 @@ def cancel_visits_for_campaign(id_campagne: str, *, local_status: str = "cancell
         "local_sent_before": local_sent_before,
         "local_released_for_resend": local_released,
     }
+
+# =========================================================
+# Compatibilité Outbound Engine générique (migration 010+)
+# Les définitions ci-dessous remplacent les anciennes fonctions publiques.
+# =========================================================
+def build_visit_payload_for_dispatch(id_campagne: str, radical_compte: str, block_id: str) -> Dict[str, Any]:
+    conn = _connect()
+    try:
+        row = _load_row(conn, id_campagne, radical_compte)
+        if not row:
+            raise RuntimeError("client_campagne_not_found")
+        if _norm_str(row.get("ID_Action")) != _norm_str(block_id):
+            raise RuntimeError("workflow_moved")
+        return _build_payload(conn, row)
+    finally:
+        conn.close()
+
+
+def post_visit_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    import hashlib
+    idem_raw = "|".join((
+        _norm_str(payload.get("correlationId")),
+        _norm_str(payload.get("externalClientId")),
+        _norm_str(payload.get("blockId")),
+    )).encode("utf-8")
+    idempotency_key = hashlib.sha256(idem_raw).hexdigest()
+    req = urllib.request.Request(
+        WEBHOOK_URL,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json; charset=utf-8",
+            "Idempotency-Key": idempotency_key,
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=float(os.getenv("TERRAIN_HTTP_TIMEOUT_SECONDS", "20") or "20")) as response:
+        status_code = int(response.status)
+        body = response.read().decode("utf-8", errors="ignore")
+    if not 200 <= status_code < 300:
+        raise RuntimeError(f"HTTP {status_code}: {body[:1000]}")
+    return {"status_code": status_code, "body": body[:4000]}
+
+
+def enqueue_visit_for_client(id_campagne: str, radical_compte: str) -> Dict[str, Any]:  # type: ignore[no-redef]
+    from app.outbound.store import enqueue_single
+    return enqueue_single(id_campagne, radical_compte, channel="TERRAIN")
+
+
+def send_visit_for_client(id_campagne: str, radical_compte: str) -> Dict[str, Any]:  # type: ignore[no-redef]
+    return enqueue_visit_for_client(id_campagne, radical_compte)
+
+
+def dispatch_pending_visits_for_campaign(id_campagne: str) -> Dict[str, Any]:  # type: ignore[no-redef]
+    from app.outbound.store import enqueue_candidates, stats
+    queued = int(enqueue_candidates(id_campagne=id_campagne, channels=("TERRAIN",), limit_per_channel=5000).get("TERRAIN", 0))
+    counts = stats(id_campagne=id_campagne, channel="TERRAIN")
+    return {
+        "ok": True,
+        "queued": queued,
+        "pending": int(counts.get("pending", 0)) + int(counts.get("retry", 0)),
+        "processing": int(counts.get("processing", 0)),
+        "sent": int(counts.get("waiting_callback", 0)) + int(counts.get("completed", 0)),
+        "errors": int(counts.get("failed", 0)),
+        "async": True,
+    }
+
+
+def get_terrain_dispatch_status(id_campagne: str | None = None) -> Dict[str, Any]:  # type: ignore[no-redef]
+    from app.outbound.store import stats
+    try:
+        from app.outbound.worker import worker_status
+        running = int(worker_status().get("running", {}).get("TERRAIN", 0)) > 0
+    except Exception:
+        running = False
+    return {"worker_running": running, "counts": stats(id_campagne=id_campagne, channel="TERRAIN")}
+
+
+def cancel_visits_for_campaign(id_campagne: str, *, local_status: str = "cancelled") -> Dict[str, Any]:  # type: ignore[no-redef]
+    """Annule les visites non envoyées et demande l'annulation externe des envoyées."""
+    from app.outbound.store import stats
+
+    id_campagne = _norm_str(id_campagne)
+    if not id_campagne:
+        return {"ok": False, "error": "missing_id_campagne"}
+
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT type_campagne FROM campagnes WHERE id_campagne=? LIMIT 1", (id_campagne,))
+        campaign = cur.fetchone()
+        if not campaign:
+            return {"ok": False, "error": "campagne_not_found", "id_campagne": id_campagne}
+        if _norm_str(campaign.get("type_campagne")) != "avec_action_terrain":
+            return {"ok": True, "skipped": True, "reason": "not_terrain_campaign", "id_campagne": id_campagne}
+
+        target_status = "paused" if "pause" in (_norm_str(local_status).lower()) else (_norm_str(local_status) or "cancelled")
+        cur.execute(
+            """
+            UPDATE outbound_dispatches
+            SET status=?, last_error=NULL, completed_at=CASE WHEN ?='paused' THEN NULL ELSE NOW() END, updated_at=NOW()
+            WHERE id_campagne=? AND channel='TERRAIN' AND status IN ('pending','retry')
+            """,
+            (target_status, target_status, id_campagne),
+        )
+        local_unsent_cancelled = int(cur.rowcount or 0)
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM outbound_dispatches WHERE id_campagne=? AND channel='TERRAIN' AND status='waiting_callback'",
+            (id_campagne,),
+        )
+        sent_before = int((cur.fetchone() or {}).get("n") or 0)
+        conn.commit()
+    finally:
+        conn.close()
+
+    if sent_before == 0:
+        return {
+            "ok": True,
+            "id_campagne": id_campagne,
+            "local_unsent_cancelled": local_unsent_cancelled,
+            "local_sent_before": 0,
+            "local_released_for_resend": 0,
+        }
+
+    url = f"{WEBHOOK_URL.rstrip('/')}/{id_campagne}"
+    req = urllib.request.Request(url, method="DELETE")
+    try:
+        with urllib.request.urlopen(req, timeout=float(os.getenv("TERRAIN_HTTP_TIMEOUT_SECONDS", "20") or "20")) as response:
+            status_code = int(response.status)
+            body = response.read().decode("utf-8", errors="ignore")
+        external_ok = 200 <= status_code < 300
+        error = ""
+    except Exception as exc:
+        status_code = None
+        body = ""
+        external_ok = False
+        error = str(exc)
+
+    released = 0
+    if external_ok:
+        conn = _connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE outbound_dispatches
+                SET status=?, completed_at=NOW(), updated_at=NOW(), last_error=NULL
+                WHERE id_campagne=? AND channel='TERRAIN' AND status='waiting_callback'
+                """,
+                (target_status, id_campagne),
+            )
+            released = int(cur.rowcount or 0)
+            conn.commit()
+        finally:
+            conn.close()
+
+    return {
+        "ok": external_ok,
+        "id_campagne": id_campagne,
+        "url": url,
+        "status_code": status_code,
+        "response": body,
+        "error": error,
+        "local_unsent_cancelled": local_unsent_cancelled,
+        "local_sent_before": sent_before,
+        "local_released_for_resend": released,
+    }

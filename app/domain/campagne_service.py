@@ -233,14 +233,6 @@ def _route_outputs_for_campaign_bulk(
                 fill_action_vers_cc_from_clients_campagnes(id_campagne) or 0
             )
 
-    if _norm_str(type_campagne) == "avec_action_terrain":
-        dispatch = dispatch_pending_visits_for_campaign(id_campagne)
-        counts["external_visit_queued"] = int(dispatch.get("queued") or 0)
-        counts["external_visit_pending"] = int(dispatch.get("pending") or 0)
-        counts["external_visit_sent"] = int(dispatch.get("sent") or 0)
-        counts["external_visit_skipped"] = int(dispatch.get("skipped") or 0)
-        counts["external_visit_errors"] = int(dispatch.get("errors") or 0)
-
     return counts
 
 
@@ -487,20 +479,11 @@ def prepare_campagne_execution(
     if current_state == "Annulée" or _cancelled():
         raise RuntimeError("job_cancelled")
 
-    # 4) Actions initiales uniquement si la campagne est réellement En cours.
+    # 4) Prépare uniquement les sorties internes. Les I/O externes Mail/Terrain
+    # sont déléguées à l'Outbound Engine et ne bloquent jamais ce worker.
     mail_summary = None
     output_counts = {"crc": 0, "cc": 0, "da": 0, "cc_terrain": 0, "da_terrain": 0}
     if current_state == "En cours":
-        if _is_first_action_mail(canal_init, action_init):
-            try:
-                from app.engine.traitement_mail_engine import run_mail_meta_loop
-                mail_summary = run_mail_meta_loop(
-                    max_passes=20,
-                    limit_rows_per_pass=500,
-                    id_campagne=id_campagne,
-                )
-            except Exception as exc:
-                mail_summary = {"error": "mail_meta_loop_failed", "details": str(exc)}
         if _cancelled():
             raise RuntimeError("job_cancelled")
         output_counts = _route_outputs_for_campaign_bulk(
@@ -518,6 +501,18 @@ def prepare_campagne_execution(
         target_count_eligible=nb_apres,
         population_count=nb_apres,
     )
+    if current_state == "En cours":
+        try:
+            from app.outbound.store import enqueue_candidates
+            outbound_queued = enqueue_candidates(
+                id_campagne=id_campagne,
+                channels=("MAIL", "TERRAIN"),
+                limit_per_channel=5000,
+            )
+            output_counts["outbound_mail_queued"] = int(outbound_queued.get("MAIL", 0))
+            output_counts["outbound_terrain_queued"] = int(outbound_queued.get("TERRAIN", 0))
+        except Exception as exc:
+            output_counts["outbound_error"] = str(exc)
     _progress(4, "Campagne prête")
     return {
         "id_campagne": id_campagne,
@@ -540,7 +535,10 @@ def annuler_campagne(id_campagne: str) -> Dict[str, Any]:
     - supprime les queues internes liées à la campagne
     """
     from app.orchestration.job_store import request_cancel_for_campaign
-    request_cancel_for_campaign(id_campagne)
+    from app.storage.campagnes_store_sqlite import get_campagne
+    previous_state = _get_campaign_state(get_campagne(id_campagne) or {})
+    # Etat de gel léger : empêche immédiatement tout nouveau claim réseau.
+    update_etat(id_campagne, "En pause")
 
     external_cancel = {"ok": True, "skipped": True, "reason": "not_called"}
 
@@ -553,6 +551,8 @@ def annuler_campagne(id_campagne: str) -> Dict[str, Any]:
         external_cancel = {"ok": False, "error": str(e)}
 
     if not external_cancel.get("ok", False) and not external_cancel.get("skipped", False):
+        if previous_state:
+            update_etat(id_campagne, previous_state)
         return {
             "id_campagne": id_campagne,
             "ok": False,
@@ -567,6 +567,9 @@ def annuler_campagne(id_campagne: str) -> Dict[str, Any]:
             },
         }
 
+    request_cancel_for_campaign(id_campagne)
+    from app.outbound.store import cancel_for_campaign
+    cancel_for_campaign(id_campagne)
     update_etat(id_campagne, "Annulée")
     set_execution_status(id_campagne, "cancelled", error=None, finished=True)
     set_clients_etat_for_campagne(id_campagne, "Annulée")
@@ -658,6 +661,9 @@ def mettre_en_pause_campagne(id_campagne: str) -> Dict[str, Any]:
 
     external_cancel = {"ok": True, "skipped": True, "reason": "not_called"}
 
+    # Gèle d'abord la campagne avec une seule écriture légère : producteurs et
+    # workers externes cessent immédiatement de réclamer de nouveaux dispatchs.
+    update_etat(id_campagne, "En pause")
     try:
         external_cancel = cancel_visits_for_campaign(
             id_campagne,
@@ -667,6 +673,8 @@ def mettre_en_pause_campagne(id_campagne: str) -> Dict[str, Any]:
         external_cancel = {"ok": False, "error": str(e)}
 
     if not external_cancel.get("ok", False) and not external_cancel.get("skipped", False):
+        # L'annulation externe a échoué : restaure l'état métier précédent.
+        update_etat(id_campagne, etat_actuel)
         return {
             "id_campagne": id_campagne,
             "ok": False,
@@ -681,7 +689,6 @@ def mettre_en_pause_campagne(id_campagne: str) -> Dict[str, Any]:
             },
         }
 
-    update_etat(id_campagne, "En pause")
     set_clients_etat_for_campagne(id_campagne, "En pause")
 
     deleted = {
@@ -832,15 +839,10 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
         except Exception:
             new_clients_added = 0
 
-        # si au moins une ligne de cette campagne est en Mail -> traiter mails
-        if _campagne_has_mail_action(id_campagne):
-            try:
-                from app.engine.traitement_mail_engine import run_mail_meta_loop
-                mail_summary = run_mail_meta_loop(max_passes=20, limit_rows_per_pass=500, id_campagne=id_campagne)
-            except Exception as e:
-                mail_summary = {"error": "mail_meta_loop_failed", "details": str(e)}
+        # Les actions externes seront publiées dans l'outbox après la
+        # reconstruction des sorties internes; aucun appel réseau ici.
 
-        # Reconstruction bulk des queues après traitement mail.
+        # Reconstruction bulk des queues.
         type_campagne = _norm_str(c.get("type_campagne")) or "sans_action_terrain"
         try:
             output_counts = _route_outputs_for_campaign_bulk(
@@ -856,6 +858,19 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
                 "da_terrain": 0,
                 "error": str(e),
             }
+
+        try:
+            from app.outbound.store import enqueue_candidates, resume_paused_for_campaign
+            resume_paused_for_campaign(id_campagne)
+            queued_external = enqueue_candidates(
+                id_campagne=id_campagne,
+                channels=("MAIL", "TERRAIN"),
+                limit_per_channel=5000,
+            )
+            output_counts["outbound_mail_queued"] = int(queued_external.get("MAIL", 0))
+            output_counts["outbound_terrain_queued"] = int(queued_external.get("TERRAIN", 0))
+        except Exception as exc:
+            output_counts["outbound_error"] = str(exc)
 
         if type_campagne == "avec_action_terrain":
             external_dispatch_after_activation = {
