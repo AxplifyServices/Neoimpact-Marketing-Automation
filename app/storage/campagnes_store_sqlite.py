@@ -21,6 +21,7 @@ _EXPECTED_COLUMNS = {
     "type_campagne",
     "visitMode",
     "visitPurpose",
+    "data_source_code",
 }
 
 
@@ -66,6 +67,9 @@ def insert_campagne(
         with conn.cursor() as cur:
             cur.execute("SELECT pg_advisory_xact_lock(%s)", (620010,))
             id_campagne = _new_id_campagne(cur)
+            cur.execute("SELECT data_source_code FROM cibles WHERE id_cible = %s", (str(id_cible),))
+            source_row = cur.fetchone()
+            data_source_code = str(source_row[0] if source_row and source_row[0] else "internal")
             cur.execute(
                 """
                 INSERT INTO campagnes (
@@ -80,8 +84,9 @@ def insert_campagne(
                     description,
                     type_campagne,
                     "visitMode",
-                    "visitPurpose"
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    "visitPurpose",
+                    data_source_code
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     id_campagne,
@@ -96,6 +101,7 @@ def insert_campagne(
                     str(type_campagne or "sans_action_terrain").strip(),
                     visitMode,
                     visitPurpose,
+                    data_source_code,
                 ),
             )
     return id_campagne

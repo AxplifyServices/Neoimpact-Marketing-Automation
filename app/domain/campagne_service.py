@@ -15,13 +15,12 @@ from app.storage.postgres_db import table_exists, connection as pg_connection
 from app.storage.campagnes_store_sqlite import insert_campagne, update_etat
 from app.storage.clients_campagnes_store_sqlite import (
     ensure_table as ensure_clients_campagnes_table,
-    bulk_insert_clients,
     bulk_insert_clients_from_radical_select,
     set_clients_etat_for_campagne,
 )
 from app.storage.cibles_store_sqlite import (
-    load_clients_df_for_cible,
     build_db_cible_radicals_query,
+    get_cible,
 )
 from app.storage.crc_input_store_sqlite import fill_crc_input_from_clients_campagnes
 from app.storage.action_vers_cc_store_sqlite import fill_action_vers_cc_from_clients_campagnes
@@ -377,7 +376,19 @@ def create_campagne(
     current_bloc_init = find_bloc_by_id(liste_action, id_action_init) or root
 
     # 3) Population cible
-    # Pour une cible DB, PostgreSQL reste la source de vérité de bout en bout:
+    cible_meta = get_cible(id_cible) or {}
+    data_source_code = _norm_str(cible_meta.get("data_source_code")) or "internal"
+    if data_source_code != "internal":
+        # IMPORTANT : ne jamais retomber sur le chemin historique qui copierait
+        # silencieusement une population externe dans clients_campagnes. Le lot
+        # Orchestrator/ResultSink prendra en charge ce mode sans duplication.
+        raise RuntimeError(
+            "L'exécution d'une campagne sur datamart externe nécessite le moteur "
+            "d'orchestration externe. La cible peut être comptée/prévisualisée, mais "
+            "sa population ne sera pas copiée dans la plateforme."
+        )
+
+    # Pour une cible DB interne OU fichier matérialisé, PostgreSQL reste la source de vérité de bout en bout:
     # aucun DataFrame de centaines de milliers de lignes n'est matérialisé.
     db_select_all = build_db_cible_radicals_query(
         id_cible,
@@ -388,22 +399,15 @@ def create_campagne(
         exclude_rupture_relation=True,
     )
 
-    df = None
-    if db_select_all is not None and db_select_filtered is not None:
-        raw_query, raw_params = db_select_all
-        filtered_query, filtered_params = db_select_filtered
-        with heavy_workload("interactive"):
-            nb_init = _count_radical_select(raw_query, raw_params)
-            nb_apres = _count_radical_select(filtered_query, filtered_params)
-        removed_rupture = max(0, nb_init - nb_apres)
-    else:
-        # Fallback inchangé pour les cibles fichier plat.
-        df = load_clients_df_for_cible(id_cible)
-        nb_init = int(len(df))
-        df, removed_rupture = _remove_rupture_relation_strict(df)
-        nb_apres = int(len(df))
-        filtered_query = None
-        filtered_params = []
+    if db_select_all is None or db_select_filtered is None:
+        raise RuntimeError("Aucun chemin SQL-native disponible pour cette cible.")
+
+    raw_query, raw_params = db_select_all
+    filtered_query, filtered_params = db_select_filtered
+    with heavy_workload("interactive"):
+        nb_init = _count_radical_select(raw_query, raw_params)
+        nb_apres = _count_radical_select(filtered_query, filtered_params)
+    removed_rupture = max(0, nb_init - nb_apres)
 
     target_ready_at = time.perf_counter()
 
@@ -460,27 +464,14 @@ def create_campagne(
             row_template,
         )
 
-    # 6) Affectation massive
-    if filtered_query is not None:
-        with heavy_workload("interactive"):
-            inserted_clients = bulk_insert_clients_from_radical_select(
-                filtered_query,
-                filtered_params,
-                row_template,
-                only_new=False,
-            )
-    else:
-        radical_col = _detect_radical_col(df) if df is not None else ""
-        rows: List[Dict[str, Any]] = []
-        if df is not None and radical_col:
-            for _, r in df.iterrows():
-                rc = _norm_str(r.get(radical_col))
-                if not rc:
-                    continue
-                row_cc = dict(row_template)
-                row_cc["Radical_compte"] = rc
-                rows.append(row_cc)
-        inserted_clients = bulk_insert_clients(rows)
+    # 6) Affectation massive SQL-native.
+    with heavy_workload("interactive"):
+        inserted_clients = bulk_insert_clients_from_radical_select(
+            filtered_query,
+            filtered_params,
+            row_template,
+            only_new=False,
+        )
 
     clients_inserted_at = time.perf_counter()
 
@@ -531,7 +522,7 @@ def create_campagne(
         "action_initiale": action_init,
         "mail_meta_loop": mail_summary,
         "output_insert": output_counts,
-        "bulk_mode": "postgresql_native" if filtered_query is not None else "file_fallback",
+        "bulk_mode": "postgresql_native",
         "timings_ms": {
             "target": int((target_ready_at - started_at) * 1000),
             "insert_clients_campagnes": int((clients_inserted_at - target_ready_at) * 1000),
@@ -885,12 +876,12 @@ def sync_new_clients_from_cible_for_campaign(conn: RuntimeConnection, id_campagn
     """
     Synchronisation insert-only de la cible vers la campagne.
 
-    Les cibles DB utilisent INSERT ... SELECT directement dans PostgreSQL.
-    Les cibles fichier plat conservent le chemin historique DataFrame.
+    Les cibles internes (DB ou fichier matérialisé) utilisent INSERT ... SELECT
+    directement dans PostgreSQL. Les datamarts externes sont volontairement
+    réservés au moteur d'orchestration externe et ne sont jamais copiés ici.
     """
     from app.storage.campagnes_store_sqlite import get_campagne
     from app.storage.clients_cibles_store_sqlite import (
-        insert_only_members,
         insert_only_members_from_radical_select,
         update_cible_volume_if_column_exists,
     )
@@ -899,6 +890,14 @@ def sync_new_clients_from_cible_for_campaign(conn: RuntimeConnection, id_campagn
     _ = conn  # conservé dans la signature pour compatibilité avec le batch
 
     c = get_campagne(id_campagne) or {}
+    data_source_code = _norm_str(c.get("data_source_code")) or "internal"
+    if data_source_code != "internal":
+        return {
+            "ok": False,
+            "error": "external_data_source_requires_orchestrator",
+            "new_cible_members": 0,
+            "new_clients_campagne": 0,
+        }
     id_cible = _norm_str(c.get("id_cible") or c.get("ID_CIBLE") or c.get("cible_id"))
     id_modele = _norm_str(c.get("id_modele") or c.get("ID_MODELE"))
 
@@ -963,59 +962,27 @@ def sync_new_clients_from_cible_for_campaign(conn: RuntimeConnection, id_campagn
         exclude_rupture_relation=True,
     )
 
-    if db_select is not None:
-        radical_query, radical_params = db_select
-        new_cible = insert_only_members_from_radical_select(
-            id_cible,
-            radical_query,
-            radical_params,
-        )
-        inserted = bulk_insert_clients_from_radical_select(
-            radical_query,
-            radical_params,
-            row_template,
-            only_new=True,
-        )
-        update_cible_volume_if_column_exists(id_cible)
+    if db_select is None:
         return {
-            "ok": True,
-            "new_cible_members": int(new_cible),
-            "new_clients_campagne": int(inserted),
+            "ok": False,
+            "error": "no_native_target_path",
+            "new_cible_members": 0,
+            "new_clients_campagne": 0,
         }
 
-    # Fallback fichier plat.
-    df = load_clients_df_for_cible(id_cible)
-    df, _ = _remove_rupture_relation_strict(df)
-    radical_col = _detect_radical_col(df)
-    radicals = []
-    if radical_col:
-        radicals = list(dict.fromkeys(
-            _norm_str(r.get(radical_col))
-            for _, r in df.iterrows()
-            if _norm_str(r.get(radical_col))
-        ))
-
-    new_cible = insert_only_members(id_cible, radicals)
+    radical_query, radical_params = db_select
+    new_cible = insert_only_members_from_radical_select(
+        id_cible,
+        radical_query,
+        radical_params,
+    )
+    inserted = bulk_insert_clients_from_radical_select(
+        radical_query,
+        radical_params,
+        row_template,
+        only_new=True,
+    )
     update_cible_volume_if_column_exists(id_cible)
-
-    # Pour les fichiers plats on conserve un contrôle Python des existants.
-    runtime_conn = connect_runtime()
-    try:
-        cur = runtime_conn.cursor()
-        cur.execute("SELECT Radical_compte FROM clients_campagnes WHERE ID_CAMPAGNE = ?", (id_campagne,))
-        existing = {_norm_str(row[0]) for row in cur.fetchall() if _norm_str(row[0])}
-    finally:
-        runtime_conn.close()
-
-    rows = []
-    for rc in radicals:
-        if rc in existing:
-            continue
-        row_cc = dict(row_template)
-        row_cc["Radical_compte"] = rc
-        rows.append(row_cc)
-
-    inserted = bulk_insert_clients(rows)
     return {
         "ok": True,
         "new_cible_members": int(new_cible),

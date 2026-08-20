@@ -19,11 +19,14 @@ class Cible:
     date_creation: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     filtre: Dict[str, Any] = field(default_factory=dict)
     chemin: str = ""
+    data_source_code: str = "internal"
 
     def validate(self) -> None:
         # id_cible peut être vide AVANT insert (le store le génère)
         if self.nom_cible is None or not str(self.nom_cible).strip():
             raise ValueError("nom_cible obligatoire")
+
+        self.data_source_code = str(self.data_source_code or "internal").strip() or "internal"
 
         if self.source not in ("DB", "Fichier plat"):
             raise ValueError("source doit être 'DB' ou 'Fichier plat'")
@@ -34,6 +37,8 @@ class Cible:
             # chemin doit rester vide
             self.chemin = ""
         else:
+            # Un fichier uploadé est, par définition, matérialisé dans la source interne.
+            self.data_source_code = "internal"
             # fichier plat => filtre vide, chemin obligatoire
             self.filtre = {}
             if self.chemin is None or not str(self.chemin).strip():
@@ -48,4 +53,5 @@ class Cible:
             "date_creation": self.date_creation,
             "source": self.source,
             "chemin": str(self.chemin or "").strip(),
+            "data_source_code": self.data_source_code,
         }

@@ -18,6 +18,7 @@ from app.storage.cibles_store_sqlite import (
     get_distinct_values_clients,
     load_clients_df_for_cible,
     preview_clients_for_cible,
+    materialize_file_members,
 )
 from app.storage.campagnes_store_sqlite import list_campagnes_active, list_all_campagnes
 from app.domain.cible import Cible
@@ -179,7 +180,7 @@ def import_leads_into_clients_for_ui(file_path: str) -> Tuple[int, int]:
 # =========================================================
 # CRUD (cibles)
 # =========================================================
-def create_cible_db_for_ui(nom_cible: str, filtre_dict: Dict[str, Any]) -> str:
+def create_cible_db_for_ui(nom_cible: str, filtre_dict: Dict[str, Any], data_source_code: str = "internal") -> str:
     """
     Crée une cible DB à partir du filtre dict déjà construit par l'UI.
     """
@@ -189,22 +190,31 @@ def create_cible_db_for_ui(nom_cible: str, filtre_dict: Dict[str, Any]) -> str:
         source="DB",
         filtre=filtre_dict if isinstance(filtre_dict, dict) else {},
         chemin="",
+        data_source_code=str(data_source_code or "internal").strip() or "internal",
     )
     return insert_cible(c)
 
 
 def create_cible_file_for_ui(nom_cible: str, file_path: str) -> str:
-    """
-    Crée une cible "Fichier plat" avec chemin.
-    """
+    """Crée une cible fichier puis matérialise uniquement ses clés en PostgreSQL."""
     c = Cible(
         id_cible="",
         nom_cible=nom_cible,
         source="Fichier plat",
         filtre={},
         chemin=file_path,
+        data_source_code="internal",
     )
-    return insert_cible(c)
+    cible_id = insert_cible(c)
+    try:
+        materialize_file_members(cible_id, file_path)
+        return cible_id
+    except Exception:
+        # Ne laisse pas une cible fichier vide/incohérente si sa matérialisation échoue.
+        try:
+            delete_cible(cible_id)
+        finally:
+            raise
 
 
 def update_cible_for_ui(
@@ -214,6 +224,7 @@ def update_cible_for_ui(
     date_creation: str,
     filtre_dict: Dict[str, Any] | None,
     chemin: str,
+    data_source_code: str = "internal",
 ) -> None:
     cible_obj = Cible(
         id_cible=id_cible,
@@ -222,7 +233,12 @@ def update_cible_for_ui(
         date_creation=date_creation,
         filtre=filtre_dict if (source == "DB" and isinstance(filtre_dict, dict)) else {},
         chemin=chemin if source != "DB" else "",
+        data_source_code=(str(data_source_code or "internal").strip() or "internal") if source == "DB" else "internal",
     )
+    if source == "Fichier plat":
+        # Remplace la matérialisation dans une seule transaction avant de
+        # basculer le metadata cible vers le nouveau fichier.
+        materialize_file_members(id_cible, chemin, replace=True)
     update_cible(cible_obj)
 
 

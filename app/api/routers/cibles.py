@@ -83,6 +83,7 @@ def _raise_400_import_clients(e: Exception) -> None:
 class CibleDbCreateIn(BaseModel):
     nom_cible: str
     filtre: Dict[str, Any]
+    data_source_code: str = "internal"
 
 
 class CibleUpdateIn(BaseModel):
@@ -92,6 +93,7 @@ class CibleUpdateIn(BaseModel):
     date_creation: str
     filtre: Optional[Dict[str, Any]] = None
     chemin: str = ""
+    data_source_code: str = "internal"
 
 
 # =========================================================
@@ -208,7 +210,7 @@ def get_cible_filtre(id_cible: str):
 
 @router.post("/cibles/db")
 def create_cible_db(payload: CibleDbCreateIn):
-    new_id = create_cible_db_for_ui(payload.nom_cible, payload.filtre)
+    new_id = create_cible_db_for_ui(payload.nom_cible, payload.filtre, payload.data_source_code)
     return {"ok": True, "id_cible": new_id}
 
 
@@ -258,6 +260,7 @@ def update_cible(id_cible: str, payload: CibleUpdateIn):
         date_creation=payload.date_creation,
         filtre_dict=payload.filtre,
         chemin=payload.chemin,
+        data_source_code=payload.data_source_code,
     )
     return {"ok": True}
 

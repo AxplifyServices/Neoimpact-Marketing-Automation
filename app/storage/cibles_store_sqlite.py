@@ -12,6 +12,8 @@ from psycopg import sql
 from psycopg.rows import dict_row
 
 from app.domain.cible import Cible
+from app.data_sources import get_data_source
+from app.data_pipeline.file_clients import bulk_import_clients, materialize_file_members
 from app.storage.postgres_db import (
     connection,
     get_column_names,
@@ -82,6 +84,7 @@ def ensure_cibles_table() -> None:
         "source",
         "filtre",
         "chemin",
+        "data_source_code",
     }
 
     missing = expected - columns
@@ -100,17 +103,25 @@ def ensure_cibles_table() -> None:
 def count_clients_for_cible(
     id_cible: str,
 ) -> int:
+    """Compte une cible sans matérialiser sa population en Python."""
+    cible = get_cible(id_cible)
+    if not cible:
+        return 0
+
+    if str(cible.get("source") or "").strip() == "Fichier plat":
+        from app.storage.clients_cibles_store_sqlite import get_volume
+        return int(get_volume(id_cible) or 0)
+
+    source_code = str(cible.get("data_source_code") or "internal").strip() or "internal"
     try:
-        df = load_clients_df_for_cible(
-            id_cible
-        )
-
-        return int(
-            len(df)
-        )
-
+        adapter = get_data_source(source_code)
+        return int(adapter.count_target(cible, exclude_rupture_relation=False) or 0)
     except Exception:
-        # Conservation du comportement historique.
+        # L'ancien écran tolère encore un échec de comptage interne. Pour une
+        # source externe, masquer une panne datamart sous un volume=0 serait
+        # dangereux : on laisse donc l'erreur remonter.
+        if source_code != "internal":
+            raise
         return 0
 
 
@@ -221,9 +232,11 @@ def insert_cible(
                     date_creation,
                     source,
                     filtre,
-                    chemin
+                    chemin,
+                    data_source_code
                 )
                 VALUES (
+                    %s,
                     %s,
                     %s,
                     %s,
@@ -239,6 +252,7 @@ def insert_cible(
                     cible.source,
                     filtre_str,
                     chemin,
+                    cible.data_source_code,
                 ),
             )
 
@@ -498,7 +512,8 @@ def update_cible(
                     date_creation = %s,
                     source = %s,
                     filtre = %s,
-                    chemin = %s
+                    chemin = %s,
+                    data_source_code = %s
                 WHERE id_cible = %s
                 """,
                 (
@@ -507,6 +522,7 @@ def update_cible(
                     cible.source,
                     filtre_str,
                     chemin,
+                    cible.data_source_code,
                     cible.id_cible,
                 ),
             )
@@ -1012,245 +1028,8 @@ def _new_radical_compte(
 def import_leads_into_clients(
     file_path: str,
 ) -> Tuple[int, int]:
-    """
-    Import STRICT vers PostgreSQL clients.
-
-    Comportement conservé :
-    - schéma fichier identique à la table clients ;
-    - upsert basé sur ID_Client ;
-    - ID existant => UPDATE ;
-    - nouvel ID => INSERT ;
-    - radical_compte conservé lors d'un UPDATE ;
-    - radical_compte généré lors d'un INSERT s'il est vide.
-    """
-
-    df = _read_flat_file(
-        file_path
-    )
-
-    df.columns = [
-        str(column).strip()
-        for column in df.columns
-    ]
-
-    inserted = 0
-    updated = 0
-
-    with connection() as conn:
-
-        clients_table = _detect_clients_table(
-            conn
-        )
-
-        clients_cols = _get_table_columns(
-            conn,
-            clients_table,
-        )
-
-        _strict_validate_dataframe_against_clients(
-            df,
-            clients_cols,
-        )
-
-        with conn.cursor() as cur:
-
-            # Protection de la génération RCxxxxxx contre
-            # les imports concurrents.
-            cur.execute(
-                "SELECT pg_advisory_xact_lock(%s)",
-                (610002,),
-            )
-
-            key_column = _resolve_column_name(
-                clients_cols,
-                STRICT_KEY_COL,
-            )
-
-            radical_column = _resolve_column_name(
-                clients_cols,
-                RADICAL_COL,
-            )
-
-            for _, row in df.iterrows():
-
-                data = {
-                    key: _to_db_value(value)
-                    for key, value
-                    in row.to_dict().items()
-                }
-
-                key_val = data.get(
-                    key_column
-                )
-
-                if (
-                    key_val is None
-                    or str(key_val).strip() == ""
-                ):
-                    raise ValueError(
-                        "Fichier invalide : "
-                        "ID_Client vide détecté."
-                    )
-
-                exists_query = sql.SQL(
-                    """
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM {table}
-                        WHERE {key_column} = %s
-                    )
-                    """
-                ).format(
-                    table=sql.Identifier(
-                        clients_table
-                    ),
-                    key_column=sql.Identifier(
-                        key_column
-                    ),
-                )
-
-                cur.execute(
-                    exists_query,
-                    (
-                        key_val,
-                    ),
-                )
-
-                exists_row = cur.fetchone()
-
-                exists = bool(
-                    exists_row
-                    and exists_row[0]
-                )
-
-                if exists:
-
-                    cols_to_update = [
-                        column
-                        for column in clients_cols
-                        if column not in (
-                            radical_column,
-                            key_column,
-                        )
-                    ]
-
-                    assignments = sql.SQL(
-                        ", "
-                    ).join(
-                        sql.SQL(
-                            "{} = %s"
-                        ).format(
-                            sql.Identifier(
-                                column
-                            )
-                        )
-                        for column
-                        in cols_to_update
-                    )
-
-                    update_query = sql.SQL(
-                        """
-                        UPDATE {table}
-                        SET {assignments}
-                        WHERE {key_column} = %s
-                        """
-                    ).format(
-                        table=sql.Identifier(
-                            clients_table
-                        ),
-                        assignments=assignments,
-                        key_column=sql.Identifier(
-                            key_column
-                        ),
-                    )
-
-                    values = [
-                        data.get(column)
-                        for column
-                        in cols_to_update
-                    ]
-
-                    values.append(
-                        key_val
-                    )
-
-                    cur.execute(
-                        update_query,
-                        values,
-                    )
-
-                    updated += 1
-
-                else:
-
-                    radical_value = data.get(
-                        radical_column
-                    )
-
-                    if (
-                        radical_value is None
-                        or str(radical_value).strip() == ""
-                    ):
-                        data[radical_column] = (
-                            _new_radical_compte(
-                                cur,
-                                clients_table,
-                            )
-                        )
-
-                    cols_insert = list(
-                        clients_cols
-                    )
-
-                    identifiers = sql.SQL(
-                        ", "
-                    ).join(
-                        sql.Identifier(
-                            column
-                        )
-                        for column
-                        in cols_insert
-                    )
-
-                    placeholders = sql.SQL(
-                        ", "
-                    ).join(
-                        sql.Placeholder()
-                        for _ in cols_insert
-                    )
-
-                    insert_query = sql.SQL(
-                        """
-                        INSERT INTO {table} (
-                            {columns}
-                        )
-                        VALUES (
-                            {placeholders}
-                        )
-                        """
-                    ).format(
-                        table=sql.Identifier(
-                            clients_table
-                        ),
-                        columns=identifiers,
-                        placeholders=placeholders,
-                    )
-
-                    cur.execute(
-                        insert_query,
-                        [
-                            data.get(column)
-                            for column
-                            in cols_insert
-                        ],
-                    )
-
-                    inserted += 1
-
-    return (
-        inserted,
-        updated,
-    )
+    """Import clients en streaming/COPY PostgreSQL, mémoire bornée."""
+    return bulk_import_clients(file_path)
 
 
 # ============================================================
@@ -1656,12 +1435,50 @@ def build_db_cible_radicals_query(
     *,
     exclude_rupture_relation: bool = False,
 ):
-    """Construit la requête SQL des radical_compte d'une cible DB sans Pandas."""
+    """Construit un SELECT de clés exécutable dans le PostgreSQL interne.
+
+    - cible DB interne : filtre SQL natif ;
+    - cible fichier : population déjà matérialisée dans clients_cibles ;
+    - datamart externe : retourne None, car sa requête ne doit jamais être
+      injectée dans la base interne ni provoquer une copie implicite.
+    """
     cible = get_cible(id_cible)
     if not cible:
         raise ValueError(f"Cible introuvable : {id_cible}")
 
-    if str(cible.get("source") or "").strip() != "DB":
+    source = str(cible.get("source") or "").strip()
+    source_code = str(cible.get("data_source_code") or "internal").strip() or "internal"
+
+    if source == "Fichier plat":
+        params: List[Any] = [id_cible]
+        if exclude_rupture_relation:
+            return (
+                sql.SQL(
+                    """
+                    SELECT cc."Radical_compte" AS "Radical_compte"
+                    FROM clients_cibles AS cc
+                    JOIN clients AS c ON c.radical_compte = cc."Radical_compte"
+                    WHERE cc."ID_CIBLE" = %s
+                      AND LOWER(TRIM(COALESCE(c."STATUT_CLIENT"::text, ''))) <> LOWER(%s)
+                    """
+                ),
+                [id_cible, "Rupture de relation"],
+            )
+        return (
+            sql.SQL(
+                """
+                SELECT cc."Radical_compte" AS "Radical_compte"
+                FROM clients_cibles AS cc
+                WHERE cc."ID_CIBLE" = %s
+                """
+            ),
+            params,
+        )
+
+    if source != "DB":
+        raise ValueError(f"Source cible invalide : {source}")
+
+    if source_code != "internal":
         return None
 
     try:
@@ -1688,7 +1505,7 @@ def build_db_cible_radicals_query(
                 raw_values = payload.get("values") or []
                 values = [v for v in raw_values if v is not None and str(v).strip() != ""]
                 if values:
-                    placeholders = sql.SQL(", " ).join(sql.Placeholder() for _ in values)
+                    placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in values)
                     where_clauses.append(sql.SQL("c.{field} IN ({values})").format(field=field_identifier, values=placeholders))
                     params.extend(values)
             else:
@@ -1700,17 +1517,19 @@ def build_db_cible_radicals_query(
                     params.append(payload["max"])
 
         if objectif_campagne_ids:
-            placeholders = sql.SQL(", " ).join(sql.Placeholder() for _ in objectif_campagne_ids)
+            placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in objectif_campagne_ids)
             operator = sql.SQL("EXISTS") if objectif_mode == "atteint" else sql.SQL("NOT EXISTS")
             where_clauses.append(
-                sql.SQL("""
+                sql.SQL(
+                    """
                     {operator} (
                         SELECT 1 FROM clients_campagnes AS cc
                         WHERE cc."Radical_compte" = c.{radical}
                           AND cc."ID_CAMPAGNE" IN ({campaign_ids})
                           AND COALESCE(cc.conversion, 0) = 1
                     )
-                """).format(operator=operator, radical=sql.Identifier(radical_column), campaign_ids=placeholders)
+                    """
+                ).format(operator=operator, radical=sql.Identifier(radical_column), campaign_ids=placeholders)
             )
             params.extend(objectif_campagne_ids)
 
@@ -1721,15 +1540,18 @@ def build_db_cible_radicals_query(
                 statut_column = ""
             if statut_column:
                 where_clauses.append(
-                    sql.SQL("LOWER(TRIM(COALESCE(c.{field}::text, ''))) <> LOWER(%s)").format(field=sql.Identifier(statut_column))
+                    sql.SQL("LOWER(TRIM(COALESCE(c.{field}::text, ''))) <> LOWER(%s)").format(
+                        field=sql.Identifier(statut_column)
+                    )
                 )
                 params.append("Rupture de relation")
 
-        query = sql.SQL("SELECT c.{radical} AS \"Radical_compte\" FROM {table} AS c").format(
-            radical=sql.Identifier(radical_column), table=sql.Identifier(table)
+        query = sql.SQL('SELECT c.{radical} AS "Radical_compte" FROM {table} AS c').format(
+            radical=sql.Identifier(radical_column),
+            table=sql.Identifier(table),
         )
         if where_clauses:
-            query += sql.SQL(" WHERE " ) + sql.SQL(" AND " ).join(where_clauses)
+            query += sql.SQL(" WHERE ") + sql.SQL(" AND ").join(where_clauses)
 
     return query, params
 
@@ -1740,188 +1562,51 @@ def build_db_cible_radicals_query(
 def load_clients_df_for_cible(
     id_cible: str,
 ) -> pd.DataFrame:
-    """
-    Retourne la population complète d'une cible.
-    """
+    """Compatibilité historique pour les petits usages.
 
-    cible = get_cible(
-        id_cible
-    )
-
+    Ce helper ne doit plus être utilisé pour une population externe. Les cibles
+    fichier sont relues depuis clients_cibles/clients et non depuis le fichier.
+    """
+    cible = get_cible(id_cible)
     if not cible:
-        raise ValueError(
-            f"Cible introuvable : {id_cible}"
+        raise ValueError(f"Cible introuvable : {id_cible}")
+
+    source_code = str(cible.get("data_source_code") or "internal").strip() or "internal"
+    if source_code != "internal":
+        raise RuntimeError(
+            "Une population de datamart externe ne peut pas être matérialisée en DataFrame. "
+            "Utilisez le DataSourceAdapter.stream_target_keys()."
         )
 
-    source = str(
-        cible.get("source") or ""
-    ).strip()
+    built = build_db_cible_radicals_query(id_cible, exclude_rupture_relation=False)
+    if built is None:
+        raise RuntimeError("Cible non exécutable sur PostgreSQL interne.")
+    radical_select, params = built
+    with connection() as conn:
+        query = sql.SQL(
+            """
+            SELECT c.*
+            FROM clients AS c
+            JOIN ({target}) AS t ON t."Radical_compte" = c.radical_compte
+            """
+        ).format(target=radical_select)
+        with conn.cursor() as cur:
+            cur.execute(query, params or [])
+            rows = cur.fetchall()
+            columns = [desc.name for desc in (cur.description or [])]
+    return pd.DataFrame(rows, columns=columns)
 
-    if source == "DB":
-
-        filtre: Dict[
-            str,
-            Any,
-        ] = {}
-
-        try:
-            filtre_str = (
-                cible.get("filtre")
-                or "{}"
-            )
-
-            filtre = (
-                json.loads(
-                    filtre_str
-                )
-                if isinstance(
-                    filtre_str,
-                    str,
-                )
-                else (
-                    filtre_str
-                    or {}
-                )
-            )
-
-        except Exception:
-            filtre = {}
-
-        df = _query_clients_by_filtre(
-            filtre
-        )
-
-        columns_by_lower = {
-            str(column).lower(): column
-            for column in df.columns
-        }
-
-        if "radical_compte" in columns_by_lower:
-
-            actual = columns_by_lower[
-                "radical_compte"
-            ]
-
-            if actual != "radical_compte":
-                df = df.rename(
-                    columns={
-                        actual: "radical_compte"
-                    }
-                )
-
-            return df
-
-        raise ValueError(
-            "Base clients : colonne "
-            "'radical_compte' manquante"
-        )
-
-    if source == "Fichier plat":
-
-        path = str(
-            cible.get("chemin")
-            or ""
-        ).strip()
-
-        if not path:
-            raise ValueError(
-                "Chemin fichier plat "
-                "manquant dans la cible"
-            )
-
-        df = _read_flat_file(
-            path
-        )
-
-        columns_by_lower = {
-            str(column).lower(): column
-            for column in df.columns
-        }
-
-        if "radical_compte" in columns_by_lower:
-
-            actual = columns_by_lower[
-                "radical_compte"
-            ]
-
-            if actual != "radical_compte":
-                df = df.rename(
-                    columns={
-                        actual: "radical_compte"
-                    }
-                )
-
-            return df
-
-        raise ValueError(
-            "Fichier plat cible : colonne "
-            "'radical_compte' manquante"
-        )
-
-    raise ValueError(
-        f"Source cible invalide : {source}"
-    )
-# ============================================================
-# BOUNDED PREVIEW
-# ============================================================
 
 def preview_clients_for_cible(
     id_cible: str,
     limit: int = 200,
 ) -> tuple[pd.DataFrame, int]:
-    """Retourne un aperçu borné d'une cible sans charger une cible DB entière."""
+    """Preview bornée pour source interne, fichier matérialisé ou datamart externe."""
     cible = get_cible(id_cible)
     if not cible:
         raise ValueError(f"Cible introuvable : {id_cible}")
-
-    lim = max(1, min(int(limit or 200), 2000))
-    source = str(cible.get("source") or "").strip()
-
-    if source != "DB":
-        # Compatibilité des fichiers plats ; leur import streaming fait l'objet
-        # d'un lot séparé car les formats xls/json ne sont pas tous streamables.
-        df = load_clients_df_for_cible(id_cible)
-        return df.head(lim), int(len(df))
-
-    built = build_db_cible_radicals_query(
-        id_cible,
-        exclude_rupture_relation=False,
-    )
-    if built is None:
-        return pd.DataFrame(), 0
-
-    radical_select, params = built
-
-    with connection() as conn:
-        table = _detect_clients_table(conn)
-        radical_column = _detect_radical_column(conn, table)
-
-        count_query = sql.SQL(
-            "SELECT COUNT(*) FROM ({radical_select}) AS target"
-        ).format(radical_select=radical_select)
-
-        preview_query = sql.SQL(
-            """
-            SELECT c.*
-            FROM {table} AS c
-            JOIN ({radical_select}) AS target
-              ON target."Radical_compte" = c.{radical}
-            LIMIT %s
-            """
-        ).format(
-            table=sql.Identifier(table),
-            radical_select=radical_select,
-            radical=sql.Identifier(radical_column),
-        )
-
-        with conn.cursor() as cur:
-            cur.execute(count_query, params or [])
-            count_row = cur.fetchone()
-            total = int(count_row[0] or 0) if count_row else 0
-
-            cur.execute(preview_query, [*(params or []), lim])
-            rows = cur.fetchall()
-            columns = [description.name for description in (cur.description or [])]
-
-    return pd.DataFrame(rows, columns=columns), total
+    source_code = str(cible.get("data_source_code") or "internal").strip() or "internal"
+    adapter = get_data_source(source_code)
+    preview = adapter.preview_target(cible, limit=limit)
+    return pd.DataFrame(preview.rows), int(preview.total)
 
