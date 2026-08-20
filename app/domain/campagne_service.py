@@ -7,12 +7,16 @@ import re
 import unicodedata
 import time
 
-import pandas as pd
 
 from app.storage.runtime_db import RuntimeConnection, connect_runtime
 from app.core.workload_governor import heavy_workload
 from app.storage.postgres_db import table_exists, connection as pg_connection
-from app.storage.campagnes_store_sqlite import insert_campagne, update_etat
+from app.storage.campagnes_store_sqlite import (
+    insert_campagne,
+    update_etat,
+    get_campagne,
+    set_execution_status,
+)
 from app.storage.clients_campagnes_store_sqlite import (
     ensure_table as ensure_clients_campagnes_table,
     bulk_insert_clients_from_radical_select,
@@ -37,12 +41,8 @@ from app.domain.terrain_visit_webhook import cancel_visits_for_campaign, dispatc
 def _norm_str(x: Any) -> str:
     if x is None:
         return ""
-    try:
-        if pd.isna(x):  # type: ignore
-            return ""
-    except Exception:
-        pass
-    return str(x).strip()
+    value = str(x).strip()
+    return "" if value.lower() in {"none", "nan", "nat"} else value
 
 def _get_campaign_state(campagne: Dict[str, Any]) -> str:
     if not isinstance(campagne, dict):
@@ -111,45 +111,6 @@ def _validate_campaign_dates(date_debut: str, date_fin: str) -> Tuple[date, date
         )
 
     return d0, d1
-
-
-def _detect_radical_col(df: pd.DataFrame) -> str:
-    for c in ["Radical_compte", "radical_compte", "Radical compte", "radical compte"]:
-        if c in df.columns:
-            return c
-    for c in df.columns:
-        if "radical" in str(c).lower():
-            return c
-    return ""
-
-
-def _detect_statut_col(df: pd.DataFrame) -> str | None:
-    for c in ["STATUT_CLIENT", "statut_client", "Statut_client", "Statut Client", "statut client"]:
-        if c in df.columns:
-            return c
-    for c in df.columns:
-        if "statut" in str(c).lower():
-            return c
-    return None
-
-
-def _remove_rupture_relation_strict(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
-    """Exclure uniquement STATUT_CLIENT == 'Rupture de relation' (robuste)."""
-    col = _detect_statut_col(df)
-    if not col:
-        return df, 0
-
-    s = df[col].apply(_norm_cmp)
-    mask = s.eq(_norm_cmp("Rupture de relation"))
-    removed = int(mask.sum())
-    return df.loc[~mask].copy(), removed
-
-
-def _safe_json_loads(s: str, default):
-    try:
-        return json.loads(s)
-    except Exception:
-        return default
 
 
 def _find_root_bloc(liste_action: list) -> dict | None:
@@ -284,6 +245,59 @@ def _route_outputs_for_campaign_bulk(
 
 
 # =========================================================
+def _validate_campaign_creation_request(
+    *,
+    id_modele: str,
+    id_cible: str,
+    date_debut: str,
+    date_fin: str,
+    etat_campagne: str | None,
+    type_campagne: str | None,
+    visitMode: str | None,
+    visitPurpose: str | None,
+) -> Dict[str, Any]:
+    """Validation légère exécutée dans la requête HTTP avant mise en file."""
+    _validate_campaign_dates(date_debut, date_fin)
+    state = _norm_str(etat_campagne) or _infer_etat(date_debut, date_fin)
+    campaign_type = _norm_str(type_campagne) or "sans_action_terrain"
+    if campaign_type not in ("sans_action_terrain", "avec_action_terrain"):
+        raise ValueError("type_campagne invalide: sans_action_terrain | avec_action_terrain")
+
+    visit_mode = _norm_str(visitMode) or None
+    visit_purpose = _norm_str(visitPurpose) or None
+    if campaign_type == "avec_action_terrain":
+        if visit_mode not in ("A_DISTANCE", "TERRAIN"):
+            raise ValueError("visitMode invalide: A_DISTANCE | TERRAIN")
+        if visit_purpose not in ("COMMERCIAL", "RECOUVREMENT"):
+            raise ValueError("visitPurpose invalide: COMMERCIAL | RECOUVREMENT")
+    else:
+        visit_mode = None
+        visit_purpose = None
+
+    if not (get_modele_dict(id_modele) or {}):
+        raise ValueError(f"Modèle introuvable: {id_modele}")
+
+    cible_meta = get_cible(id_cible) or {}
+    if not cible_meta:
+        raise ValueError(f"Cible introuvable: {id_cible}")
+
+    # La source est une configuration d'infrastructure, jamais un choix métier.
+    # Dans l'instance actuelle, `clients` est le datamart canonique.
+    data_source_code = _norm_str(cible_meta.get("data_source_code")) or "internal"
+    if data_source_code != "internal":
+        raise RuntimeError(
+            "La source client configurée pour cette instance nécessite son adaptateur "
+            "d'orchestration de déploiement. Aucune population externe ne sera copiée localement."
+        )
+
+    return {
+        "etat_campagne": state,
+        "type_campagne": campaign_type,
+        "visitMode": visit_mode,
+        "visitPurpose": visit_purpose,
+    }
+
+
 def create_campagne(
     nom_campagne: str,
     id_modele: str,
@@ -296,47 +310,85 @@ def create_campagne(
     visitMode: str | None = None,
     visitPurpose: str | None = None,
 ) -> Dict[str, Any]:
-    """
-    Crée campagne + peuple clients_campagnes.
+    """Crée immédiatement la campagne puis délègue son peuplement à un job persistant.
 
-    Règles appliquées à la création :
-    - Exclure STATUT_CLIENT == 'Rupture de relation'
-    - Si la campagne démarre "En cours":
-        - si la première action est Mail => exécuter mail meta-loop immédiatement
-        - puis router initialement vers CRC/CC/DA via route_after_update (métier)
+    UX: la requête HTTP ne dépend plus du volume de la cible. Le travail massif est
+    repris par l'orchestrateur, avec priorité sur les batchs de maintenance.
     """
-
     started_at = time.perf_counter()
-    target_ready_at = started_at
-    clients_inserted_at = started_at
+    normalized = _validate_campaign_creation_request(
+        id_modele=id_modele,
+        id_cible=id_cible,
+        date_debut=date_debut,
+        date_fin=date_fin,
+        etat_campagne=etat_campagne,
+        type_campagne=type_campagne,
+        visitMode=visitMode,
+        visitPurpose=visitPurpose,
+    )
 
-    # 0) Validation des dates + état campagne
-    _validate_campaign_dates(date_debut, date_fin)
+    # L'insertion de la campagne ET du job est atomique dans la même transaction.
+    id_campagne = insert_campagne(
+        nom_campagne=nom_campagne,
+        id_modele=id_modele,
+        id_cible=id_cible,
+        date_debut=date_debut,
+        date_fin=date_fin,
+        etat_campagne=normalized["etat_campagne"],
+        description=description,
+        type_campagne=normalized["type_campagne"],
+        visitMode=normalized["visitMode"],
+        visitPurpose=normalized["visitPurpose"],
+        execution_status="preparing",
+        enqueue_prepare_job=True,
+    )
 
-    if not etat_campagne:
-        etat_campagne = _infer_etat(date_debut, date_fin)
-    
-    type_campagne = _norm_str(type_campagne) or "sans_action_terrain"
-    if type_campagne not in ("sans_action_terrain", "avec_action_terrain"):
-        raise ValueError("type_campagne invalide: sans_action_terrain | avec_action_terrain")
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+    return {
+        "id_campagne": id_campagne,
+        "nb_cible_initial": 0,
+        "nb_apres_filtrage": 0,
+        "nb_exclus_rupture": 0,
+        "nb_clients_insérés": 0,
+        "etat_campagne": normalized["etat_campagne"],
+        "type_campagne": normalized["type_campagne"],
+        "visitMode": normalized["visitMode"],
+        "visitPurpose": normalized["visitPurpose"],
+        "execution_status": "preparing",
+        "async": True,
+        "bulk_mode": "postgresql_native_async",
+        "timings_ms": {"enqueue": elapsed_ms, "total": elapsed_ms},
+    }
 
-    visitMode = _norm_str(visitMode) or None
-    visitPurpose = _norm_str(visitPurpose) or None
 
-    if type_campagne == "avec_action_terrain":
-        if visitMode not in ("A_DISTANCE", "TERRAIN"):
-            raise ValueError("visitMode invalide: A_DISTANCE | TERRAIN")
-        if visitPurpose not in ("COMMERCIAL", "RECOUVREMENT"):
-            raise ValueError("visitPurpose invalide: COMMERCIAL | RECOUVREMENT")
-    else:
-        visitMode = None
-        visitPurpose = None
+def prepare_campagne_execution(
+    id_campagne: str,
+    *,
+    progress=None,
+    cancel_check=None,
+) -> Dict[str, Any]:
+    """Prépare une campagne dans un worker sans matérialiser sa population en Python."""
+    started_at = time.perf_counter()
 
-    # 1) Charger modèle (nouveau schéma / ancien toléré)
-    modele = get_modele_dict(id_modele) or {}
+    def _progress(step: int, message: str) -> None:
+        if callable(progress):
+            progress(step, message)
+
+    def _cancelled() -> bool:
+        return bool(callable(cancel_check) and cancel_check())
+
+    campagne = get_campagne(id_campagne) or {}
+    if not campagne:
+        raise ValueError(f"Campagne introuvable: {id_campagne}")
+    if _get_campaign_state(campagne) == "Annulée" or _cancelled():
+        raise RuntimeError("job_cancelled")
+
+    set_execution_status(id_campagne, "processing", error=None, started=True)
+
+    # 1) Modèle et bloc initial.
+    modele = get_modele_dict(_norm_str(campagne.get("id_modele"))) or {}
     if not modele:
-        raise ValueError(f"Modèle introuvable: {id_modele}")
-
+        raise ValueError(f"Modèle introuvable: {campagne.get('id_modele')}")
     raw_liste = modele.get("liste_action") or "[]"
     if isinstance(raw_liste, list):
         liste_action = raw_liste
@@ -348,57 +400,20 @@ def create_campagne(
     if not isinstance(liste_action, list):
         liste_action = []
 
-    # graphe_json optionnel (pas utilisé ici)
-    raw_graph = modele.get("graphe_json") or "{}"
-    if isinstance(raw_graph, dict):
-        graphe_json = raw_graph
-    else:
-        try:
-            graphe_json = json.loads(str(raw_graph))
-        except Exception:
-            graphe_json = {}
-    _ = graphe_json  # gardé pour compat/cohérence
-
-    # 2) Root bloc (ID_Action/Canal/Action init)
     root = _find_root_bloc(liste_action) or {}
-
     id_action_init = _norm_str(root.get("ID")) or "1"
     canal_init = _norm_str(root.get("Canal")) or "Appel"
     action_init = _norm_str(root.get("Action")) or "Appeler"
-
-    # Si le root est un bloc objectif => on force Canal/Action "Objectif"
     from app.domain.workflow_nav import is_objective_bloc
     if is_objective_bloc(root):
         canal_init = "Objectif"
         action_init = "Objectif"
-
-    # Bloc courant initial (pour calcul arriv_eche)
     current_bloc_init = find_bloc_by_id(liste_action, id_action_init) or root
 
-    # 3) Population cible
-    cible_meta = get_cible(id_cible) or {}
-    data_source_code = _norm_str(cible_meta.get("data_source_code")) or "internal"
-    if data_source_code != "internal":
-        # IMPORTANT : ne jamais retomber sur le chemin historique qui copierait
-        # silencieusement une population externe dans clients_campagnes. Le lot
-        # Orchestrator/ResultSink prendra en charge ce mode sans duplication.
-        raise RuntimeError(
-            "L'exécution d'une campagne sur datamart externe nécessite le moteur "
-            "d'orchestration externe. La cible peut être comptée/prévisualisée, mais "
-            "sa population ne sera pas copiée dans la plateforme."
-        )
-
-    # Pour une cible DB interne OU fichier matérialisé, PostgreSQL reste la source de vérité de bout en bout:
-    # aucun DataFrame de centaines de milliers de lignes n'est matérialisé.
-    db_select_all = build_db_cible_radicals_query(
-        id_cible,
-        exclude_rupture_relation=False,
-    )
-    db_select_filtered = build_db_cible_radicals_query(
-        id_cible,
-        exclude_rupture_relation=True,
-    )
-
+    # 2) Requête de cible : le volume reste dans PostgreSQL.
+    id_cible = _norm_str(campagne.get("id_cible"))
+    db_select_all = build_db_cible_radicals_query(id_cible, exclude_rupture_relation=False)
+    db_select_filtered = build_db_cible_radicals_query(id_cible, exclude_rupture_relation=True)
     if db_select_all is None or db_select_filtered is None:
         raise RuntimeError("Aucun chemin SQL-native disponible pour cette cible.")
 
@@ -408,30 +423,24 @@ def create_campagne(
         nb_init = _count_radical_select(raw_query, raw_params)
         nb_apres = _count_radical_select(filtered_query, filtered_params)
     removed_rupture = max(0, nb_init - nb_apres)
-
-    target_ready_at = time.perf_counter()
-
-    # 4) Création campagne
-    ensure_clients_campagnes_table()
-    id_campagne = insert_campagne(
-        nom_campagne=nom_campagne,
-        id_modele=id_modele,
-        id_cible=id_cible,
-        date_debut=date_debut,
-        date_fin=date_fin,
-        etat_campagne=etat_campagne,
-        description=description,
-        type_campagne=type_campagne,
-        visitMode=visitMode,
-        visitPurpose=visitPurpose,
+    set_execution_status(
+        id_campagne,
+        "processing",
+        target_count_initial=nb_init,
+        target_count_eligible=nb_apres,
     )
+    _progress(1, "Cible évaluée")
+    if _cancelled():
+        raise RuntimeError("job_cancelled")
 
-    # 5) Valeurs initiales communes à tous les clients de la campagne.
+    # 3) Population historique de campagne en INSERT ... SELECT.
+    campagne = get_campagne(id_campagne) or campagne
+    expected_state = _get_campaign_state(campagne)
     today_iso = date.today().isoformat()
     row_template = {
-        "Nom_campagne": nom_campagne,
+        "Nom_campagne": _norm_str(campagne.get("nom_campagne")),
         "ID_CAMPAGNE": id_campagne,
-        "Etat_campagne": etat_campagne,
+        "Etat_campagne": expected_state,
         "NB_jour_campagne": 0,
         "ID_Action": id_action_init,
         "Canal": canal_init,
@@ -448,91 +457,79 @@ def create_campagne(
         "NB_da": 0,
         "NB_cc": 0,
         "NB_push": 0,
-        "date_debut_campagne": _norm_str(date_debut)[:10],
+        "date_debut_campagne": _norm_str(campagne.get("date_debut"))[:10],
         "nb_jour_debut_campagne": 0,
         "conversion": 0,
     }
-
-    # arriv_eche ne dépend ici que du bloc initial et de
-    # NB_jour_last_action=0: il est donc identique pour toute la population.
-    if _norm_str(etat_campagne) != "En cours":
+    if expected_state != "En cours":
         row_template["arriv_eche"] = "Non"
     else:
-        row_template["arriv_eche"] = arrive_echeance(
-            liste_action,
-            current_bloc_init,
-            row_template,
-        )
+        row_template["arriv_eche"] = arrive_echeance(liste_action, current_bloc_init, row_template)
 
-    # 6) Affectation massive SQL-native.
+    ensure_clients_campagnes_table()
     with heavy_workload("interactive"):
         inserted_clients = bulk_insert_clients_from_radical_select(
             filtered_query,
             filtered_params,
             row_template,
-            only_new=False,
+            # rend le job idempotent en cas de retry après crash.
+            only_new=True,
         )
+    set_execution_status(id_campagne, "processing", population_count=nb_apres)
+    _progress(2, "Population préparée")
 
-    clients_inserted_at = time.perf_counter()
+    # Si pause/annulation a eu lieu pendant l'INSERT massif, réaligner seulement
+    # dans ce cas de course exceptionnel, pas lors du chemin normal.
+    campagne_after = get_campagne(id_campagne) or campagne
+    current_state = _get_campaign_state(campagne_after)
+    if current_state != expected_state:
+        set_clients_etat_for_campagne(id_campagne, current_state)
+    if current_state == "Annulée" or _cancelled():
+        raise RuntimeError("job_cancelled")
 
-    # Les lignes viennent d'être insérées avec le bon état : pas de second
-    # UPDATE massif inutile ici.
-    output_counts = {"crc": 0, "cc": 0, "da": 0, "cc_terrain": 0, "da_terrain": 0}
+    # 4) Actions initiales uniquement si la campagne est réellement En cours.
     mail_summary = None
-
-    # 8) Si En cours: traitement Mail éventuel puis reconstruction bulk des outputs.
-    if etat_campagne == "En cours":
+    output_counts = {"crc": 0, "cc": 0, "da": 0, "cc_terrain": 0, "da_terrain": 0}
+    if current_state == "En cours":
         if _is_first_action_mail(canal_init, action_init):
             try:
                 from app.engine.traitement_mail_engine import run_mail_meta_loop
-                mail_summary = run_mail_meta_loop(max_passes=20, limit_rows_per_pass=500, id_campagne=id_campagne)
-            except Exception as e:
-                mail_summary = {"error": "mail_meta_loop_failed", "details": str(e)}
+                mail_summary = run_mail_meta_loop(
+                    max_passes=20,
+                    limit_rows_per_pass=500,
+                    id_campagne=id_campagne,
+                )
+            except Exception as exc:
+                mail_summary = {"error": "mail_meta_loop_failed", "details": str(exc)}
+        if _cancelled():
+            raise RuntimeError("job_cancelled")
+        output_counts = _route_outputs_for_campaign_bulk(
+            id_campagne,
+            _norm_str(campagne_after.get("type_campagne")) or "sans_action_terrain",
+        )
+    _progress(3, "Sorties préparées")
 
-        try:
-            output_counts = _route_outputs_for_campaign_bulk(
-                id_campagne,
-                type_campagne,
-            )
-        except Exception as e:
-            output_counts = {
-                "crc": 0,
-                "cc": 0,
-                "da": 0,
-                "cc_terrain": 0,
-                "da_terrain": 0,
-                "external_visit_sent": 0,
-                "external_visit_skipped": 0,
-                "external_visit_errors": 0,
-                "error": str(e),
-            }
-
-    finished_at = time.perf_counter()
-
+    set_execution_status(
+        id_campagne,
+        "ready",
+        error=None,
+        finished=True,
+        target_count_initial=nb_init,
+        target_count_eligible=nb_apres,
+        population_count=nb_apres,
+    )
+    _progress(4, "Campagne prête")
     return {
         "id_campagne": id_campagne,
         "nb_cible_initial": nb_init,
         "nb_apres_filtrage": nb_apres,
-        "nb_exclus_rupture": int(removed_rupture),
+        "nb_exclus_rupture": removed_rupture,
         "nb_clients_insérés": int(inserted_clients),
-        "etat_campagne": etat_campagne,
-        "type_campagne": type_campagne,
-        "id_action_initial": id_action_init,
-        "canal_initial": canal_init,
-        "action_initiale": action_init,
+        "etat_campagne": current_state,
         "mail_meta_loop": mail_summary,
         "output_insert": output_counts,
-        "bulk_mode": "postgresql_native",
-        "timings_ms": {
-            "target": int((target_ready_at - started_at) * 1000),
-            "insert_clients_campagnes": int((clients_inserted_at - target_ready_at) * 1000),
-            "routing_outputs": int((finished_at - clients_inserted_at) * 1000),
-            "total": int((finished_at - started_at) * 1000),
-        },
-        "visitMode": visitMode,
-        "visitPurpose": visitPurpose,
+        "timings_ms": {"total": int((time.perf_counter() - started_at) * 1000)},
     }
-
 
 def annuler_campagne(id_campagne: str) -> Dict[str, Any]:
     """
@@ -542,6 +539,9 @@ def annuler_campagne(id_campagne: str) -> Dict[str, Any]:
     - clients_campagnes.Etat_campagne = 'Annulée'
     - supprime les queues internes liées à la campagne
     """
+    from app.orchestration.job_store import request_cancel_for_campaign
+    request_cancel_for_campaign(id_campagne)
+
     external_cancel = {"ok": True, "skipped": True, "reason": "not_called"}
 
     try:
@@ -568,6 +568,7 @@ def annuler_campagne(id_campagne: str) -> Dict[str, Any]:
         }
 
     update_etat(id_campagne, "Annulée")
+    set_execution_status(id_campagne, "cancelled", error=None, finished=True)
     set_clients_etat_for_campagne(id_campagne, "Annulée")
 
     deleted = {
@@ -743,6 +744,22 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
     date_fin = _norm_str(c.get("date_fin"))
 
     new_etat = _infer_etat(date_debut, date_fin)
+
+    # Si le peuplement initial est encore pris en charge par l'orchestrateur,
+    # l'activation reste instantanée. Le worker lira ce nouvel état avant de
+    # préparer les sorties et évite ainsi deux traitements massifs concurrents.
+    execution_status = _norm_str(c.get("execution_status")) or "ready"
+    if execution_status in ("preparing", "processing"):
+        update_etat(id_campagne, new_etat)
+        return {
+            "id_campagne": id_campagne,
+            "ok": True,
+            "etat": new_etat,
+            "preparation_pending": True,
+            "new_clients_added_from_cibles": 0,
+            "mail_meta_loop": None,
+            "output_insert": {"crc": 0, "cc": 0, "da": 0, "cc_terrain": 0, "da_terrain": 0},
+        }
 
     # update etats
     update_etat(id_campagne, new_etat)

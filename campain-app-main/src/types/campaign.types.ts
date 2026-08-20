@@ -20,6 +20,7 @@ export interface CampaignAPIResponse {
   type_campagne?: TypeCampagne;
   visitMode?: VisitMode | null;
   visitPurpose?: VisitPurpose | null;
+  execution_status?: 'preparing' | 'processing' | 'ready' | 'failed' | 'cancelled';
   // Campaign metrics
   nb_attribues: number;
   nb_conversions: number;
@@ -72,6 +73,7 @@ export interface Campaign {
   type_campagne?: TypeCampagne;
   visitMode?: VisitMode | null;
   visitPurpose?: VisitPurpose | null;
+  execution_status?: 'preparing' | 'processing' | 'ready' | 'failed' | 'cancelled';
   // Campaign metrics
   metrics: {
     attribues: number;

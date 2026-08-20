@@ -261,6 +261,7 @@ def _list_active_campaigns(
         campagne
         for campagne in campagnes
         if _get_campaign_state(campagne) == "En cours"
+        and _norm_str(campagne.get("execution_status") or "ready") == "ready"
     ]
 
 

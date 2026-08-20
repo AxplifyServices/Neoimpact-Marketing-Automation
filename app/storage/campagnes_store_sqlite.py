@@ -22,6 +22,13 @@ _EXPECTED_COLUMNS = {
     "visitMode",
     "visitPurpose",
     "data_source_code",
+    "execution_status",
+    "execution_error",
+    "preparation_started_at",
+    "preparation_finished_at",
+    "target_count_initial",
+    "target_count_eligible",
+    "population_count",
 }
 
 
@@ -59,6 +66,8 @@ def insert_campagne(
     type_campagne: str = "sans_action_terrain",
     visitMode: Optional[str] = None,
     visitPurpose: Optional[str] = None,
+    execution_status: str = "ready",
+    enqueue_prepare_job: bool = False,
 ) -> str:
     ensure_table()
     today = date.today().isoformat()
@@ -85,8 +94,9 @@ def insert_campagne(
                     type_campagne,
                     "visitMode",
                     "visitPurpose",
-                    data_source_code
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    data_source_code,
+                    execution_status
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     id_campagne,
@@ -102,10 +112,79 @@ def insert_campagne(
                     visitMode,
                     visitPurpose,
                     data_source_code,
+                    str(execution_status or "ready").strip() or "ready",
                 ),
             )
+            if enqueue_prepare_job:
+                cur.execute(
+                    """
+                    INSERT INTO orchestration_jobs (
+                        job_key, job_type, priority, status, id_campagne, payload,
+                        attempts, max_attempts, available_at, updated_at
+                    )
+                    VALUES (%s, 'CAMPAIGN_PREPARE', 10, 'pending', %s, '{}'::jsonb,
+                            0, 3, NOW(), NOW())
+                    """,
+                    (f"campaign_prepare:{id_campagne}", id_campagne),
+                )
     return id_campagne
 
+
+
+def set_execution_status(
+    id_campagne: str,
+    status: str,
+    *,
+    error: Optional[str] = None,
+    started: bool = False,
+    finished: bool = False,
+    target_count_initial: Optional[int] = None,
+    target_count_eligible: Optional[int] = None,
+    population_count: Optional[int] = None,
+) -> None:
+    """Met à jour l'état technique backend d'une campagne sans toucher à son état métier."""
+    ensure_table()
+    assignments = ["execution_status = %s", "execution_error = %s"]
+    params: List[Any] = [str(status), None if error is None else str(error)[:4000]]
+    if started:
+        assignments.append("preparation_started_at = NOW()")
+        assignments.append("preparation_finished_at = NULL")
+    if finished:
+        assignments.append("preparation_finished_at = NOW()")
+    if target_count_initial is not None:
+        assignments.append("target_count_initial = %s")
+        params.append(max(0, int(target_count_initial)))
+    if target_count_eligible is not None:
+        assignments.append("target_count_eligible = %s")
+        params.append(max(0, int(target_count_eligible)))
+    if population_count is not None:
+        assignments.append("population_count = %s")
+        params.append(max(0, int(population_count)))
+    params.append(str(id_campagne))
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE campagnes SET {', '.join(assignments)} WHERE id_campagne = %s",
+                params,
+            )
+
+
+def get_execution_status(id_campagne: str) -> Optional[Dict[str, Any]]:
+    ensure_table()
+    with connection(dict_rows=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT execution_status, execution_error, preparation_started_at,
+                       preparation_finished_at, target_count_initial,
+                       target_count_eligible, population_count
+                FROM campagnes
+                WHERE id_campagne = %s
+                """,
+                (str(id_campagne),),
+            )
+            row = cur.fetchone()
+    return dict(row) if row else None
 
 def update_etat_campagne(id_campagne: str, new_etat: str) -> None:
     ensure_table()

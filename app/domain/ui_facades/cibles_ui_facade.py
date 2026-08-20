@@ -89,6 +89,10 @@ def list_cibles_for_ui() -> List[Dict[str, Any]]:
     ensure_cibles_table()
     items = list_cibles() or []
     for r in items:
+        if isinstance(r, dict):
+            # La source de données est une notion d'infrastructure et n'est
+            # jamais exposée au parcours utilisateur.
+            r.pop("data_source_code", None)
         if isinstance(r, dict) and _safe_str(r.get("source")) == "DB":
             r["filtre"] = _safe_json_load(r.get("filtre") or "{}", {})
         elif isinstance(r, dict):
@@ -104,6 +108,9 @@ def get_cible_for_ui(id_cible: str) -> Dict[str, Any] | None:
     row = get_cible(id_cible)
     if not isinstance(row, dict):
         return row
+
+    # La source physique est backend-only.
+    row.pop("data_source_code", None)
 
     # filtre parsé pour le front
     if _safe_str(row.get("source")) == "DB":

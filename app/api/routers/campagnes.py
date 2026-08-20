@@ -27,6 +27,7 @@ from app.domain.campagne_service import (
 )
 
 from app.domain.terrain_visit_webhook import dispatch_pending_visits_for_campaign, get_terrain_dispatch_status
+from app.orchestration.job_store import get_campaign_job_status, orchestration_stats
 
 logger = logging.getLogger(__name__)
 
@@ -256,7 +257,8 @@ def list_campagnes(
                     description,
                     type_campagne,
                     "visitMode",
-                    "visitPurpose"
+                    "visitPurpose",
+                    execution_status
                 FROM campagnes
                 {where_sql}
                 ORDER BY date_creation DESC NULLS LAST, id_campagne DESC
@@ -353,6 +355,32 @@ def activer_campagne(id_campagne: str):
     if not res.get("ok", True):
         raise HTTPException(status_code=400, detail=res.get("error", "Activation impossible"))
     return res
+
+
+@router.get("/campagnes/{id_campagne}/processing-status")
+def campaign_processing_status(id_campagne: str):
+    """Statut technique léger, utile au polling et au diagnostic sans exposer la source de données."""
+    with connection(dict_rows=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT execution_status, execution_error, target_count_initial,
+                       target_count_eligible, population_count,
+                       preparation_started_at, preparation_finished_at
+                FROM campagnes
+                WHERE id_campagne = %s
+                """,
+                (id_campagne,),
+            )
+            campaign = cur.fetchone()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campagne introuvable")
+    return {
+        "ok": True,
+        "campaign": dict(campaign),
+        "job": get_campaign_job_status(id_campagne),
+        "orchestration": orchestration_stats(),
+    }
 
 @router.post("/campagnes/{id_campagne}/dispatch-terrain")
 def dispatch_terrain_for_campaign(id_campagne: str):

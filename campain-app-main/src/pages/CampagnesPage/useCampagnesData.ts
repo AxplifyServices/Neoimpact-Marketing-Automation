@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { campaignsApi } from '@/lib/api/definitions/campaigns.api';
 import { getApiClient } from '@/lib/api/api-client';
@@ -57,6 +58,21 @@ export function useCampagnesData() {
   });
 
   const apiCampaigns = campaignsQuery.data?.pages.flatMap((page) => page.items) ?? [];
+  const hasPreparingCampaign = apiCampaigns.some(
+    (campaign) => campaign.execution_status === 'preparing' || campaign.execution_status === 'processing'
+  );
+
+  // Une campagne volumineuse est créée immédiatement puis préparée côté backend.
+  // On ne poll que pendant cette courte phase afin que les compteurs se mettent
+  // à jour sans refresh manuel et sans trafic permanent une fois le job terminé.
+  useEffect(() => {
+    if (!hasPreparingCampaign) return;
+    const timer = window.setInterval(() => {
+      void campaignsQuery.refetch();
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [hasPreparingCampaign, campaignsQuery.refetch]);
+
   const total = campaignsQuery.data?.pages[0]?.total ?? apiCampaigns.length;
   const modelsMap = invertChoices(modeleChoices);
   const ciblesMap = invertChoices(cibleChoices);
