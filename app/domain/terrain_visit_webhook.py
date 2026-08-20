@@ -73,7 +73,8 @@ def _load_row(conn: RuntimeConnection, id_campagne: str, radical_compte: str) ->
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT cc.*, c.visitMode, c.visitPurpose, c.id_modele, c.type_campagne, cl.*
+        SELECT cc.*, c.visitMode, c.visitPurpose, c.id_modele, c.type_campagne,
+               c.etat_campagne AS campagne_master_etat, cl.*
         FROM clients_campagnes cc
         LEFT JOIN campagnes c ON c.id_campagne = cc.ID_CAMPAGNE
         LEFT JOIN clients cl ON cl.radical_compte = cc.Radical_compte
@@ -206,7 +207,8 @@ def dispatch_pending_visits_for_campaign(id_campagne: str) -> Dict[str, Any]:
             FROM clients_campagnes cc
             INNER JOIN campagnes c ON c.id_campagne = cc.ID_CAMPAGNE
             WHERE cc.ID_CAMPAGNE = ?
-              AND COALESCE(cc.Etat_campagne, '') = 'En cours'
+              AND COALESCE(cc.row_status, 0) = 0
+              AND COALESCE(c.etat_campagne, '') = 'En cours'
               AND COALESCE(cc.conversion, 0) <> 1
               AND COALESCE(c.type_campagne, '') = 'avec_action_terrain'
               AND COALESCE(cc.Action, '') IN ('Directeur d''agence', 'Conseiller client')
@@ -345,7 +347,11 @@ def _send_claimed_dispatch(item: Dict[str, Any]) -> None:
         if not row:
             _complete_dispatch(int(item["id"]), status="error", payload={}, error="client_campagne_not_found")
             return
-        if int(row.get("conversion") or 0) == 1 or _norm_str(row.get("Etat_campagne")) != "En cours":
+        if (
+            int(row.get("conversion") or 0) == 1
+            or int(row.get("row_status") or 0) != 0
+            or _norm_str(row.get("campagne_master_etat")) != "En cours"
+        ):
             cur = conn.cursor()
             cur.execute(
                 "UPDATE external_visit_dispatches SET status='cancelled', error=NULL, updated_at=? WHERE id=?",

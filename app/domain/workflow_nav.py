@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 
@@ -22,6 +23,24 @@ def _norm_cmp(x: Any) -> str:
     s = "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
+
+def _days_since_iso(value: Any) -> Optional[int]:
+    """Calcule à la demande un compteur de jours à partir d'une date ISO.
+
+    Les anciens compteurs journaliers stockés dans ``clients_campagnes`` sont
+    conservés pour compatibilité, mais ne sont plus réécrits en masse chaque
+    jour. Le calcul dynamique garde exactement la sémantique métier tout en
+    supprimant des millions d'UPDATE quotidiens.
+    """
+    raw = _norm_str(value)[:10]
+    if not raw:
+        return None
+    try:
+        parsed = datetime.strptime(raw, "%Y-%m-%d").date()
+    except Exception:
+        return None
+    return max(0, (date.today() - parsed).days)
 
 
 # =========================================================
@@ -243,7 +262,8 @@ def _resolve_field_value(field_label: str, row_cc: Dict[str, Any], resultat_labe
         return resultat_label
 
     if fcmp in (_norm_cmp("NB jours depuis last action"), _norm_cmp("NB_jour_last_action")):
-        return row_cc.get("NB_jour_last_action")
+        derived = _days_since_iso(row_cc.get("Date_last_action"))
+        return derived if derived is not None else row_cc.get("NB_jour_last_action")
 
     if fcmp in (
         _norm_cmp("NB jours depuis début de la campagne"),
@@ -254,6 +274,9 @@ def _resolve_field_value(field_label: str, row_cc: Dict[str, Any], resultat_labe
         _norm_cmp("Jours depuis début campagne"),
         _norm_cmp("Jours depuis debut campagne"),
     ):
+        derived = _days_since_iso(row_cc.get("date_debut_campagne"))
+        if derived is not None:
+            return derived
         v = row_cc.get("nb_jour_debut_campagne")
         if v is None:
             v = row_cc.get("NB_jour_debut_campagne")
@@ -461,7 +484,9 @@ def arrive_echeance(
       - les conditions peuvent être dans Conditions et/ou ConditionsByParent[current_id]
     """
     # valeur actuelle
-    nb = row_cc.get("NB_jour_last_action")
+    nb = _days_since_iso(row_cc.get("Date_last_action"))
+    if nb is None:
+        nb = row_cc.get("NB_jour_last_action")
     try:
         nb_val = float(nb)
     except Exception:

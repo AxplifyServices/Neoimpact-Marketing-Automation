@@ -14,7 +14,6 @@ from app.storage.postgres_db import get_column_names, table_exists
 from app.storage.campagnes_store_sqlite import list_all_campagnes, update_etat
 from app.storage.clients_campagnes_store_sqlite import (
     ensure_table as ensure_clients_campagnes,
-    set_clients_etat_for_campagne,
 )
 
 from app.targeting.incremental import sync_target_changes_for_campaign
@@ -136,30 +135,13 @@ def _table_exists(
 
 
 def _recompute_nb_jour_debut_campagne(conn: RuntimeConnection) -> int:
-    """
-    Met à jour nb_jour_debut_campagne uniquement pour les campagnes En cours.
-    """
-    if (
-        not _cc_has_col(conn, "date_debut_campagne")
-        or not _cc_has_col(conn, "nb_jour_debut_campagne")
-    ):
-        return 0
+    """Compatibilité : compteur désormais calculé à la demande.
 
-    today_iso = date.today().isoformat()
-    cur = conn.cursor()
-    cur.execute(
-        f"""
-        UPDATE {CLIENTS_CAMPAGNES_TABLE}
-        SET nb_jour_debut_campagne = CASE
-            WHEN COALESCE(date_debut_campagne,'') = ''
-                THEN nb_jour_debut_campagne
-            ELSE (?::date - SUBSTRING(date_debut_campagne FROM 1 FOR 10)::date)
-        END
-        WHERE COALESCE(Etat_campagne,'') = 'En cours'
-        """,
-        (today_iso,),
-    )
-    return int(cur.rowcount or 0)
+    Avant la migration 013, le batch réécrivait toutes les lignes actives
+    chaque jour. ``workflow_nav`` dérive maintenant ce nombre depuis
+    ``date_debut_campagne`` ; aucun UPDATE global n'est nécessaire.
+    """
+    return 0
 
 
 def _resolve_clients_col(
@@ -310,8 +292,9 @@ def _cancel_if_rupture_relation(
         else "statut_client"
     )
 
-    set_parts: List[str] = []
+    set_parts: List[str] = ["row_status = 1"]
     if _cc_has_col(conn, "Etat_campagne"):
+        # Snapshot legacy conservé uniquement pour les anciens écrans/outils.
         set_parts.append("Etat_campagne = 'Canceled'")
     if _cc_has_col(conn, "Canal"):
         set_parts.append("Canal = 'Canceled'")
@@ -321,9 +304,7 @@ def _cancel_if_rupture_relation(
     if not set_parts:
         return 0
 
-    extra_where = ""
-    if _cc_has_col(conn, "Etat_campagne"):
-        extra_where = " AND COALESCE(Etat_campagne,'') <> 'Canceled' "
+    extra_where = " AND COALESCE(row_status,0) = 0 "
 
     cur = conn.cursor()
     cur.execute(
@@ -331,7 +312,6 @@ def _cancel_if_rupture_relation(
         UPDATE {CLIENTS_CAMPAGNES_TABLE}
         SET {', '.join(set_parts)}
         WHERE ID_CAMPAGNE = ?
-          AND COALESCE(Etat_campagne,'') IN ('En cours','Planifiée','En pause')
           {extra_where}
           AND EXISTS (
               SELECT 1
@@ -426,7 +406,6 @@ def _update_campaigns_status_from_dates(
         # Planifiée mais toute la fenêtre est déjà passée.
         if etat == "Planifiée" and date_fin < today:
             update_etat(id_campagne, "Terminée")
-            set_clients_etat_for_campagne(id_campagne, "Terminée")
 
             try:
                 _delete_outputs_for_campagne(id_campagne)
@@ -439,25 +418,10 @@ def _update_campaigns_status_from_dates(
         # Démarrage automatique.
         if etat == "Planifiée" and date_debut <= today <= date_fin:
             update_etat(id_campagne, "En cours")
-            set_clients_etat_for_campagne(id_campagne, "En cours")
 
-            conn = connect_runtime()
-            try:
-                cur = conn.cursor()
-                cur.execute(
-                    f"""
-                    UPDATE {CLIENTS_CAMPAGNES_TABLE}
-                    SET
-                        Date_last_action = ?,
-                        NB_jour_last_action = 0,
-                        nb_jour_debut_campagne = 0
-                    WHERE ID_CAMPAGNE = ?
-                    """,
-                    (today.isoformat(), id_campagne),
-                )
-                conn.commit()
-            finally:
-                conn.close()
+            # Aucun UPDATE massif des clients : pour une campagne planifiée,
+            # Date_last_action est initialisée à date_debut dès le peuplement et
+            # les compteurs de jours sont calculés dynamiquement.
 
             counts["to_en_cours"] += 1
             continue
@@ -473,7 +437,6 @@ def _update_campaigns_status_from_dates(
                 pass
 
             update_etat(id_campagne, "Terminée")
-            set_clients_etat_for_campagne(id_campagne, "Terminée")
 
             try:
                 _delete_outputs_for_campagne(id_campagne)
@@ -485,23 +448,9 @@ def _update_campaigns_status_from_dates(
     return counts
 
 
-def _recompute_nb_jour_last_action(
-    conn: RuntimeConnection,
-) -> int:
-    today_iso = date.today().isoformat()
-    cur = conn.cursor()
-    cur.execute(
-        f"""
-        UPDATE {CLIENTS_CAMPAGNES_TABLE}
-        SET NB_jour_last_action = CASE
-            WHEN COALESCE(Date_last_action,'') = '' THEN 0
-            ELSE (?::date - SUBSTRING(Date_last_action FROM 1 FOR 10)::date)
-        END
-        WHERE COALESCE(Etat_campagne,'') = 'En cours'
-        """,
-        (today_iso,),
-    )
-    return int(cur.rowcount or 0)
+def _recompute_nb_jour_last_action(conn: RuntimeConnection) -> int:
+    """Compatibilité : compteur désormais calculé depuis Date_last_action."""
+    return 0
 
 
 def _advance_en_attente_rows(
@@ -545,7 +494,7 @@ def _advance_en_attente_rows(
                   ON cl.radical_compte = cc.Radical_compte
                 WHERE cc.ID_CAMPAGNE = ?
                   AND cc.rowid > ?
-                  AND COALESCE(cc.Etat_campagne,'') = 'En cours'
+                  AND COALESCE(cc.row_status,0) = 0
                   AND COALESCE(cc.conversion, 0) <> 1
                   AND COALESCE(cc.Action,'') IN ('En attente', 'Objectif')
                 ORDER BY cc.rowid
@@ -691,19 +640,6 @@ def _update_arriv_eche_for_campaign(
     cur = conn.cursor()
     changed = 0
 
-    # Valeur par défaut, et conversion toujours terminale/non échue.
-    cur.execute(
-        f"""
-        UPDATE {CLIENTS_CAMPAGNES_TABLE}
-        SET arriv_eche = 'Non'
-        WHERE ID_CAMPAGNE = ?
-          AND COALESCE(Etat_campagne,'') = 'En cours'
-          AND COALESCE(arriv_eche,'') <> 'Non'
-        """,
-        (id_campagne,),
-    )
-    changed += int(cur.rowcount or 0)
-
     def _children(parent_id: str) -> List[Dict[str, Any]]:
         parent = find_bloc_by_id(liste_action, parent_id) or {}
         children = parent.get("Fils")
@@ -721,6 +657,12 @@ def _update_arriv_eche_for_campaign(
             if _norm_str(legacy) == parent_id:
                 out.append(b)
         return out
+
+    days_since_last_action = (
+        "CASE WHEN COALESCE(Date_last_action,'') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}' "
+        "THEN GREATEST(0, CURRENT_DATE - SUBSTRING(Date_last_action FROM 1 FOR 10)::date) "
+        "ELSE COALESCE(NB_jour_last_action,0) END"
+    )
 
     def _deadline_predicates(parent_id: str) -> tuple[List[str], List[Any]]:
         predicates: List[str] = []
@@ -754,19 +696,21 @@ def _update_arriv_eche_for_campaign(
 
                 # Condition satisfaite OU distance à la valeur <= 1.
                 if op in ("=", "=="):
-                    predicates.append("ABS(COALESCE(NB_jour_last_action,0)::double precision - ?) <= 1")
+                    predicates.append(f"ABS(({days_since_last_action})::double precision - ?) <= 1")
                     params.append(target)
                 elif op in ("!=", "<>"):
                     # != est vraie partout sauf exactement target, et le cas exact
                     # est malgré tout à distance 0 <= 1 : donc toujours Oui.
                     predicates.append("TRUE")
                 elif op in (">", ">="):
-                    predicates.append("COALESCE(NB_jour_last_action,0)::double precision >= ?")
+                    predicates.append(f"({days_since_last_action})::double precision >= ?")
                     params.append(target - 1.0)
                 elif op in ("<", "<="):
-                    predicates.append("COALESCE(NB_jour_last_action,0)::double precision <= ?")
+                    predicates.append(f"({days_since_last_action})::double precision <= ?")
                     params.append(target + 1.0)
         return predicates, params
+
+    tracked_deadline_blocks: List[str] = []
 
     for bloc in liste_action:
         if not isinstance(bloc, dict):
@@ -777,21 +721,60 @@ def _update_arriv_eche_for_campaign(
         predicates, params = _deadline_predicates(block_id)
         if not predicates:
             continue
+        tracked_deadline_blocks.append(block_id)
         where_deadline = " OR ".join(f"({p})" for p in predicates)
+        # Une seule écriture par ligne réellement changée. L'ancienne logique
+        # mettait d'abord toutes les échéances à Non puis remettait les mêmes
+        # lignes à Oui à chaque batch, générant inutilement du WAL.
+        cur.execute(
+            f"""
+            WITH desired AS (
+                SELECT id,
+                       CASE WHEN ({where_deadline}) THEN 'Oui' ELSE 'Non' END AS value
+                FROM {CLIENTS_CAMPAGNES_TABLE}
+                WHERE ID_CAMPAGNE = ?
+                  AND COALESCE(row_status,0) = 0
+                  AND COALESCE(conversion,0) <> 1
+                  AND ID_Action = ?
+            )
+            UPDATE {CLIENTS_CAMPAGNES_TABLE} AS cc
+            SET arriv_eche = desired.value
+            FROM desired
+            WHERE cc.id = desired.id
+              AND COALESCE(cc.arriv_eche,'') <> desired.value
+            """,
+            [*params, id_campagne, block_id],
+        )
+        changed += int(cur.rowcount or 0)
+
+    # Nettoie uniquement les anciens Oui devenus impossibles (bloc sans règle,
+    # conversion ou neutralisation). Les Oui encore valides ne sont pas touchés.
+    if tracked_deadline_blocks:
         cur.execute(
             f"""
             UPDATE {CLIENTS_CAMPAGNES_TABLE}
-            SET arriv_eche = 'Oui'
+            SET arriv_eche = 'Non'
             WHERE ID_CAMPAGNE = ?
-              AND COALESCE(Etat_campagne,'') = 'En cours'
-              AND COALESCE(conversion,0) <> 1
-              AND ID_Action = ?
-              AND ({where_deadline})
-              AND COALESCE(arriv_eche,'') <> 'Oui'
+              AND COALESCE(arriv_eche,'') = 'Oui'
+              AND (
+                  COALESCE(row_status,0) <> 0
+                  OR COALESCE(conversion,0) = 1
+                  OR NOT (ID_Action = ANY(?))
+              )
             """,
-            [id_campagne, block_id, *params],
+            (id_campagne, tracked_deadline_blocks),
         )
-        changed += int(cur.rowcount or 0)
+    else:
+        cur.execute(
+            f"""
+            UPDATE {CLIENTS_CAMPAGNES_TABLE}
+            SET arriv_eche = 'Non'
+            WHERE ID_CAMPAGNE = ?
+              AND COALESCE(arriv_eche,'') = 'Oui'
+            """,
+            (id_campagne,),
+        )
+    changed += int(cur.rowcount or 0)
 
     return int(changed)
 
@@ -918,21 +901,9 @@ def run_batch_manuel() -> Dict[str, Any]:
 
     conn = _connect()
     try:
-        # 1) Ruptures de relation.
-        for campagne in actives:
-            id_campagne = _norm_str(campagne.get("id_campagne"))
-            id_modele = _norm_str(campagne.get("id_modele"))
-            if not id_campagne or not id_modele:
-                continue
-
-            out["rupture_canceled"] += _cancel_if_rupture_relation(
-                conn,
-                id_campagne,
-            )
-
-        conn.commit()
-
-        # 2) Mise à jour temporelle des campagnes.
+        # 1) Mise à jour temporelle des campagnes. La détection des ruptures
+        # est désormais couplée aux deltas de targeting : plus de scan complet
+        # de chaque campagne à chaque batch.
         out["campagnes_status"] = _update_campaigns_status_from_dates(
             campagnes
         )
@@ -940,7 +911,7 @@ def run_batch_manuel() -> Dict[str, Any]:
         campagnes = list_all_campagnes()
         actives = _list_active_campaigns(campagnes)
 
-        # 3) Recalcul des compteurs.
+        # 2) Compteurs journaliers virtualisés (aucun UPDATE massif).
         out["nb_jour_last_action_updated"] = _recompute_nb_jour_last_action(
             conn
         )
@@ -950,7 +921,7 @@ def run_batch_manuel() -> Dict[str, Any]:
 
         conn.commit()
 
-        # 4) Progression En attente / Objectif.
+        # 3) Progression En attente / Objectif.
         for campagne in actives:
             id_campagne = _norm_str(campagne.get("id_campagne"))
             id_modele = _norm_str(campagne.get("id_modele"))
@@ -966,7 +937,7 @@ def run_batch_manuel() -> Dict[str, Any]:
 
         conn.commit()
 
-        # 5) Synchronisation insert-only des cibles.
+        # 4) Synchronisation incrémentale des cibles + ruptures.
         for campagne in actives:
             id_campagne = _norm_str(campagne.get("id_campagne"))
             if not id_campagne:
@@ -982,6 +953,7 @@ def run_batch_manuel() -> Dict[str, Any]:
                         wait_for_lock=True,
                     )
 
+                out["rupture_canceled"] += int(result.get("rupture_canceled") or 0)
                 detail = {
                     "id_campagne": id_campagne,
                     "etat": _get_campaign_state(campagne),

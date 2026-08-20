@@ -43,7 +43,7 @@ COLUMNS = [
 
 
 def ensure_table() -> None:
-    ensure_table_columns(TABLE_NAME, ["id", *COLUMNS])
+    ensure_table_columns(TABLE_NAME, ["id", *COLUMNS, "row_status"])
 
 
 def bulk_insert_clients(rows: Iterable[Dict[str, Any]]) -> int:
@@ -149,12 +149,14 @@ def bulk_insert_clients_from_radical_select(
     return int(count if count is not None and count >= 0 else 0)
 
 def set_clients_etat_for_campagne(id_campagne: str, etat: str) -> int:
+    """Compatibilité historique, sans UPDATE massif.
+
+    Depuis la migration 013, l'état global courant vit exclusivement dans
+    ``campagnes.etat_campagne``. Mettre en pause/activer/terminer une campagne
+    ne doit plus réécrire N millions de lignes dans ``clients_campagnes``.
+
+    ``clients_campagnes.Etat_campagne`` reste un snapshot legacy et
+    ``row_status`` porte uniquement la neutralisation individuelle d'un client.
+    """
     ensure_table()
-    with connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                'UPDATE clients_campagnes SET "Etat_campagne" = %s WHERE "ID_CAMPAGNE" = %s',
-                (etat, id_campagne),
-            )
-            count = cur.rowcount
-    return int(count if count is not None and count >= 0 else 0)
+    return 0

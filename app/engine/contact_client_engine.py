@@ -153,7 +153,7 @@ def _append_one_to_queue(queue_table: str, id_campagne: str, radical_compte: str
             "ID_Action": "COALESCE(cc.ID_Action,'')",
             "Canal": "COALESCE(cc.Canal,'')",
             "Action": "COALESCE(cc.Action,'')",
-            "Etat_campagne": "COALESCE(cc.Etat_campagne,'')",
+            "Etat_campagne": "COALESCE(c.etat_campagne,'')",
             # ⚠️ statut_* supprimés -> on ne les mappe plus
         }
 

@@ -20,7 +20,6 @@ from app.storage.campagnes_store_sqlite import (
 from app.storage.clients_campagnes_store_sqlite import (
     ensure_table as ensure_clients_campagnes_table,
     bulk_insert_clients_from_radical_select,
-    set_clients_etat_for_campagne,
 )
 from app.storage.cibles_store_sqlite import (
     build_db_cible_radicals_query,
@@ -434,6 +433,11 @@ def prepare_campagne_execution(
     campagne = get_campagne(id_campagne) or campagne
     expected_state = _get_campaign_state(campagne)
     today_iso = date.today().isoformat()
+    initial_action_date = (
+        _norm_str(campagne.get("date_debut"))[:10]
+        if expected_state == "Planifiée" and _norm_str(campagne.get("date_debut"))
+        else today_iso
+    )
     row_template = {
         "Nom_campagne": _norm_str(campagne.get("nom_campagne")),
         "ID_CAMPAGNE": id_campagne,
@@ -444,7 +448,7 @@ def prepare_campagne_execution(
         "Action": action_init,
         "Last_action": "",
         "Resultat_last_action": "",
-        "Date_last_action": today_iso,
+        "Date_last_action": initial_action_date,
         "NB_jour_last_action": 0,
         "NB_appel": 0,
         "NB_mail": 0,
@@ -476,12 +480,11 @@ def prepare_campagne_execution(
     initialize_campaign_state(id_campagne, target_sync_start_seq)
     _progress(2, "Population préparée")
 
-    # Si pause/annulation a eu lieu pendant l'INSERT massif, réaligner seulement
-    # dans ce cas de course exceptionnel, pas lors du chemin normal.
+    # Si pause/annulation a eu lieu pendant l'INSERT massif, l'état maître de
+    # ``campagnes`` suffit immédiatement : aucune réécriture de la population.
     campagne_after = get_campagne(id_campagne) or campagne
     current_state = _get_campaign_state(campagne_after)
-    if current_state != expected_state:
-        set_clients_etat_for_campagne(id_campagne, current_state)
+    # ``clients_campagnes.Etat_campagne`` est désormais un snapshot legacy.
     if current_state == "Annulée" or _cancelled():
         raise RuntimeError("job_cancelled")
 
@@ -537,7 +540,7 @@ def annuler_campagne(id_campagne: str) -> Dict[str, Any]:
     Annule une campagne:
     - supprime côté plateforme d'animation commerciale les tiers déjà affectés
     - campagne.etat = 'Annulée'
-    - clients_campagnes.Etat_campagne = 'Annulée'
+    - l'état global reste dans campagnes.etat_campagne (aucun UPDATE massif)
     - supprime les queues internes liées à la campagne
     """
     from app.orchestration.job_store import request_cancel_for_campaign
@@ -578,7 +581,6 @@ def annuler_campagne(id_campagne: str) -> Dict[str, Any]:
     cancel_for_campaign(id_campagne)
     update_etat(id_campagne, "Annulée")
     set_execution_status(id_campagne, "cancelled", error=None, finished=True)
-    set_clients_etat_for_campagne(id_campagne, "Annulée")
 
     deleted = {
         "crc": 0,
@@ -637,7 +639,7 @@ def mettre_en_pause_campagne(id_campagne: str) -> Dict[str, Any]:
     Met une campagne en pause:
     - supprime côté plateforme d'animation commerciale les tiers déjà affectés
     - campagne.etat = 'En pause'
-    - clients_campagnes.Etat_campagne = 'En pause'
+    - l'état global reste dans campagnes.etat_campagne (aucun UPDATE massif)
     - supprime les queues internes liées
 
     Point clé:
@@ -695,7 +697,6 @@ def mettre_en_pause_campagne(id_campagne: str) -> Dict[str, Any]:
             },
         }
 
-    set_clients_etat_for_campagne(id_campagne, "En pause")
 
     deleted = {
         "crc": 0,
@@ -731,7 +732,7 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
         today < debut  -> Planifiée
         debut..fin     -> En cours
         today > fin    -> Terminée
-    - met à jour campagne + clients_campagnes
+    - met à jour uniquement l'état maître de la campagne
     - si nouvel état = En cours:
         - supprime les anciennes queues de cette campagne
         - NEW: sync nouveaux clients depuis la cible (INSERT ONLY)
@@ -776,33 +777,9 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
 
     # update etats
     update_etat(id_campagne, new_etat)
-    set_clients_etat_for_campagne(id_campagne, new_etat)
 
-    if new_etat == "En cours":
-        conn = connect_runtime()
-
-        try:
-            cur = conn.cursor()
-
-            cur.execute(
-                """
-                UPDATE clients_campagnes
-                SET Date_last_action =
-                    (
-                        CURRENT_DATE
-                        - COALESCE(NB_jour_last_action, 0)
-                    )::text
-                WHERE ID_CAMPAGNE = ?
-                """,
-                (
-                    id_campagne,
-                ),
-            )
-
-            conn.commit()
-
-        finally:
-            conn.close()    
+    # Aucun UPDATE massif à l'activation : les compteurs de jours sont
+    # désormais dérivés des dates au moment de l'évaluation du workflow.
 
     # nettoyer queues associées avant décision
     deleted = {"crc": 0, "cc": 0, "da": 0, "cc_terrain": 0, "da_terrain": 0}
@@ -832,11 +809,6 @@ def activer_campagne(id_campagne: str) -> Dict[str, Any]:
                 )
             else:
                 new_clients_added = 0
-
-            set_clients_etat_for_campagne(
-                id_campagne,
-                new_etat,
-            )
 
         except Exception:
             new_clients_added = 0
@@ -969,6 +941,11 @@ def sync_new_clients_from_cible_for_campaign(
 
     current_bloc_init = find_bloc_by_id(liste_action, id_action_init) or root
     campagne_state = _get_campaign_state(c) or "En cours"
+    sync_action_date = (
+        _norm_str(c.get("date_debut") or "")[:10]
+        if campagne_state == "Planifiée" and _norm_str(c.get("date_debut") or "")
+        else date.today().isoformat()
+    )
 
     row_template = {
         "Nom_campagne": _norm_str(c.get("nom_campagne") or c.get("Nom_campagne")),
@@ -980,7 +957,7 @@ def sync_new_clients_from_cible_for_campaign(
         "Action": action_init,
         "Last_action": "",
         "Resultat_last_action": "",
-        "Date_last_action": date.today().isoformat(),
+        "Date_last_action": sync_action_date,
         "NB_jour_last_action": 0,
         "NB_appel": 0,
         "NB_mail": 0,

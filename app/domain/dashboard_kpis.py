@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
+import time
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Dict, List, Optional
@@ -30,6 +33,9 @@ CHANNEL_COLS = [
     ("Conseiller client", "NB_cc"),
     ("Push notification", "NB_push"),
 ]
+
+_FILTER_CACHE_LOCK = threading.Lock()
+_GESTIONNAIRES_CACHE: Dict[str, Any] = {"expires_at": 0.0, "values": []}
 
 
 # =========================================================
@@ -125,49 +131,104 @@ def get_dynamic_filter_options(
     selected_campagne_ids: Optional[List[str]] = None,
     selected_etats: Optional[List[str]] = None,
 ) -> Dict[str, List[Dict[str, str]]]:
+    """Filtres bidirectionnels directement en SQL, sans DataFrame.
+
+    La table ``campagnes`` est la source de vérité de l'état. Cette requête est
+    petite et indexable, même lorsque l'historique ``clients_campagnes`` atteint
+    des dizaines de millions de lignes.
     """
-    Filtres dynamiques bidirectionnels.
-    - Exclut Annulée.
-    - Ne propose que Terminée/En cours/En pause (si existe).
-    """
-    dfc = list_campagnes_df()
-    if dfc.empty:
-        return {"etats": [], "campagnes": []}
+    where = [
+        "COALESCE(etat_campagne,'') IN ('Planifiée','En cours','En pause','Terminée')"
+    ]
+    params: List[object] = []
 
-    dfc["etat_campagne"] = dfc["etat_campagne"].astype(str).str.strip()
-    dfc["id_campagne"] = dfc["id_campagne"].astype(str).str.strip()
-    dfc["nom_campagne"] = dfc.get("nom_campagne", "").astype(str).str.strip()
-
-    # base: exclude cancelled
-    dfc = dfc[dfc["etat_campagne"] != "Annulée"].copy()
-
-    # restrict to allowed
-    dfc = dfc[dfc["etat_campagne"].isin(list(ALLOWED_CAMPAGNE_ETATS))].copy()
-
-    # If etats selected => filter campaigns
     if selected_etats:
-        sel = [str(x).strip() for x in selected_etats if str(x).strip()]
-        if sel:
-            dfc = dfc[dfc["etat_campagne"].isin(sel)].copy()
+        values = [str(x).strip() for x in selected_etats if str(x).strip()]
+        if values:
+            placeholders = ",".join(["?"] * len(values))
+            where.append(f"etat_campagne IN ({placeholders})")
+            params.extend(values)
 
-    # If campaigns selected => filter etats
     if selected_campagne_ids:
-        selc = [str(x).strip() for x in selected_campagne_ids if str(x).strip()]
-        if selc:
-            dfc = dfc[dfc["id_campagne"].isin(selc)].copy()
+        values = [_clean_campagne_id(x) for x in selected_campagne_ids if _clean_campagne_id(x)]
+        if values:
+            placeholders = ",".join(["?"] * len(values))
+            where.append(f"id_campagne IN ({placeholders})")
+            params.extend(values)
 
-    etats = sorted(dfc["etat_campagne"].dropna().unique().tolist())
-    etats_out = [{"value": e, "label": e} for e in etats]
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"""
+            SELECT id_campagne, nom_campagne, etat_campagne
+            FROM {CAMPAGNES_TABLE}
+            WHERE {' AND '.join(where)}
+            ORDER BY etat_campagne, nom_campagne, id_campagne
+            """,
+            params,
+        )
+        rows = [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
 
-    campagnes = []
-    for _, r in dfc.sort_values(["etat_campagne", "nom_campagne", "id_campagne"]).iterrows():
-        cid = _norm_str(r.get("id_campagne"))
-        nom = _norm_str(r.get("nom_campagne"))
-        etat = _norm_str(r.get("etat_campagne"))
+    etats = sorted({_norm_str(row.get("etat_campagne")) for row in rows if _norm_str(row.get("etat_campagne"))})
+    etats_out = [{"value": value, "label": value} for value in etats]
+
+    campagnes: List[Dict[str, str]] = []
+    for row in rows:
+        cid = _norm_str(row.get("id_campagne"))
+        nom = _norm_str(row.get("nom_campagne"))
+        etat = _norm_str(row.get("etat_campagne"))
+        if not cid:
+            continue
         label = f"{nom} — {cid} ({etat})" if nom else f"{cid} ({etat})"
         campagnes.append({"id": cid, "label": label, "etat": etat, "nom": nom})
 
     return {"etats": etats_out, "campagnes": campagnes}
+
+
+def list_dashboard_gestionnaires() -> List[str]:
+    """Liste des gestionnaires du datamart avec cache TTL très court.
+
+    ``SELECT DISTINCT`` reste SQL-native et indexé, mais sur plusieurs millions
+    de clients il n'a aucune raison d'être rejoué à chaque montage du composant
+    frontend. Le cache ne contient que quelques chaînes et expire par défaut au
+    bout de 60 s ; aucune donnée client n'est mise en cache.
+    """
+    ttl_seconds = max(0, min(3600, int(os.getenv("DASHBOARD_FILTER_CACHE_SECONDS", "60") or "60")))
+    now = time.monotonic()
+
+    with _FILTER_CACHE_LOCK:
+        expires_at = float(_GESTIONNAIRES_CACHE.get("expires_at") or 0.0)
+        cached = list(_GESTIONNAIRES_CACHE.get("values") or [])
+        if ttl_seconds > 0 and cached and expires_at > now:
+            return cached
+
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"""
+            SELECT DISTINCT TRIM("Gestionnaire"::text) AS gestionnaire
+            FROM {CLIENTS_DIM_TABLE}
+            WHERE BTRIM(COALESCE("Gestionnaire"::text, '')) <> ''
+            ORDER BY gestionnaire
+            """
+        )
+        values = [
+            _norm_str(row.get("gestionnaire"))
+            for row in cur.fetchall()
+            if _norm_str(row.get("gestionnaire"))
+        ]
+    finally:
+        conn.close()
+
+    if ttl_seconds > 0:
+        with _FILTER_CACHE_LOCK:
+            _GESTIONNAIRES_CACHE["values"] = list(values)
+            _GESTIONNAIRES_CACHE["expires_at"] = time.monotonic() + ttl_seconds
+    return values
 
 
 # =========================================================
@@ -716,8 +777,13 @@ def _dashboard_where(
     filters: DashboardFilters,
     forced_campaign_id: Optional[str] = None,
 ) -> tuple[str, List[object]]:
+    """Construit les prédicats dashboard sur les sources de vérité.
+
+    - état campagne : table ``campagnes`` uniquement ;
+    - dates ISO : fonction immuable indexable ``neoimpact_iso_date`` ;
+    - gestionnaire : dimension courante de la table ``clients``.
+    """
     where = [
-        "COALESCE(c.etat_campagne,'') <> 'Annulée'",
         "COALESCE(c.etat_campagne,'') IN ('Planifiée','En cours','En pause','Terminée')",
     ]
     params: List[object] = []
@@ -743,15 +809,11 @@ def _dashboard_where(
             where.append(f"COALESCE(cl.Gestionnaire,'') IN ({placeholders})")
             params.extend(gestionnaires)
 
-    valid_last_action_date = (
-        "CASE WHEN COALESCE(cc.Date_last_action,'') ~ '^\\d{4}-\\d{2}-\\d{2}' "
-        "THEN SUBSTRING(cc.Date_last_action FROM 1 FOR 10)::date END"
-    )
     if filters.date_min is not None:
-        where.append(f"({valid_last_action_date}) >= ?::date")
+        where.append("neoimpact_iso_date(cc.Date_last_action) >= ?::date")
         params.append(filters.date_min.isoformat())
     if filters.date_max is not None:
-        where.append(f"({valid_last_action_date}) <= ?::date")
+        where.append("neoimpact_iso_date(cc.Date_last_action) <= ?::date")
         params.append(filters.date_max.isoformat())
 
     return " AND ".join(where), params
@@ -762,7 +824,7 @@ def _dashboard_from_sql(where_sql: str) -> str:
         FROM {CLIENTS_TABLE} cc
         LEFT JOIN {CLIENTS_DIM_TABLE} cl
           ON cl.radical_compte = cc.Radical_compte
-        LEFT JOIN {CAMPAGNES_TABLE} c
+        INNER JOIN {CAMPAGNES_TABLE} c
           ON c.id_campagne = cc.ID_CAMPAGNE
         WHERE {where_sql}
     """
@@ -797,9 +859,31 @@ def _dashboard_treated_expr(alias: str = "cc") -> str:
     return "(" + " + ".join(f"COALESCE({alias}.{col},0)" for col in cols) + ") > 0"
 
 
-def _dashboard_graph_payload_sql(
-    filters: DashboardFilters,
+def _load_modele_for_campagne(campagne_id: str) -> Optional[Dict[str, Any]]:
+    """Charge les petites métadonnées modèle sans passer par Pandas."""
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"""
+            SELECT m.id_modele, m.nom_modele, m.liste_action, m.graphe_json
+            FROM {CAMPAGNES_TABLE} c
+            JOIN {MODELES_TABLE} m ON m.id_modele = c.id_modele
+            WHERE c.id_campagne = ?
+            LIMIT 1
+            """,
+            (_clean_campagne_id(campagne_id),),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def _build_graph_payload_from_counts(
     campagne_id: str,
+    counts: Dict[str, int],
+    conv_counts: Dict[str, int],
 ) -> Dict[str, Any]:
     campagne_id = _clean_campagne_id(campagne_id)
     modele = _load_modele_for_campagne(campagne_id)
@@ -811,39 +895,6 @@ def _dashboard_graph_payload_sql(
             "nodes": [],
             "edges": [],
         }
-
-    where_sql, params = _dashboard_where(filters, forced_campaign_id=campagne_id)
-    base = _dashboard_from_sql(where_sql)
-
-    count_rows = _fetch_all_dict(
-        f"""
-        SELECT COALESCE(cc.ID_Action::text,'') AS node_id, COUNT(*) AS clients
-        {base}
-        GROUP BY COALESCE(cc.ID_Action::text,'')
-        """,
-        list(params),
-    )
-    counts = {
-        _norm_str(row.get("node_id")): int(row.get("clients") or 0)
-        for row in count_rows
-        if _norm_str(row.get("node_id"))
-    }
-
-    conv_rows = _fetch_all_dict(
-        f"""
-        SELECT COALESCE(cc.conversion_id_action::text,'') AS node_id, COUNT(*) AS clients
-        {base}
-          AND COALESCE(cc.conversion,0) = 1
-          AND COALESCE(cc.conversion_id_action::text,'') <> ''
-        GROUP BY COALESCE(cc.conversion_id_action::text,'')
-        """,
-        list(params),
-    )
-    conv_counts = {
-        _norm_str(row.get("node_id")): int(row.get("clients") or 0)
-        for row in conv_rows
-        if _norm_str(row.get("node_id"))
-    }
 
     graphe = _safe_json_loads(modele.get("graphe_json"), {"nodes": [], "edges": []})
     liste_action = _safe_json_loads(modele.get("liste_action"), [])
@@ -871,7 +922,6 @@ def _dashboard_graph_payload_sql(
             action = _norm_str(node.get("action") or node.get("Action")) or _norm_str(meta.get("action"))
             cnt = int(counts.get(nid, 0))
             conv = int(conv_counts.get(nid, 0))
-
             base_label = _norm_str(node.get("label"))
             if not base_label:
                 base_label = f"{nid} | {canal} | {action}".strip(" |")
@@ -880,7 +930,6 @@ def _dashboard_graph_payload_sql(
                     base_label = f"{base_label} | {canal}"
                 if action and action not in base_label:
                     base_label = f"{base_label} | {action}"
-
             nodes.append({
                 "id": nid,
                 "label": f"{base_label} ({cnt} | {conv} conv)",
@@ -929,23 +978,48 @@ def _dashboard_graph_payload_sql(
     }
 
 
-def _compute_dashboard_payload_sql(
+def _dashboard_grouping_rows(
     filters: DashboardFilters,
     *,
     forced_campaign_id: Optional[str] = None,
-    include_graph: bool = False,
-) -> Dict[str, Any]:
-    where_sql, params = _dashboard_where(filters, forced_campaign_id=forced_campaign_id)
-    base = _dashboard_from_sql(where_sql)
+) -> List[Dict[str, Any]]:
+    """Un seul scan de la population pour tous les KPI/séries du dashboard.
+
+    PostgreSQL calcule simultanément le global, les régions, le funnel, les
+    dates de traitement, les dates de conversion et les conversions par bloc
+    grâce à ``GROUPING SETS``. L'ancienne version exécutait 6 à 8 scans de la
+    même population par affichage.
+    """
+    where_sql, where_params = _dashboard_where(filters, forced_campaign_id=forced_campaign_id)
     treated = _dashboard_treated_expr("cc")
     conversion = "COALESCE(cc.conversion,0) = 1"
 
-    aggregate = _fetch_one_dict(
-        f"""
+    channel_exprs: List[str] = []
+    channel_params: List[object] = []
+    for index, (canal, column) in enumerate(CHANNEL_COLS):
+        channel_exprs.extend([
+            f"COALESCE(SUM(COALESCE(cc.{column},0)),0) AS tr_{index}",
+            f"COUNT(*) FILTER (WHERE COALESCE(cc.{column},0) > 0) AS contacted_{index}",
+            f"COUNT(*) FILTER (WHERE {conversion} AND COALESCE(cc.conversion_canal,'') = ?) AS conv_{index}",
+        ])
+        channel_params.append(canal)
+
+    base = _dashboard_from_sql(where_sql)
+    sql_text = f"""
         SELECT
-            COUNT(*) AS transmis,
-            COUNT(*) FILTER (WHERE {treated}) AS contactes_total,
-            COUNT(*) FILTER (WHERE {conversion}) AS closing_total,
+            GROUPING(COALESCE(NULLIF(TRIM(cl.Region::text),''), 'Inconnue')) AS g_region,
+            GROUPING(COALESCE(cc.ID_Action::text,'')) AS g_action,
+            GROUPING(neoimpact_iso_date(cc.Date_last_action)) AS g_last_day,
+            GROUPING(neoimpact_iso_date(cc.conversion_date)) AS g_conversion_day,
+            GROUPING(COALESCE(cc.conversion_id_action::text,'')) AS g_conversion_action,
+            COALESCE(NULLIF(TRIM(cl.Region::text),''), 'Inconnue') AS region,
+            COALESCE(cc.ID_Action::text,'') AS current_action,
+            neoimpact_iso_date(cc.Date_last_action) AS last_day,
+            neoimpact_iso_date(cc.conversion_date) AS conversion_day,
+            COALESCE(cc.conversion_id_action::text,'') AS conversion_action,
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE {treated}) AS treated_clients,
+            COUNT(*) FILTER (WHERE {conversion}) AS converted_clients,
             COALESCE(SUM(
                 COALESCE(cc.NB_appel,0)
               + COALESCE(cc.NB_mail,0)
@@ -954,20 +1028,72 @@ def _compute_dashboard_payload_sql(
               + COALESCE(cc.NB_da,0)
               + COALESCE(cc.NB_cc,0)
               + COALESCE(cc.NB_push,0)
-            ),0) AS traitements_total,
+            ),0) AS treatments_total,
             COUNT(*) FILTER (
                 WHERE LOWER(TRIM(COALESCE(cc.arriv_eche,''))) = 'oui'
-            ) AS arriv_eche
+            ) AS arriv_eche,
+            {", ".join(channel_exprs)}
         {base}
-        """,
-        list(params),
-    )
+        GROUP BY GROUPING SETS (
+            (),
+            (COALESCE(NULLIF(TRIM(cl.Region::text),''), 'Inconnue')),
+            (COALESCE(cc.ID_Action::text,'')),
+            (neoimpact_iso_date(cc.Date_last_action)),
+            (neoimpact_iso_date(cc.conversion_date)),
+            (COALESCE(cc.conversion_id_action::text,''))
+        )
+    """
 
-    transmis = int(aggregate.get("transmis") or 0)
-    contactes_total = int(aggregate.get("contactes_total") or 0)
-    closing_total = int(aggregate.get("closing_total") or 0)
-    traitements_total = int(aggregate.get("traitements_total") or 0)
-    arriv_eche = int(aggregate.get("arriv_eche") or 0)
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(sql_text, [*channel_params, *where_params])
+        return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def _compute_dashboard_payload_sql(
+    filters: DashboardFilters,
+    *,
+    forced_campaign_id: Optional[str] = None,
+    include_graph: bool = False,
+) -> Dict[str, Any]:
+    rows = _dashboard_grouping_rows(filters, forced_campaign_id=forced_campaign_id)
+
+    global_row: Dict[str, Any] = {}
+    region_rows: List[Dict[str, Any]] = []
+    action_rows: List[Dict[str, Any]] = []
+    last_day_rows: List[Dict[str, Any]] = []
+    conversion_day_rows: List[Dict[str, Any]] = []
+    conversion_action_rows: List[Dict[str, Any]] = []
+
+    for row in rows:
+        grouping = (
+            int(row.get("g_region") or 0),
+            int(row.get("g_action") or 0),
+            int(row.get("g_last_day") or 0),
+            int(row.get("g_conversion_day") or 0),
+            int(row.get("g_conversion_action") or 0),
+        )
+        if grouping == (1, 1, 1, 1, 1):
+            global_row = row
+        elif grouping == (0, 1, 1, 1, 1):
+            region_rows.append(row)
+        elif grouping == (1, 0, 1, 1, 1):
+            action_rows.append(row)
+        elif grouping == (1, 1, 0, 1, 1):
+            last_day_rows.append(row)
+        elif grouping == (1, 1, 1, 0, 1):
+            conversion_day_rows.append(row)
+        elif grouping == (1, 1, 1, 1, 0):
+            conversion_action_rows.append(row)
+
+    transmis = int(global_row.get("total") or 0)
+    contactes_total = int(global_row.get("treated_clients") or 0)
+    closing_total = int(global_row.get("converted_clients") or 0)
+    traitements_total = int(global_row.get("treatments_total") or 0)
+    arriv_eche = int(global_row.get("arriv_eche") or 0)
 
     kpis = {
         "transmis": transmis,
@@ -980,27 +1106,11 @@ def _compute_dashboard_payload_sql(
         "taux_closing_sur_traitements_total": float(closing_total / traitements_total) if traitements_total else 0.0,
     }
 
-    channel_exprs: List[str] = []
-    for index, (canal, column) in enumerate(CHANNEL_COLS):
-        channel_exprs.extend([
-            f"COALESCE(SUM(COALESCE(cc.{column},0)),0) AS tr_{index}",
-            f"COUNT(*) FILTER (WHERE COALESCE(cc.{column},0) > 0) AS contacted_{index}",
-            f"COUNT(*) FILTER (WHERE {conversion} AND COALESCE(cc.conversion_canal,'') = ?) AS conv_{index}",
-        ])
-
-    channel_params = list(params)
-    # Les placeholders des expressions SELECT apparaissent avant ceux du WHERE.
-    select_channel_params = [canal for canal, _ in CHANNEL_COLS]
-    channel_row = _fetch_one_dict(
-        "SELECT " + ", ".join(channel_exprs) + " " + base,
-        [*select_channel_params, *channel_params],
-    )
-
     by_channel: List[Dict[str, Any]] = []
     for index, (canal, _column) in enumerate(CHANNEL_COLS):
-        tr = int(channel_row.get(f"tr_{index}") or 0)
-        contacted = int(channel_row.get(f"contacted_{index}") or 0)
-        conv = int(channel_row.get(f"conv_{index}") or 0)
+        tr = int(global_row.get(f"tr_{index}") or 0)
+        contacted = int(global_row.get(f"contacted_{index}") or 0)
+        conv = int(global_row.get(f"conv_{index}") or 0)
         by_channel.append({
             "Canal": canal,
             "Traitements": tr,
@@ -1009,7 +1119,6 @@ def _compute_dashboard_payload_sql(
             "Clients_contactes": contacted,
             "Taux_contact_sur_transmis": float(contacted / transmis) if transmis else 0.0,
         })
-
     by_channel.append({
         "Canal": "Total",
         "Traitements": traitements_total,
@@ -1019,85 +1128,51 @@ def _compute_dashboard_payload_sql(
         "Taux_contact_sur_transmis": float(contactes_total / transmis) if transmis else 0.0,
     })
 
-    region_rows = _fetch_all_dict(
-        f"""
-        SELECT
-            COALESCE(NULLIF(TRIM(cl.Region::text),''), 'Inconnue') AS "Region",
-            COUNT(*) AS "Transmis",
-            COUNT(*) FILTER (WHERE {conversion}) AS "Closed"
-        {base}
-        GROUP BY COALESCE(NULLIF(TRIM(cl.Region::text),''), 'Inconnue')
-        ORDER BY COUNT(*) DESC
-        """,
-        list(params),
-    )
-    region_series = [{
-        "Region": _norm_str(row.get("Region")) or "Inconnue",
-        "Transmis": int(row.get("Transmis") or 0),
-        "Closed": int(row.get("Closed") or 0),
-    } for row in region_rows]
+    region_series = sorted(({
+        "Region": _norm_str(row.get("region")) or "Inconnue",
+        "Transmis": int(row.get("total") or 0),
+        "Closed": int(row.get("converted_clients") or 0),
+    } for row in region_rows), key=lambda x: x["Transmis"], reverse=True)
 
-    funnel_rows = _fetch_all_dict(
-        f"""
-        SELECT COALESCE(cc.ID_Action::text,'') AS "ID_Action", COUNT(*) AS "Clients"
-        {base}
-        GROUP BY COALESCE(cc.ID_Action::text,'')
-        """,
-        list(params),
-    )
     def _funnel_sort(row: Dict[str, Any]):
         value = _norm_str(row.get("ID_Action"))
         try:
             return (0, int(value))
         except Exception:
             return (1, value)
+
     funnel_series = sorted(({
-        "ID_Action": _norm_str(row.get("ID_Action")),
-        "Clients": int(row.get("Clients") or 0),
-    } for row in funnel_rows), key=_funnel_sort)
-
-    last_date_expr = (
-        "CASE WHEN COALESCE(cc.Date_last_action,'') ~ '^\\d{4}-\\d{2}-\\d{2}' "
-        "THEN SUBSTRING(cc.Date_last_action FROM 1 FOR 10)::date END"
-    )
-    conversion_date_expr = (
-        "CASE WHEN COALESCE(cc.conversion_date,'') ~ '^\\d{4}-\\d{2}-\\d{2}' "
-        "THEN SUBSTRING(cc.conversion_date FROM 1 FOR 10)::date END"
-    )
-
-    treatment_days = _fetch_all_dict(
-        f"""
-        SELECT ({last_date_expr}) AS day, COUNT(*) AS total
-        {base}
-          AND {treated}
-          AND ({last_date_expr}) IS NOT NULL
-        GROUP BY ({last_date_expr})
-        """,
-        list(params),
-    )
-    conversion_days = _fetch_all_dict(
-        f"""
-        SELECT ({conversion_date_expr}) AS day, COUNT(*) AS total
-        {base}
-          AND {conversion}
-          AND ({conversion_date_expr}) IS NOT NULL
-        GROUP BY ({conversion_date_expr})
-        """,
-        list(params),
-    )
+        "ID_Action": _norm_str(row.get("current_action")),
+        "Clients": int(row.get("total") or 0),
+    } for row in action_rows), key=_funnel_sort)
 
     daily_map: Dict[str, Dict[str, Any]] = {}
-    for row in treatment_days:
-        day = row.get("day")
+    for row in last_day_rows:
+        day = row.get("last_day")
+        if day is None:
+            continue
         key = day.isoformat() if hasattr(day, "isoformat") else _norm_str(day)
         if key:
-            daily_map.setdefault(key, {"Date": key, "Traitements": 0, "Closed": 0})["Traitements"] = int(row.get("total") or 0)
-    for row in conversion_days:
-        day = row.get("day")
+            daily_map.setdefault(key, {"Date": key, "Traitements": 0, "Closed": 0})["Traitements"] = int(row.get("treated_clients") or 0)
+    for row in conversion_day_rows:
+        day = row.get("conversion_day")
+        if day is None:
+            continue
         key = day.isoformat() if hasattr(day, "isoformat") else _norm_str(day)
         if key:
-            daily_map.setdefault(key, {"Date": key, "Traitements": 0, "Closed": 0})["Closed"] = int(row.get("total") or 0)
+            daily_map.setdefault(key, {"Date": key, "Traitements": 0, "Closed": 0})["Closed"] = int(row.get("converted_clients") or 0)
     daily_series = [daily_map[key] for key in sorted(daily_map)]
+
+    action_counts = {
+        _norm_str(row.get("current_action")): int(row.get("total") or 0)
+        for row in action_rows
+        if _norm_str(row.get("current_action"))
+    }
+    conversion_action_counts = {
+        _norm_str(row.get("conversion_action")): int(row.get("converted_clients") or 0)
+        for row in conversion_action_rows
+        if _norm_str(row.get("conversion_action"))
+    }
 
     payload: Dict[str, Any] = {
         "kpis": kpis,
@@ -1113,7 +1188,11 @@ def _compute_dashboard_payload_sql(
     if not graph_campaign_id and filters.campagne_ids and len(filters.campagne_ids) == 1:
         graph_campaign_id = _clean_campagne_id(filters.campagne_ids[0])
     if include_graph and graph_campaign_id:
-        payload["graph"] = _dashboard_graph_payload_sql(filters, graph_campaign_id)
+        payload["graph"] = _build_graph_payload_from_counts(
+            graph_campaign_id,
+            action_counts,
+            conversion_action_counts,
+        )
 
     return payload
 
@@ -1137,25 +1216,43 @@ def compute_dashboard_payload(filters: DashboardFilters, include_by_campaign: bo
     }
 
     if include_by_campaign and filters.campagne_ids:
+        clean_ids = [_clean_campagne_id(raw) for raw in filters.campagne_ids if _clean_campagne_id(raw)]
         by_campaign: Dict[str, Any] = {}
-        for raw in filters.campagne_ids:
-            cid = _clean_campagne_id(raw)
-            if not cid:
-                continue
-            sub_filters = DashboardFilters(
-                campagne_ids=[cid],
-                etats_campagne=filters.etats_campagne,
-                date_min=filters.date_min,
-                date_max=filters.date_max,
-                gestionnaires=filters.gestionnaires,
-            )
-            isolated = _compute_dashboard_payload_sql(
-                sub_filters,
-                forced_campaign_id=cid,
-                include_graph=True,
-            )
-            isolated["campagne_id"] = cid
+
+        # Cas courant du front : une seule campagne. Le payload global est déjà
+        # strictement isolé sur cette campagne, donc surtout ne pas relancer un
+        # second scan identique de plusieurs millions de lignes.
+        if len(clean_ids) == 1:
+            cid = clean_ids[0]
+            isolated = {
+                "campagne_id": cid,
+                "kpis": payload.get("kpis", {}),
+                "tables": payload.get("tables", {}),
+                "series": payload.get("series", {}),
+            }
+            if payload.get("graph") is not None:
+                isolated["graph"] = payload.get("graph")
             by_campaign[cid] = isolated
+        else:
+            # Endpoint legacy multi-campagnes : chaque campagne reste isolée.
+            # Le front principal utilise compute-summary et n'emprunte pas ce
+            # chemin coûteux.
+            for cid in clean_ids:
+                sub_filters = DashboardFilters(
+                    campagne_ids=[cid],
+                    etats_campagne=filters.etats_campagne,
+                    date_min=filters.date_min,
+                    date_max=filters.date_max,
+                    gestionnaires=filters.gestionnaires,
+                )
+                isolated = _compute_dashboard_payload_sql(
+                    sub_filters,
+                    forced_campaign_id=cid,
+                    include_graph=True,
+                )
+                isolated["campagne_id"] = cid
+                by_campaign[cid] = isolated
+
         payload["by_campaign"] = by_campaign
 
     return payload

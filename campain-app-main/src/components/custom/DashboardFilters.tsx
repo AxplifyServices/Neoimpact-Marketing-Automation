@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { MultiSelect } from '@/components/ui/multi-select';
 import { useApiQuery } from '@/lib/api/hooks/use-api-query';
-import { queuesApi } from '@/lib/api/definitions/queues.api';
+import { dashboardApi } from '@/lib/api/definitions/dashboard.api';
 import type { DashboardFiltersResponse, DashboardComputeRequest } from '@/types/dashboard.types';
 
 const STATE_OPTIONS = [
@@ -35,7 +35,7 @@ export default function DashboardFilters({
   // Fetch gestionnaires list
   const { data: gestionnairesData } = useApiQuery<{ gestionnaires: string[] }>(
     ['gestionnaires'],
-    queuesApi.getGestionnaires()
+    dashboardApi.getGestionnaires()
   );
 
   // Initialize selected states from API (options remain hardcoded)

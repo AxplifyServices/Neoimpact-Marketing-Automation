@@ -28,4 +28,10 @@ export const dashboardApi = {
     url: '/dashboard/campagnes-options',
     method: 'GET',
   }),
+  // Gestionnaires du datamart pour les filtres dashboard
+  getGestionnaires: (): ApiRequest => ({
+    url: '/dashboard/gestionnaires',
+    method: 'GET',
+  }),
+
 };

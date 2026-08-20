@@ -64,7 +64,7 @@ def fill_queue_from_clients_campagnes(table: str, id_campagne: str, action: str)
             COALESCE(cc."ID_Action", '') AS "ID_Action",
             COALESCE(cc."Canal", '') AS "Canal",
             COALESCE(cc."Action", '') AS "Action",
-            COALESCE(cc."Etat_campagne", '') AS "Etat_campagne",
+            COALESCE(c.etat_campagne, '') AS "Etat_campagne",
             '' AS statut_avant_campagne,
             '' AS statut_actuel
         FROM clients_campagnes AS cc
@@ -73,7 +73,8 @@ def fill_queue_from_clients_campagnes(table: str, id_campagne: str, action: str)
         LEFT JOIN campagnes AS c
             ON c.id_campagne = cc."ID_CAMPAGNE"
         WHERE cc."ID_CAMPAGNE" = %s
-          AND COALESCE(cc."Etat_campagne", '') = 'En cours'
+          AND COALESCE(cc.row_status, 0) = 0
+          AND COALESCE(c.etat_campagne, '') = 'En cours'
           AND COALESCE(cc.conversion, 0) <> 1
           AND COALESCE(cc."Action", '') = %s
         ON CONFLICT ("ID_CAMPAGNE", "Radical_compte")

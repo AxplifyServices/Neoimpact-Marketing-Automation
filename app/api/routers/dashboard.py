@@ -10,6 +10,7 @@ from app.domain.dashboard_kpis import (
     DashboardFilters,
     compute_dashboard_payload,
     get_dynamic_filter_options,
+    list_dashboard_gestionnaires,
 )
 
 router = APIRouter()
@@ -53,6 +54,11 @@ def campaign_options():
         selected_etats=None,
     )
     return {"options": out.get("campagnes", [])}
+
+
+@router.get("/dashboard/gestionnaires")
+def dashboard_gestionnaires():
+    return {"gestionnaires": list_dashboard_gestionnaires()}
 
 
 # =========================================================

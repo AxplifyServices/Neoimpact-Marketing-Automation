@@ -206,24 +206,26 @@ def _select_mail_candidates(
     params: List[Any] = []
     campaign_id = _norm_str(id_campagne)
     if campaign_id:
-        campaign_clause = "AND ID_CAMPAGNE = ?"
+        campaign_clause = "AND cc.ID_CAMPAGNE = ?"
         params.append(campaign_id)
 
     params.append(max(1, int(limit_rows)))
     cur.execute(
         f"""
         SELECT
-            rowid AS __rid,
-            ID_CAMPAGNE,
-            ID_Action,
-            Radical_compte
-        FROM {CLIENTS_CAMPAGNES_TABLE}
-        WHERE COALESCE(Etat_campagne,'') = 'En cours'
-          AND COALESCE(conversion, 0) <> 1
-          AND COALESCE(Canal,'') = 'Mail'
-          AND COALESCE(Action,'') IN ('Message', 'Mail')
+            cc.rowid AS __rid,
+            cc.ID_CAMPAGNE,
+            cc.ID_Action,
+            cc.Radical_compte
+        FROM {CLIENTS_CAMPAGNES_TABLE} cc
+        JOIN campagnes c ON c.id_campagne = cc.ID_CAMPAGNE
+        WHERE COALESCE(cc.row_status,0) = 0
+          AND COALESCE(c.etat_campagne,'') = 'En cours'
+          AND COALESCE(cc.conversion, 0) <> 1
+          AND COALESCE(cc.Canal,'') = 'Mail'
+          AND COALESCE(cc.Action,'') IN ('Message', 'Mail')
           {campaign_clause}
-        ORDER BY rowid
+        ORDER BY cc.rowid
         LIMIT ?
         """,
         params,
@@ -555,11 +557,13 @@ def prepare_mail_dispatch(
         cur = conn.cursor()
         cur.execute(
             f"""
-            SELECT rowid AS __rid, ID_CAMPAGNE, Radical_compte, ID_Action,
-                   Canal, Action, Etat_campagne, conversion,
-                   COALESCE(action_execution_seq,0) AS action_execution_seq
-            FROM {CLIENTS_CAMPAGNES_TABLE}
-            WHERE ID_CAMPAGNE=? AND Radical_compte=?
+            SELECT cc.rowid AS __rid, cc.ID_CAMPAGNE, cc.Radical_compte, cc.ID_Action,
+                   cc.Canal, cc.Action, cc.Etat_campagne, cc.row_status, cc.conversion,
+                   COALESCE(cc.action_execution_seq,0) AS action_execution_seq,
+                   COALESCE(c.etat_campagne,'') AS campagne_master_etat
+            FROM {CLIENTS_CAMPAGNES_TABLE} cc
+            JOIN campagnes c ON c.id_campagne = cc.ID_CAMPAGNE
+            WHERE cc.ID_CAMPAGNE=? AND cc.Radical_compte=?
             LIMIT 1
             """,
             (id_campagne, radical_compte),
@@ -568,7 +572,11 @@ def prepare_mail_dispatch(
         if not row:
             return {"ok": False, "obsolete": True, "reason": "client_campagne_not_found"}
         cc = dict(row)
-        if _norm_str(cc.get("Etat_campagne")) != "En cours" or int(cc.get("conversion") or 0) == 1:
+        if (
+            int(cc.get("row_status") or 0) != 0
+            or _norm_str(cc.get("campagne_master_etat")) != "En cours"
+            or int(cc.get("conversion") or 0) == 1
+        ):
             return {"ok": False, "obsolete": True, "reason": "campaign_or_client_inactive"}
         if _norm_str(cc.get("ID_Action")) != _norm_str(block_id) or int(cc.get("action_execution_seq") or 0) != int(occurrence):
             return {"ok": False, "obsolete": True, "reason": "workflow_moved"}

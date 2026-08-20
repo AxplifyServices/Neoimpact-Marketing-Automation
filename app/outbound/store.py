@@ -71,7 +71,7 @@ def enqueue_candidates(
                         COALESCE(cc.action_execution_seq, 0)::text || ':' || ? AS enqueue_key
                 FROM clients_campagnes cc
                 INNER JOIN campagnes c ON c.id_campagne = cc.\"ID_CAMPAGNE\"
-                WHERE COALESCE(cc.\"Etat_campagne\", '') = 'En cours'
+                WHERE COALESCE(cc.row_status, 0) = 0
                   AND COALESCE(cc.conversion, 0) <> 1
                   AND COALESCE(c.etat_campagne, '') = 'En cours'
                   AND COALESCE(c.execution_status, 'ready') = 'ready'
@@ -149,7 +149,7 @@ def enqueue_single(id_campagne: str, radical_compte: str, *, channel: str) -> Di
             FROM clients_campagnes cc
             JOIN campagnes c ON c.id_campagne=cc.\"ID_CAMPAGNE\"
             WHERE cc.\"ID_CAMPAGNE\"=? AND cc.\"Radical_compte\"=?
-              AND COALESCE(cc.\"Etat_campagne\",'')='En cours'
+              AND COALESCE(cc.row_status,0)=0
               AND COALESCE(c.etat_campagne,'')='En cours'
               AND COALESCE(cc.conversion,0)<>1
               AND {predicate}
@@ -239,7 +239,7 @@ def dispatch_is_current(item: Dict[str, Any]) -> bool:
               AND cc.\"Radical_compte\"=?
               AND cc.\"ID_Action\"=?
               AND COALESCE(cc.action_execution_seq,0)=?
-              AND COALESCE(cc.\"Etat_campagne\",'')='En cours'
+              AND COALESCE(cc.row_status,0)=0
               AND COALESCE(c.etat_campagne,'')='En cours'
               AND COALESCE(cc.conversion,0)<>1
             LIMIT 1
