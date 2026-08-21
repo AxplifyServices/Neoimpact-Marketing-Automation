@@ -248,7 +248,10 @@ def fetch_client_batch(
     after_radical: str | None,
     limit: int,
 ) -> list[dict[str, Any]]:
-    query = """
+    # Keyset pagination. On sépare explicitement le premier batch des suivants
+    # pour éviter le paramètre NULL non typé de PostgreSQL et conserver une
+    # requête simple pouvant utiliser l'index/PK sur clients.radical_compte.
+    base_query = """
         SELECT
             radical_compte,
             "Anciennete",
@@ -257,12 +260,29 @@ def fetch_client_batch(
             revenu_domicilie,
             "BP"
         FROM clients
-        WHERE (%s IS NULL OR radical_compte > %s)
-        ORDER BY radical_compte
-        LIMIT %s
     """
+
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(query, (after_radical, after_radical, limit))
+        if after_radical is None:
+            cur.execute(
+                base_query
+                + """
+                    ORDER BY radical_compte
+                    LIMIT %s
+                """,
+                (limit,),
+            )
+        else:
+            cur.execute(
+                base_query
+                + """
+                    WHERE radical_compte > %s
+                    ORDER BY radical_compte
+                    LIMIT %s
+                """,
+                (after_radical, limit),
+            )
+
         return [dict(row) for row in cur.fetchall()]
 
 
