@@ -10,10 +10,8 @@ export const routeLoaders = {
   createClient: () => import('@/pages/CreateClientPage'),
   viewClient: () => import('@/pages/ViewClientPage'),
   crc: () => import('@/pages/CRCPage'),
-  terrain: () => import('@/pages/TerrainPage'),
   historique: () => import('@/pages/HistoriquePage'),
   dashboard: () => import('@/pages/DashboardPage'),
-  support: () => import('@/pages/ContactSupportPage'),
 };
 
 type RouteLoaderKey = keyof typeof routeLoaders;
@@ -33,10 +31,8 @@ const pathToLoader: Array<[RegExp, RouteLoaderKey]> = [
   [/^\/clients\/[^/]+\/view/, 'viewClient'],
   [/^\/clients/, 'clients'],
   [/^\/crc/, 'crc'],
-  [/^\/terrain/, 'terrain'],
   [/^\/historique/, 'historique'],
   [/^\/dashboard/, 'dashboard'],
-  [/^\/support/, 'support'],
 ];
 
 const preloaded = new Set<RouteLoaderKey>();

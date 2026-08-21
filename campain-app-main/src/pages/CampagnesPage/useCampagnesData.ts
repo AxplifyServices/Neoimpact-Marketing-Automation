@@ -125,7 +125,11 @@ export function useCampagnesData(filters: CampaignListFilters = {}) {
       return {
         ...campaign,
         execution_status: live.execution_status ?? campaign.execution_status,
-        nb_attribues: live.population_count ?? campaign.nb_attribues,
+        nb_attribues:
+          (live.population_count && live.population_count > 0 ? live.population_count : null)
+          ?? (live.target_count_eligible && live.target_count_eligible > 0 ? live.target_count_eligible : null)
+          ?? (live.target_count_initial && live.target_count_initial > 0 ? live.target_count_initial : null)
+          ?? campaign.nb_attribues,
       };
     }),
     [baseCampaigns, processingById]
@@ -186,6 +190,8 @@ export function useCampagnesData(filters: CampaignListFilters = {}) {
       visitMode: apiCampaign.visitMode,
       visitPurpose: apiCampaign.visitPurpose,
       execution_status: apiCampaign.execution_status,
+      isPreparing: apiCampaign.execution_status === 'preparing' || apiCampaign.execution_status === 'processing',
+      preparationCount: apiCampaign.nb_attribues > 0 ? apiCampaign.nb_attribues : null,
       metrics: {
         attribues: apiCampaign.nb_attribues || 0,
         conversions: apiCampaign.nb_conversions || 0,

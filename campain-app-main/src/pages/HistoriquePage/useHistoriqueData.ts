@@ -63,3 +63,26 @@ export function useDistinctValues(tableName: string | null, columnName: string |
     isLoading,
   };
 }
+
+export type TableFilterKind = 'numeric' | 'categorical' | 'text';
+export interface TableFilterOptionMeta {
+  kind: TableFilterKind;
+  options?: string[];
+}
+
+interface FilterOptionsResponse {
+  table: string;
+  filters: Record<string, TableFilterOptionMeta>;
+}
+
+export function useTableFilterOptions(tableName: string | null, columnNames: string[]) {
+  const apiClient = getApiClient();
+  const stableColumns = columnNames.join('|');
+  const { data, isLoading } = useQuery<FilterOptionsResponse>({
+    queryKey: ['table-filter-options', tableName, stableColumns],
+    queryFn: () => apiClient.request<FilterOptionsResponse>(dataApi.getFilterOptions(tableName!, columnNames)),
+    enabled: !!tableName && columnNames.length > 0,
+    staleTime: 5 * 60_000,
+  });
+  return { filterOptions: data?.filters ?? {}, isLoading };
+}

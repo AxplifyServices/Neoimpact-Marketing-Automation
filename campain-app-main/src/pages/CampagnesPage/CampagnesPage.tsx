@@ -491,6 +491,12 @@ export default function CampagnesPage() {
                       <span className={`px-2 py-1 rounded-full text-xs font-medium ${campaign.statusColor}`}>
                         {campaign.status}
                       </span>
+                      {campaign.isPreparing && (
+                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200">
+                          <span className="h-1.5 w-1.5 rounded-full bg-blue-500 animate-pulse" />
+                          Préparation
+                        </span>
+                      )}
                       {campaign.type_campagne === 'avec_action_terrain' ? (
                         <>
                           <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200">
@@ -591,18 +597,22 @@ export default function CampagnesPage() {
                     <div className="flex justify-between items-center mb-1.5">
                       <span className="text-xs font-medium text-gray-600">Progression</span>
                       <span className="text-xs font-semibold text-gray-900">
-                        {campaign.metrics.attribues > 0
-                          ? `${Math.round((campaign.metrics.conversions / campaign.metrics.attribues) * 100)}%`
-                          : '0%'}
+                        {campaign.isPreparing
+                          ? 'Préparation…'
+                          : campaign.metrics.attribues > 0
+                            ? `${Math.round((campaign.metrics.conversions / campaign.metrics.attribues) * 100)}%`
+                            : '0%'}
                       </span>
                     </div>
                     <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
                       <div
-                        className="bg-gradient-to-r from-blue-500 to-blue-600 h-2 rounded-full transition-all duration-300"
+                        className={`bg-gradient-to-r from-blue-500 to-blue-600 h-2 rounded-full transition-all duration-300 ${campaign.isPreparing ? 'animate-pulse' : ''}`}
                         style={{
-                          width: campaign.metrics.attribues > 0
-                            ? `${(campaign.metrics.conversions / campaign.metrics.attribues) * 100}%`
-                            : '0%'
+                          width: campaign.isPreparing
+                            ? '35%'
+                            : campaign.metrics.attribues > 0
+                              ? `${(campaign.metrics.conversions / campaign.metrics.attribues) * 100}%`
+                              : '0%'
                         }}
                       />
                     </div>
@@ -615,8 +625,8 @@ export default function CampagnesPage() {
                         <Target className="w-4 h-4 text-blue-600" />
                       </div>
                       <div className="min-w-0">
-                        <div className="text-xs text-gray-500 truncate">Attribués</div>
-                        <div className="text-sm font-semibold text-gray-900">{campaign.metrics.attribues}</div>
+                        <div className="text-xs text-gray-500 truncate">{campaign.isPreparing ? 'Population cible' : 'Attribués'}</div>
+                        <div className="text-sm font-semibold text-gray-900">{campaign.isPreparing && !campaign.preparationCount ? '…' : campaign.metrics.attribues.toLocaleString('fr-FR')}</div>
                       </div>
                     </div>
                     <div className="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2">
@@ -625,7 +635,7 @@ export default function CampagnesPage() {
                       </div>
                       <div className="min-w-0">
                         <div className="text-xs text-gray-500 truncate">Contactés</div>
-                        <div className="text-sm font-semibold text-gray-900">{campaign.metrics.contactes}</div>
+                        <div className="text-sm font-semibold text-gray-900">{campaign.isPreparing ? '—' : campaign.metrics.contactes.toLocaleString('fr-FR')}</div>
                       </div>
                     </div>
                     <div className="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2">
@@ -634,7 +644,7 @@ export default function CampagnesPage() {
                       </div>
                       <div className="min-w-0">
                         <div className="text-xs text-gray-500 truncate">En traitement</div>
-                        <div className="text-sm font-semibold text-gray-900">{campaign.metrics.enTraitement}</div>
+                        <div className="text-sm font-semibold text-gray-900">{campaign.isPreparing ? '—' : campaign.metrics.enTraitement.toLocaleString('fr-FR')}</div>
                       </div>
                     </div>
                     <div className="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2">
@@ -643,7 +653,7 @@ export default function CampagnesPage() {
                       </div>
                       <div className="min-w-0">
                         <div className="text-xs text-gray-500 truncate">Conversions</div>
-                        <div className="text-sm font-semibold text-gray-900">{campaign.metrics.conversions}</div>
+                        <div className="text-sm font-semibold text-gray-900">{campaign.isPreparing ? '—' : campaign.metrics.conversions.toLocaleString('fr-FR')}</div>
                       </div>
                     </div>
                   </div>

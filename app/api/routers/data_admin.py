@@ -381,6 +381,10 @@ def _build_filters(filters: Optional[Dict[str, Any]]) -> Optional[Dict[str, db.C
             out[col] = db.ColumnFilter(numeric=db.NumericBounds(min=nb.get("min"), max=nb.get("max")))
         elif "categorical" in f:
             out[col] = db.ColumnFilter(categorical=[str(x) for x in (f["categorical"] or [])])
+        elif "text" in f:
+            value = str(f.get("text") or "").strip()
+            if value:
+                out[col] = db.ColumnFilter(text=value)
     return out
 
 
@@ -500,6 +504,49 @@ def table_columns(table: str):
 def distinct_values(table: str, col: str, limit: int = 250):
     # endpoint existant (compat)
     return {"table": table, "col": col, "values": db.get_distinct_values(table, col, limit=limit)}
+
+_FILTER_CATEGORY_NAMES = {
+    "region", "agence", "gestionnaire", "segment_actuel", "statut_client",
+    "qualite", "categorie", "canal", "canal_acquisition", "action",
+    "etat_campagne", "row_status", "conversion", "source", "type_campagne",
+    "visitmode", "visitpurpose", "resultat_last_action",
+}
+_FILTER_CATEGORY_TOKENS = ("statut", "status", "etat", "segment", "region", "agence", "gestionnaire", "canal", "categorie", "qualite", "conversion")
+
+def _filter_kind(column: str, sql_type: str) -> str:
+    name = str(column).strip().lower()
+    typ = str(sql_type or "").upper()
+    if any(k in typ for k in ("INT", "REAL", "NUM", "DEC", "DOUBLE", "FLOAT")):
+        return "numeric"
+    if column in CATEGORICAL_MAPPING or column.replace(" ", "_") in CATEGORICAL_MAPPING:
+        return "categorical"
+    if name in _FILTER_CATEGORY_NAMES or any(token in name for token in _FILTER_CATEGORY_TOKENS):
+        return "categorical"
+    return "text"
+
+@router.get("/data/tables/{table}/filter-options")
+def table_filter_options(
+    table: str,
+    columns: str = Query(default=""),
+    limit: int = Query(default=250, ge=1, le=1000),
+):
+    requested = [part.strip() for part in columns.split(",") if part.strip()]
+    schema = {str(name): str(typ) for name, typ in db.get_table_columns(table)}
+    names = requested or list(schema.keys())[:20]
+    out: Dict[str, Any] = {}
+    for name in names:
+        if name not in schema:
+            continue
+        kind = _filter_kind(name, schema[name])
+        item: Dict[str, Any] = {"kind": kind}
+        if kind == "categorical":
+            if table == "clients" and (name in CATEGORICAL_MAPPING or name.replace(" ", "_") in CATEGORICAL_MAPPING):
+                key = name if name in CATEGORICAL_MAPPING else name.replace(" ", "_")
+                item["options"] = CATEGORICAL_MAPPING[key][:limit]
+            else:
+                item["options"] = db.get_distinct_values(table, name, limit=limit)
+        out[name] = item
+    return {"table": table, "filters": out}
 
 @router.get("/data/tables/{table}/categorical-columns")
 def categorical_columns(table: str):

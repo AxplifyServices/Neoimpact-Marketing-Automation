@@ -37,6 +37,7 @@ class NumericBounds:
 class ColumnFilter:
     numeric: Optional[NumericBounds] = None
     categorical: Optional[List[str]] = None
+    text: Optional[str] = None
 
 
 def _to_float_or_none(value: Any) -> Optional[float]:
@@ -147,6 +148,9 @@ def read_table(
                     sql.SQL("CAST({} AS TEXT) IN ({})").format(col_id, placeholders)
                 )
                 params.extend(values)
+            if filt.text is not None and str(filt.text).strip():
+                where_parts.append(sql.SQL("CAST({} AS TEXT) ILIKE %s").format(col_id))
+                params.append(f"%{str(filt.text).strip()}%")
 
     query_columns = list(dict.fromkeys([*identity_columns, *selected_columns]))
     query = sql.SQL("SELECT {} FROM {}").format(
@@ -209,6 +213,9 @@ def count_table(
                     sql.SQL("CAST({} AS TEXT) IN ({})").format(col_id, placeholders)
                 )
                 params.extend(values)
+            if filt.text is not None and str(filt.text).strip():
+                where_parts.append(sql.SQL("CAST({} AS TEXT) ILIKE %s").format(col_id))
+                params.append(f"%{str(filt.text).strip()}%")
 
     query = sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(table))
     if where_parts:

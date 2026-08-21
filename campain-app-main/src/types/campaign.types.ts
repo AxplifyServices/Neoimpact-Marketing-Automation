@@ -21,6 +21,8 @@ export interface CampaignAPIResponse {
   visitMode?: VisitMode | null;
   visitPurpose?: VisitPurpose | null;
   execution_status?: 'preparing' | 'processing' | 'ready' | 'failed' | 'cancelled';
+  isPreparing?: boolean;
+  preparationCount?: number | null;
   // Campaign metrics
   nb_attribues: number;
   nb_conversions: number;
@@ -74,6 +76,8 @@ export interface Campaign {
   visitMode?: VisitMode | null;
   visitPurpose?: VisitPurpose | null;
   execution_status?: 'preparing' | 'processing' | 'ready' | 'failed' | 'cancelled';
+  isPreparing?: boolean;
+  preparationCount?: number | null;
   // Campaign metrics
   metrics: {
     attribues: number;

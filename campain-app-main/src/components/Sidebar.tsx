@@ -1,4 +1,4 @@
-import { Megaphone, Plus, Phone, History, LayoutDashboard, ChevronRight, Menu, X, FileText, Target, Users, MapPin } from 'lucide-react';
+import { Megaphone, Phone, History, LayoutDashboard, ChevronRight, Menu, X, FileText, Target, Users } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useState } from 'react';
 import { preloadRoute } from '@/lib/route-preload';
@@ -21,7 +21,6 @@ export default function Sidebar() {
     { icon: <Target size={16} />, label: 'Cibles', path: '/cibles' },
     { icon: <Users size={16} />, label: 'Clients', path: '/clients' },
     { icon: <Phone size={16} />, label: 'CRC', path: '/crc' },
-    { icon: <MapPin size={16} />, label: 'Terrain', path: '/terrain' },
     { icon: <History size={16} />, label: 'Historique', path: '/historique' },
     { icon: <LayoutDashboard size={16} />, label: 'Dashboard', path: '/dashboard' },
   ];
@@ -102,22 +101,6 @@ export default function Sidebar() {
           </div>
         </nav>
 
-        {/* Help Section */}
-        <div className="px-4 pb-6">
-          <div className="bg-blue-50 rounded-xl p-3">
-            <p className="text-gray-600 text-xs mb-2">Need help?</p>
-            <button
-              type="button"
-              onClick={() => handleNavigation('/support')}
-              onMouseEnter={() => preloadRoute('/support')}
-              onFocus={() => preloadRoute('/support')}
-              className="text-blue-600 font-semibold text-xs flex items-center gap-2 hover:gap-3 transition-all"
-            >
-              Contact Support
-              <span>→</span>
-            </button>
-          </div>
-        </div>
       </div>
     </>
   );

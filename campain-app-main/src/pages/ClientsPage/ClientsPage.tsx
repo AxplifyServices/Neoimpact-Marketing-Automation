@@ -8,19 +8,10 @@ import Toast from '../../components/Toast';
 import LoadingSpinner from '../../components/LoadingSpinner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { useTableColumns } from '../HistoriquePage/useHistoriqueData';
+import { TableColumnFilter, type TableColumnFilterValue } from '@/components/data-table/table-column-filter';
+import { useTableColumns, useTableFilterOptions } from '../HistoriquePage/useHistoriqueData';
 
-interface CategoricalFilter {
-  categorical?: string[];
-}
-
-interface NumericFilter {
-  numeric?: { min?: number; max?: number };
-}
-
-interface FilterConfig {
-  [column: string]: CategoricalFilter | NumericFilter;
-}
+type FilterConfig = Record<string, TableColumnFilterValue>;
 
 interface EditingCell {
   rowid: number;
@@ -71,6 +62,7 @@ export default function ClientsPage() {
     ? columns
     : (primaryColumns.length ? primaryColumns : columns.slice(0, 10));
   const visibleColumnNames = visibleColumns.map((column) => column.name);
+  const { filterOptions } = useTableFilterOptions(selectedTable, visibleColumnNames);
 
   const { data: tableData, isLoading: dataLoading } = useQuery<{ rows: any[]; total?: number; count?: number }>({
     queryKey: ['table-data', selectedTable, debouncedFilters, page, pageSize, visibleColumnNames],
@@ -94,8 +86,8 @@ export default function ClientsPage() {
       queryClient.invalidateQueries({ queryKey: ['table-data', selectedTable] });
       setToast({
         isOpen: true,
-        title: 'Succ\u00e8s',
-        message: 'Cellule mise \u00e0 jour avec succ\u00e8s',
+        title: 'Succès',
+        message: 'Cellule mise à jour avec succès',
         type: 'success',
       });
       setEditingCell(null);
@@ -104,7 +96,7 @@ export default function ClientsPage() {
       setToast({
         isOpen: true,
         title: 'Erreur',
-        message: 'Impossible de mettre \u00e0 jour la cellule',
+        message: 'Impossible de mettre à jour la cellule',
         type: 'error',
       });
     },
@@ -124,11 +116,13 @@ export default function ClientsPage() {
     setEditingCell(null);
   };
 
-  const handleFilterChange = (column: string, filterType: 'categorical' | 'numeric', value: any) => {
-    setFilters((prev) => ({
-      ...prev,
-      [column]: filterType === 'categorical' ? { categorical: value } : { numeric: value },
-    }));
+  const handleFilterChange = (column: string, value?: TableColumnFilterValue) => {
+    setFilters((prev) => {
+      const next = { ...prev };
+      if (value) next[column] = value;
+      else delete next[column];
+      return next;
+    });
     setPage(0);
   };
 
@@ -164,7 +158,7 @@ export default function ClientsPage() {
         <div className="flex items-center justify-between mb-8">
           <div>
             <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 mb-2">Clients</h1>
-            <p className="text-gray-600 text-xs sm:text-sm">G\u00e9rez vos clients et leurs informations</p>
+            <p className="text-gray-600 text-xs sm:text-sm">Gérez vos clients et leurs informations</p>
           </div>
           <div className="flex items-center gap-2">
             <Button
@@ -220,73 +214,16 @@ export default function ClientsPage() {
                   <thead className="bg-gray-50">
                     <tr className="border-b border-gray-200">
                       <th className="py-2 px-4" />
-                      {visibleColumns.map((column) => {
-                        const currentFilter = filters[column.name];
-                        const numericFilter = currentFilter as NumericFilter | undefined;
-                        const categoricalFilter = currentFilter as CategoricalFilter | undefined;
-                        const isNumeric = column.type === 'INTEGER' || column.type === 'REAL';
-                        return (
-                          <th key={`${column.name}-filter`} className="py-2 px-4 align-top">
-                            {isNumeric ? (
-                              <div className="flex flex-col gap-2">
-                                <Input
-                                  type="number"
-                                  placeholder="Min"
-                                  value={numericFilter?.numeric?.min ?? ''}
-                                  onChange={(e) => {
-                                    const minValue = e.target.value ? parseFloat(e.target.value) : undefined;
-                                    const maxValue = numericFilter?.numeric?.max;
-                                    if (minValue === undefined && maxValue === undefined) {
-                                      const nextFilters = { ...filters };
-                                      delete nextFilters[column.name];
-                                      setFilters(nextFilters);
-                                      setPage(0);
-                                      return;
-                                    }
-                                    handleFilterChange(column.name, 'numeric', { min: minValue, max: maxValue });
-                                  }}
-                                  className="h-8 text-xs"
-                                />
-                                <Input
-                                  type="number"
-                                  placeholder="Max"
-                                  value={numericFilter?.numeric?.max ?? ''}
-                                  onChange={(e) => {
-                                    const maxValue = e.target.value ? parseFloat(e.target.value) : undefined;
-                                    const minValue = numericFilter?.numeric?.min;
-                                    if (minValue === undefined && maxValue === undefined) {
-                                      const nextFilters = { ...filters };
-                                      delete nextFilters[column.name];
-                                      setFilters(nextFilters);
-                                      setPage(0);
-                                      return;
-                                    }
-                                    handleFilterChange(column.name, 'numeric', { min: minValue, max: maxValue });
-                                  }}
-                                  className="h-8 text-xs"
-                                />
-                              </div>
-                            ) : (
-                              <Input
-                                type="text"
-                                placeholder="Filtrer..."
-                                value={categoricalFilter?.categorical?.[0] ?? ''}
-                                onChange={(e) => {
-                                  if (e.target.value) {
-                                    handleFilterChange(column.name, 'categorical', [e.target.value]);
-                                  } else {
-                                    const nextFilters = { ...filters };
-                                    delete nextFilters[column.name];
-                                    setFilters(nextFilters);
-                                    setPage(0);
-                                  }
-                                }}
-                                className="h-8 text-xs"
-                              />
-                            )}
-                          </th>
-                        );
-                      })}
+                      {visibleColumns.map((column) => (
+                        <th key={`${column.name}-filter`} className="py-2 px-4 align-top">
+                          <TableColumnFilter
+                            columnName={column.name}
+                            meta={filterOptions[column.name]}
+                            value={filters[column.name]}
+                            onChange={(value) => handleFilterChange(column.name, value)}
+                          />
+                        </th>
+                      ))}
                     </tr>
                     <tr className="border-b border-gray-200">
                       <th className="text-left py-3 px-4 text-xs font-medium text-gray-500 uppercase">Actions</th>
@@ -304,7 +241,7 @@ export default function ClientsPage() {
                     {rows.length === 0 ? (
                       <tr>
                         <td colSpan={visibleColumns.length + 1} className="py-10 text-center text-sm text-gray-500">
-                          Aucune donn\u00e9e disponible
+                          Aucune donnée disponible
                         </td>
                       </tr>
                     ) : (
@@ -363,11 +300,11 @@ export default function ClientsPage() {
                 <div className="text-sm text-gray-600">
                   {total > 0 ? (
                     <>
-                      Affichage de {page * pageSize + 1} \u00e0 {Math.min((page + 1) * pageSize, total)}
-                      {tableData?.total !== undefined && ` sur ${total} r\u00e9sultats`}
+                      Affichage de {page * pageSize + 1} à {Math.min((page + 1) * pageSize, total)}
+                      {tableData?.total !== undefined && ` sur ${total} résultats`}
                     </>
                   ) : (
-                    'Aucun r\u00e9sultat'
+                    'Aucun résultat'
                   )}
                 </div>
                 <div className="flex items-center gap-3">
@@ -394,7 +331,7 @@ export default function ClientsPage() {
                     onClick={() => setPage((p) => Math.max(0, p - 1))}
                     disabled={page === 0}
                   >
-                    Pr\u00e9c\u00e9dent
+                    Précédent
                   </Button>
                   <span className="text-sm text-gray-600">
                     Page {page + 1}{tableData?.total !== undefined && ` / ${totalPages}`}
@@ -403,7 +340,7 @@ export default function ClientsPage() {
                     variant="outline"
                     size="sm"
                     onClick={() => setPage((p) => p + 1)}
-                    disabled={rows.length < pageSize}
+                    disabled={page + 1 >= totalPages}
                   >
                     Suivant
                   </Button>

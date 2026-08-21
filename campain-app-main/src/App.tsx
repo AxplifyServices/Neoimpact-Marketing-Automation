@@ -15,10 +15,8 @@ const ClientsPage = lazy(routeLoaders.clients);
 const CreateClientPage = lazy(routeLoaders.createClient);
 const ViewClientPage = lazy(routeLoaders.viewClient);
 const CRCPage = lazy(routeLoaders.crc);
-const TerrainPage = lazy(routeLoaders.terrain);
 const HistoriquePage = lazy(routeLoaders.historique);
 const DashboardPage = lazy(routeLoaders.dashboard);
-const ContactSupportPage = lazy(routeLoaders.support);
 
 function RouteFallback() {
   return (
@@ -51,10 +49,10 @@ function App() {
               <Route path="/clients/:id/edit" element={<CreateClientPage />} />
               <Route path="/clients/:id/view" element={<ViewClientPage />} />
               <Route path="/crc" element={<CRCPage />} />
-              <Route path="/terrain" element={<TerrainPage />} />
               <Route path="/historique" element={<HistoriquePage />} />
               <Route path="/dashboard" element={<DashboardPage />} />
-              <Route path="/support" element={<ContactSupportPage />} />
+              <Route path="/terrain" element={<Navigate to="/campagnes" replace />} />
+              <Route path="/support" element={<Navigate to="/campagnes" replace />} />
             </Routes>
           </Suspense>
         </main>

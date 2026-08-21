@@ -1,5 +1,5 @@
 import { Database, Edit2, Save, X, RefreshCw } from 'lucide-react';
-import { useHistoriqueData, useTableColumns } from './useHistoriqueData';
+import { useHistoriqueData, useTableColumns, useTableFilterOptions } from './useHistoriqueData';
 import { useState, useEffect } from 'react';
 import { keepPreviousData, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { dataApi } from '@/lib/api/definitions/data.api';
@@ -8,18 +8,9 @@ import Toast from '../../components/Toast';
 import LoadingSpinner from '../../components/LoadingSpinner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { TableColumnFilter, type TableColumnFilterValue } from '@/components/data-table/table-column-filter';
 
-interface CategoricalFilter {
-  categorical?: string[];
-}
-
-interface NumericFilter {
-  numeric?: { min?: number; max?: number };
-}
-
-interface FilterConfig {
-  [column: string]: CategoricalFilter | NumericFilter;
-}
+type FilterConfig = Record<string, TableColumnFilterValue>;
 
 interface EditingCell {
   rowid: number;
@@ -51,6 +42,7 @@ export default function HistoriquePage() {
   const { columns, isLoading: columnsLoading } = useTableColumns(selectedTable);
   const visibleColumns = showAllColumns ? columns : columns.slice(0, 12);
   const visibleColumnNames = visibleColumns.map((column) => column.name);
+  const { filterOptions } = useTableFilterOptions(selectedTable, visibleColumnNames);
 
   // Fetch table data
   const { data: tableData, isLoading: dataLoading } = useQuery<{ rows: any[]; total?: number; count?: number }>({
@@ -114,11 +106,13 @@ export default function HistoriquePage() {
     setEditingCell(null);
   };
 
-  const handleFilterChange = (column: string, filterType: 'categorical' | 'numeric', value: any) => {
-    setFilters((prev) => ({
-      ...prev,
-      [column]: filterType === 'categorical' ? { categorical: value } : { numeric: value },
-    }));
+  const handleFilterChange = (column: string, value?: TableColumnFilterValue) => {
+    setFilters((prev) => {
+      const next = { ...prev };
+      if (value) next[column] = value;
+      else delete next[column];
+      return next;
+    });
     setPage(0);
   };
 
@@ -236,73 +230,16 @@ export default function HistoriquePage() {
                   <thead className="bg-gray-50">
                     <tr className="border-b border-gray-200">
                       <th className="py-2 px-4" />
-                      {visibleColumns.map((column) => {
-                        const currentFilter = filters[column.name];
-                        const numericFilter = currentFilter as NumericFilter | undefined;
-                        const categoricalFilter = currentFilter as CategoricalFilter | undefined;
-                        const isNumeric = column.type === 'INTEGER' || column.type === 'REAL';
-                        return (
-                          <th key={`${column.name}-filter`} className="py-2 px-4 align-top">
-                            {isNumeric ? (
-                              <div className="flex flex-col gap-2">
-                                <Input
-                                  type="number"
-                                  placeholder="Min"
-                                  value={numericFilter?.numeric?.min ?? ''}
-                                  onChange={(e) => {
-                                    const minValue = e.target.value ? parseFloat(e.target.value) : undefined;
-                                    const maxValue = numericFilter?.numeric?.max;
-                                    if (minValue === undefined && maxValue === undefined) {
-                                      const nextFilters = { ...filters };
-                                      delete nextFilters[column.name];
-                                      setFilters(nextFilters);
-                                      setPage(0);
-                                      return;
-                                    }
-                                    handleFilterChange(column.name, 'numeric', { min: minValue, max: maxValue });
-                                  }}
-                                  className="h-8 text-xs"
-                                />
-                                <Input
-                                  type="number"
-                                  placeholder="Max"
-                                  value={numericFilter?.numeric?.max ?? ''}
-                                  onChange={(e) => {
-                                    const maxValue = e.target.value ? parseFloat(e.target.value) : undefined;
-                                    const minValue = numericFilter?.numeric?.min;
-                                    if (minValue === undefined && maxValue === undefined) {
-                                      const nextFilters = { ...filters };
-                                      delete nextFilters[column.name];
-                                      setFilters(nextFilters);
-                                      setPage(0);
-                                      return;
-                                    }
-                                    handleFilterChange(column.name, 'numeric', { min: minValue, max: maxValue });
-                                  }}
-                                  className="h-8 text-xs"
-                                />
-                              </div>
-                            ) : (
-                              <Input
-                                type="text"
-                                placeholder="Filtrer..."
-                                value={categoricalFilter?.categorical?.[0] ?? ''}
-                                onChange={(e) => {
-                                  if (e.target.value) {
-                                    handleFilterChange(column.name, 'categorical', [e.target.value]);
-                                  } else {
-                                    const nextFilters = { ...filters };
-                                    delete nextFilters[column.name];
-                                    setFilters(nextFilters);
-                                    setPage(0);
-                                  }
-                                }}
-                                className="h-8 text-xs"
-                              />
-                            )}
-                          </th>
-                        );
-                      })}
+                      {visibleColumns.map((column) => (
+                        <th key={`${column.name}-filter`} className="py-2 px-4 align-top">
+                          <TableColumnFilter
+                            columnName={column.name}
+                            meta={filterOptions[column.name]}
+                            value={filters[column.name]}
+                            onChange={(value) => handleFilterChange(column.name, value)}
+                          />
+                        </th>
+                      ))}
                     </tr>
                     <tr className="border-b border-gray-200">
                       <th className="text-left py-3 px-4 text-xs font-medium text-gray-500 uppercase">Actions</th>
@@ -417,7 +354,7 @@ export default function HistoriquePage() {
                     variant="outline"
                     size="sm"
                     onClick={() => setPage((p) => p + 1)}
-                    disabled={rows.length < pageSize}
+                    disabled={page + 1 >= totalPages}
                   >
                     Suivant
                   </Button>

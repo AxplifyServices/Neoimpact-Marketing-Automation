@@ -20,10 +20,17 @@ export const dataApi = {
     params: { col },
   }),
 
+  // Filter capabilities/options for visible columns only.
+  getFilterOptions: (table: string, columns: string[]): ApiRequest => ({
+    url: `/data/tables/${table}/filter-options`,
+    method: 'GET',
+    params: { columns: columns.join(',') },
+  }),
+
   // Read table data with filters
   readTableData: (data: {
     table: string;
-    filters?: Record<string, { categorical?: string[]; numeric?: { min?: number; max?: number } }>;
+    filters?: Record<string, { categorical?: string[]; numeric?: { min?: number; max?: number }; text?: string }>;
     columns?: string[];
     limit?: number;
     offset?: number;
