@@ -38,6 +38,7 @@ SEGMENT_VALUES = {
     "Haut de gamme",
     "Premium",
     "Banque privée",
+    "non_segmente",
 }
 
 

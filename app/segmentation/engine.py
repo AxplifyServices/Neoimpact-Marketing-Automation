@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 TIMEZONE = "Africa/Casablanca"
 SEGMENTATION_ADVISORY_LOCK_KEY = 2_026_082_101
+NON_SEGMENTED_VALUE = "non_segmente"
 
 
 class SegmentationAlreadyRunningError(RuntimeError):
@@ -113,11 +114,12 @@ def _create_due_base(conn, *, annee_mois: int, run_date: date) -> int:
               AND LOWER(BTRIM(COALESCE(c."STATUT_CLIENT", ''))) = LOWER('Actif')
               AND (
                     c."Segment_actuel" IS NULL
+                    OR c."Segment_actuel" = %s
                     OR ls.last_segmentation_date IS NULL
                     OR ls.last_segmentation_date <= (%s::date - INTERVAL '3 months')::date
               )
             """,
-            (annee_mois, run_date),
+            (annee_mois, NON_SEGMENTED_VALUE, run_date),
         )
         cur.execute(
             "CREATE INDEX ON tmp_segmentation_due_base (radical_compte)"
@@ -487,13 +489,12 @@ def _create_due_results(conn, *, annee_mois: int) -> Dict[str, int]:
 
 
 
-def _clear_inactive_current_segments(conn, *, dry_run: bool) -> Dict[str, int]:
-    """Retire le segment courant de tout client qui n'est pas actuellement actif.
+def _mark_inactive_non_segmented(conn, *, dry_run: bool) -> Dict[str, int]:
+    """Marque comme ``non_segmente`` tout client qui n'est pas actuellement Actif.
 
     L'historique de segmentation reste intact dans dm_segmentation_resultats.
-    Lorsqu'un client redevient Actif, Segment_actuel étant NULL, il redevient
-    immédiatement éligible au prochain passage quotidien, sans attendre
-    l'échéance trimestrielle de son ancien résultat.
+    Si le client redevient Actif, ``non_segmente`` le rend immédiatement éligible
+    au prochain passage quotidien, sans attendre trois mois après son ancien score.
     """
     with conn.cursor() as cur:
         if dry_run:
@@ -502,26 +503,28 @@ def _clear_inactive_current_segments(conn, *, dry_run: bool) -> Dict[str, int]:
                 SELECT COUNT(*)
                 FROM clients
                 WHERE LOWER(BTRIM(COALESCE("STATUT_CLIENT", ''))) <> LOWER('Actif')
-                  AND "Segment_actuel" IS NOT NULL
-                """
+                  AND "Segment_actuel" IS DISTINCT FROM %s
+                """,
+                (NON_SEGMENTED_VALUE,),
             )
-            would_clear = int((cur.fetchone() or [0])[0] or 0)
+            would_mark = int((cur.fetchone() or [0])[0] or 0)
             return {
-                "cleared_inactive_clients": 0,
-                "would_clear_inactive_clients": would_clear,
+                "marked_inactive_non_segmented": 0,
+                "would_mark_inactive_non_segmented": would_mark,
             }
 
         cur.execute(
             """
             UPDATE clients
-            SET "Segment_actuel" = NULL
+            SET "Segment_actuel" = %s
             WHERE LOWER(BTRIM(COALESCE("STATUT_CLIENT", ''))) <> LOWER('Actif')
-              AND "Segment_actuel" IS NOT NULL
-            """
+              AND "Segment_actuel" IS DISTINCT FROM %s
+            """,
+            (NON_SEGMENTED_VALUE, NON_SEGMENTED_VALUE),
         )
         return {
-            "cleared_inactive_clients": max(0, int(cur.rowcount or 0)),
-            "would_clear_inactive_clients": 0,
+            "marked_inactive_non_segmented": max(0, int(cur.rowcount or 0)),
+            "would_mark_inactive_non_segmented": 0,
         }
 
 
@@ -533,7 +536,7 @@ def _persist_results(conn, *, annee_mois: int, run_date: date, dry_run: bool) ->
         return {
             "inserted_results": 0,
             "updated_clients": 0,
-            "cleared_unsegmented_clients": 0,
+            "marked_unsegmented_clients": 0,
             "would_insert_results": would_insert,
         }
 
@@ -595,51 +598,46 @@ def _persist_results(conn, *, annee_mois: int, run_date: date, dry_run: bool) ->
         inserted = max(0, int(cur.rowcount or 0))
 
         # Segment_actuel reste toujours la dernière version réellement produite.
-        # Pour un résultat technique "Non segmenté", la valeur courante est NULL.
+        # Un résultat technique "Non segmenté" est matérialisé par la valeur
+        # métier explicite ``non_segmente`` et jamais par NULL.
         cur.execute(
             """
             UPDATE clients AS c
             SET "Segment_actuel" = CASE
-                    WHEN r.segment = 'Non segmenté' THEN NULL
+                    WHEN r.segment = 'Non segmenté' THEN %s
                     ELSE r.segment
                 END
             FROM tmp_segmentation_due_results AS r
             WHERE c.radical_compte = r.radical_compte
               AND c."Segment_actuel" IS DISTINCT FROM CASE
-                    WHEN r.segment = 'Non segmenté' THEN NULL
+                    WHEN r.segment = 'Non segmenté' THEN %s
                     ELSE r.segment
                   END
-            """
+            """,
+            (NON_SEGMENTED_VALUE, NON_SEGMENTED_VALUE),
         )
         updated_clients = max(0, int(cur.rowcount or 0))
 
-        # Un client de moins de 3 mois n'est pas segmenté. On retire donc une
-        # éventuelle ancienne valeur fake de Segment_actuel tant qu'aucun vrai
-        # résultat de segmentation n'existe pour lui.
+        # Un client de moins de 3 mois n'est pas encore éligible à la segmentation.
+        # Sa valeur courante est donc explicitement ``non_segmente``.
         cur.execute(
             """
             UPDATE clients AS c
-            SET "Segment_actuel" = NULL
+            SET "Segment_actuel" = %s
             FROM dm_segmentation_variables AS v
             WHERE v.radical_compte = c.radical_compte
               AND v.annee_mois = %s
               AND v.anciennete_mois < 3
-              AND c."Segment_actuel" IS NOT NULL
-              AND NOT EXISTS (
-                    SELECT 1
-                    FROM dm_segmentation_resultats AS h
-                    WHERE h.radical_compte = c.radical_compte
-              )
-            """
-        ,
-            (annee_mois,),
+              AND c."Segment_actuel" IS DISTINCT FROM %s
+            """,
+            (NON_SEGMENTED_VALUE, annee_mois, NON_SEGMENTED_VALUE),
         )
-        cleared = max(0, int(cur.rowcount or 0))
+        marked_unsegmented = max(0, int(cur.rowcount or 0))
 
     return {
         "inserted_results": inserted,
         "updated_clients": updated_clients,
-        "cleared_unsegmented_clients": cleared,
+        "marked_unsegmented_clients": marked_unsegmented,
         "would_insert_results": 0,
     }
 
@@ -677,7 +675,7 @@ def run_segmentation_cycle(
                 "Le scoring est volontairement bloqué pour éviter un résultat partiel."
             )
 
-        inactive_cleanup = _clear_inactive_current_segments(
+        inactive_cleanup = _mark_inactive_non_segmented(
             conn,
             dry_run=dry_run,
         )
@@ -704,7 +702,7 @@ def run_segmentation_cycle(
                 "segments": {},
                 "inserted_results": 0,
                 "updated_clients": 0,
-                "cleared_unsegmented_clients": 0,
+                "marked_unsegmented_clients": 0,
                 **inactive_cleanup,
             }
 
