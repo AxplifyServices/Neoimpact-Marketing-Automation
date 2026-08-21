@@ -115,11 +115,11 @@ def attrition_dashboard(
                 f"""
                 SELECT
                     CASE
-                        WHEN s.score_attrition < 0.2 THEN '0-20%'
-                        WHEN s.score_attrition < 0.4 THEN '20-40%'
-                        WHEN s.score_attrition < 0.6 THEN '40-60%'
-                        WHEN s.score_attrition < 0.8 THEN '60-80%'
-                        ELSE '80-100%'
+                        WHEN s.score_attrition < 0.2 THEN '0-20%%'
+                        WHEN s.score_attrition < 0.4 THEN '20-40%%'
+                        WHEN s.score_attrition < 0.6 THEN '40-60%%'
+                        WHEN s.score_attrition < 0.8 THEN '60-80%%'
+                        ELSE '80-100%%'
                     END AS tranche,
                     COUNT(*) AS clients
                 FROM dm_attrition_scores AS s

@@ -1,16 +1,36 @@
 Liste des ajouts marketing automation : 
 
 ---- Migrer de SQLite vers PostgreSQL
--- Fake data basé sur l'existant + data CDM
-- Optimisation du flux de données (gros volume)
-- Optimisation du front (trop long)
-- API animation commerciale (log + fonctionnement)
+---- Fake data basé sur l'existant + data CDM
+---- Optimisation du flux de données (gros volume)
+---- Optimisation du front (trop long)
+---- API animation commerciale (log + fonctionnement)
  
 - Création de modèle : segmentation, scoring carte, scoring crédit conso, scoring crédit Immo, scoring compte épargne pour commencer
 - Intégration des scores dans les filtres des campagnes & cibles
 - Création d'un batch hebdomadaire qui met à jour les scores chaque semaine
+
 - Intégration des retours client dans la data pour le recalcule des scores
 
 - Création d'une campagne complète
 
 - Amélioration du front
+
+
+
+| Famille              | Modèle                          | Rôle                                                            | Priorité MVP |
+| -------------------- | ------------------------------- | --------------------------------------------------------------- | -----------: |
+| **Produit**          | Propension Carte                | Probabilité de souscrire une carte                              |           P1 |
+|                      | Propension Crédit Conso         | Probabilité de souscrire un crédit conso                        |           P1 |
+|                      | Propension Crédit Immo          | Probabilité de souscrire un crédit immobilier                   |           P1 |
+|                      | Propension Épargne              | Probabilité d'ouvrir/souscrire un produit d'épargne             |           P1 |
+| **Décision produit** | Next Best Product               | Comparer les scores produits et déterminer le meilleur produit  |           P1 |
+| **Canal**            | Channel Affinity / Best Channel | Déterminer le canal le plus susceptible de générer une réaction |           P1 |
+
+| **Timing**           | Send Time Optimization          | Déterminer meilleur jour + meilleur créneau                     |           P1 |
+
+| **Auxiliaire**       | Score d'attrition               | Identifier désengagement/risque de départ                       |           P2 |
+
+| **Auxiliaire**       | Engagement digital              | Quantifier l'affinité digitale du client                        |           P2 |
+
+| **Auxiliaire**       | Pression / fatigue marketing    | Quantifier la sollicitation récente                             |        P2/P3 |
