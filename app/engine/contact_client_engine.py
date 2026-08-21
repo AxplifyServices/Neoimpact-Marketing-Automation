@@ -11,6 +11,7 @@ from app.storage.runtime_db import RuntimeConnection, connect_runtime
 from app.storage.postgres_db import get_column_names, table_exists
 from app.domain.canaux import compteur_for_canal
 from app.domain.conversion_service import record_objective_entry
+from app.domain.send_time import normalize_creneau
 
 from app.domain.workflow_nav import (
     find_bloc_by_id,
@@ -358,9 +359,11 @@ def _send_mail_for_one_client_and_advance(id_campagne: str, radical_compte: str,
                 )
                 new_canal = "Objectif"
                 new_action = "Objectif"
+                new_creneau = "Indifferent"
             else:
                 new_canal = _norm_str(nxt.get("Canal"))
                 new_action = _norm_str(nxt.get("Action"))
+                new_creneau = normalize_creneau(nxt.get("Creneau"))
 
 
             if not new_id or not new_action:
@@ -370,8 +373,8 @@ def _send_mail_for_one_client_and_advance(id_campagne: str, radical_compte: str,
                 break
 
             cur.execute(
-                f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET ID_Action=?, Canal=?, Action=? WHERE rowid=?",
-                (new_id, new_canal, new_action, rid),
+                f'UPDATE {CLIENTS_CAMPAGNES_TABLE} SET ID_Action=?, Canal=?, Action=?, "Creneau"=? WHERE rowid=?',
+                (new_id, new_canal, new_action, new_creneau, rid),
             )
             conn.commit()
 
@@ -540,15 +543,17 @@ def apply_result_from_queue(row: Dict[str, Any], resultat_label: str, queue_tabl
                     source_canal=_norm_str(row_after.get("Canal")),
                 )
                 new_canal, new_action = "Objectif", "Objectif"
+                new_creneau = "Indifferent"
             else:
                 new_canal = _norm_str(nxt.get("Canal"))
                 new_action = _norm_str(nxt.get("Action"))
+                new_creneau = normalize_creneau(nxt.get("Creneau"))
             if not new_id or not new_action:
                 cur.execute(f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET Action=? WHERE rowid=?", ("En attente", rid))
             else:
                 cur.execute(
-                    f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET ID_Action=?,Canal=?,Action=? WHERE rowid=?",
-                    (new_id, new_canal, new_action, rid),
+                    f'UPDATE {CLIENTS_CAMPAGNES_TABLE} SET ID_Action=?,Canal=?,Action=?,"Creneau"=? WHERE rowid=?',
+                    (new_id, new_canal, new_action, new_creneau, rid),
                 )
 
         if generic_external and dispatch_id is not None:

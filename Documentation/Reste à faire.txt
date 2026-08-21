@@ -8,7 +8,8 @@ Liste des ajouts marketing automation :
  
 - Création de modèle : segmentation, scoring carte, scoring crédit conso, scoring crédit Immo, scoring compte épargne pour commencer
 - Intégration des scores dans les filtres des campagnes & cibles
-- Création d'un batch hebdomadaire qui met à jour les scores chaque semaine
+- Création d'un batch réccurent qui met à jour les scores chaque semaine
+- Création d'une interface pour automatiser le lancement de campagne selon les scores
 
 - Intégration des retours client dans la data pour le recalcule des scores
 

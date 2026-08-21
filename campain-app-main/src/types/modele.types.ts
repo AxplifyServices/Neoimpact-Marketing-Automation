@@ -25,6 +25,7 @@ export interface Block {
   parents: string[];
   objet?: string;
   contenu?: string;
+  creneau?: 'Indifferent' | 'Matin' | 'Apres-midi' | 'Soir';
   conditionsByParent: Record<string, BlockCondition[]>;
   isObjectif: boolean;
   valideObjectif?: 'Oui' | 'Non';

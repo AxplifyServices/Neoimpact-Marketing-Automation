@@ -75,6 +75,12 @@ export const ciblesApi = {
     method: 'GET',
   }),
 
+  // Engagement digital composition of a cible
+  engagementSummary: (id: string): ApiRequest => ({
+    url: `/cibles/${id}/engagement-summary`,
+    method: 'GET',
+  }),
+
   // Preview cible data
   preview: (id: string, limit: number = 200): ApiRequest => ({
     url: `/cibles/${id}/preview`,

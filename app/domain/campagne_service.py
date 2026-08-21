@@ -32,6 +32,7 @@ from app.storage.modele_store_sqlite import get_modele_dict
 
 # NEW: échéance (arriv_eche)
 from app.domain.workflow_nav import find_bloc_by_id, arrive_echeance  # retourne dict
+from app.domain.send_time import normalize_creneau
 from app.domain.terrain_visit_webhook import cancel_visits_for_campaign, dispatch_pending_visits_for_campaign
 
 # =========================================================
@@ -395,10 +396,12 @@ def prepare_campagne_execution(
     id_action_init = _norm_str(root.get("ID")) or "1"
     canal_init = _norm_str(root.get("Canal")) or "Appel"
     action_init = _norm_str(root.get("Action")) or "Appeler"
+    creneau_init = normalize_creneau(root.get("Creneau"))
     from app.domain.workflow_nav import is_objective_bloc
     if is_objective_bloc(root):
         canal_init = "Objectif"
         action_init = "Objectif"
+        creneau_init = "Indifferent"
     current_bloc_init = find_bloc_by_id(liste_action, id_action_init) or root
 
     # 2) Requête de cible : le volume reste dans PostgreSQL.
@@ -446,6 +449,7 @@ def prepare_campagne_execution(
         "ID_Action": id_action_init,
         "Canal": canal_init,
         "Action": action_init,
+        "Creneau": creneau_init,
         "Last_action": "",
         "Resultat_last_action": "",
         "Date_last_action": initial_action_date,
@@ -935,9 +939,11 @@ def sync_new_clients_from_cible_for_campaign(
     id_action_init = _norm_str(root.get("ID")) or "1"
     canal_init = _norm_str(root.get("Canal")) or "Appel"
     action_init = _norm_str(root.get("Action")) or "Appeler"
+    creneau_init = normalize_creneau(root.get("Creneau"))
     if is_objective_bloc(root):
         canal_init = "Objectif"
         action_init = "Objectif"
+        creneau_init = "Indifferent"
 
     current_bloc_init = find_bloc_by_id(liste_action, id_action_init) or root
     campagne_state = _get_campaign_state(c) or "En cours"
@@ -955,6 +961,7 @@ def sync_new_clients_from_cible_for_campaign(
         "ID_Action": id_action_init,
         "Canal": canal_init,
         "Action": action_init,
+        "Creneau": creneau_init,
         "Last_action": "",
         "Resultat_last_action": "",
         "Date_last_action": sync_action_date,

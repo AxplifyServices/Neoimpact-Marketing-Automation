@@ -74,7 +74,7 @@ USECASE_COLUMNS = {
         "Age", "Qualite",
         "Region", "Agence", "Gestionnaire",
         "STATUT_CLIENT",
-        "Segment_actuel", "Risque_attrition", "Canal_acquisition",
+        "Segment_actuel", "Risque_attrition", "Engagement_digital", "Creneau_connexion", "Canal_acquisition",
         "Epargne",
         "Carte_Actuelle", "Assurance_Actuelle",
         "Nature_carte", "Categorie", "Dossier_Complet", "Validation_KYC", "Activation_du_compte",
@@ -126,6 +126,7 @@ USECASE_COLUMNS = {
     "objectif": [
         "STATUT_CLIENT",
         "Segment_actuel",
+        "Engagement_digital",
         "Epargne",
         "Carte_Actuelle", "Assurance_Actuelle",
         "Nature_carte", "Categorie", "Dossier_Complet", "Validation_KYC", "Activation_du_compte",
@@ -176,6 +177,7 @@ USECASE_COLUMNS = {
     "condition": [
         "STATUT_CLIENT",
         "Segment_actuel",
+        "Engagement_digital", "Creneau_connexion",
         "Epargne",
         "Carte_Actuelle", "Assurance_Actuelle",
         "Nature_carte", "Categorie", "Dossier_Complet", "Validation_KYC", "Activation_du_compte",
@@ -305,6 +307,8 @@ CATEGORICAL_MAPPING: Dict[str, List[str]] = {
     # --- Mapping de l'existant (hardcodé) ---
     "STATUT_CLIENT": ["Actif", "Inactif", "Prospect", "Rupture de relation"],
     "Risque_attrition": YES_NO,
+    "Engagement_digital": ["Faible", "Modere", "Eleve", "non_score"],
+    "Creneau_connexion": ["Matin", "Apres-midi", "Soir", "non_score"],
 
     "Carte_Actuelle": ["Aucune", "Black", "Classic", "Code 212", "Code 30", "Gold", "Silver", "Standard"],
 
@@ -613,11 +617,16 @@ def read_table(payload: ReadTableIn):
 
 @router.post("/data/update-cell")
 def update_cell(payload: UpdateCellIn):
-    if payload.table == "clients" and payload.col in {"Segment_actuel", "Risque_attrition"}:
-        label = "Segment_actuel" if payload.col == "Segment_actuel" else "Risque_attrition"
+    calculated_client_fields = {
+        "Segment_actuel",
+        "Risque_attrition",
+        "Engagement_digital",
+        "Creneau_connexion",
+    }
+    if payload.table == "clients" and payload.col in calculated_client_fields:
         raise HTTPException(
             status_code=403,
-            detail=f"{label} est calculé automatiquement par un moteur data.",
+            detail=f"{payload.col} est calculé automatiquement par un moteur data.",
         )
     db.update_cell(payload.table, payload.rowid, payload.col, payload.value)
     return {"ok": True}

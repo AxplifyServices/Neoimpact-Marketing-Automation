@@ -7,7 +7,7 @@ import { modelesApi } from '@/lib/api/definitions/modeles.api';
 import { metaApi } from '@/lib/api/definitions/meta.api';
 import { getApiClient } from '@/lib/api/api-client';
 import { getBlockDepth, getBlockDisplayNumber, getHierarchicalNumber, getOrderedBlocks } from '@/lib/block-utils';
-import { normalizeBlocks } from '@/lib/modele-normalization';
+import { isMessagingCanal, normalizeBlocks } from '@/lib/modele-normalization';
 import type { Block, BlockCondition, CanauxMetadata, WorkflowLayout } from '@/types/modele.types';
 import LoadingSpinner from '../../components/LoadingSpinner';
 import WorkflowPreview from '../../components/custom/WorkflowPreview';
@@ -383,6 +383,14 @@ export default function ViewModelePage() {
                                         {block.canal || '-'}
                                       </div>
                                     </div>
+                                    {isMessagingCanal(block.canal) && (
+                                      <div>
+                                        <label className="block text-xs font-medium text-gray-600 mb-1">Créneau d'envoi</label>
+                                        <div className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white">
+                                          {block.creneau || 'Indifferent'}
+                                        </div>
+                                      </div>
+                                    )}
                                     {(block.canal === 'Mail' || block.canal === 'EMAIL') && (
                                       <div>
                                         <label className="block text-xs font-medium text-gray-600 mb-1">Objet</label>
@@ -464,6 +472,14 @@ export default function ViewModelePage() {
                       {selectedBlock.canal || '-'}
                     </div>
                   </div>
+                  {isMessagingCanal(selectedBlock.canal) && (
+                    <div>
+                      <label className="mb-1 block text-xs font-medium text-gray-600">Créneau d'envoi</label>
+                      <div className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm">
+                        {selectedBlock.creneau || 'Indifferent'}
+                      </div>
+                    </div>
+                  )}
                   {(selectedBlock.canal === 'Mail' || selectedBlock.canal === 'EMAIL') && (
                     <div>
                       <label className="mb-1 block text-xs font-medium text-gray-600">Objet</label>

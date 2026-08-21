@@ -10,6 +10,7 @@ export interface CibleData {
   filtre?: Record<string, any> | string;
   chemin?: string;
   nb_leads?: number;
+  pct_engagement_digital_eleve?: number | null;
   locked?: boolean;
   lock_reason?: string | null;
 }

@@ -200,6 +200,31 @@ services:
       start_period: 60s
 
 
+  marketing_digital_engagement_worker:
+    <<: *backend-runtime
+    command: ["python", "-m", "app.workers.runner", "digital_engagement"]
+    cpu_shares: 256
+    environment:
+      <<: *backend-environment
+      APP_PROCESS_ROLE: digital_engagement_worker
+      DIGITAL_ENGAGEMENT_WORKER_ENABLED: "true"
+      DIGITAL_ENGAGEMENT_RUN_ON_START: "true"
+      DIGITAL_ENGAGEMENT_TIMEZONE: "Africa/Casablanca"
+      DIGITAL_ENGAGEMENT_MONTHLY_DAY: "1"
+      DIGITAL_ENGAGEMENT_MONTHLY_HOUR: "4"
+      DIGITAL_ENGAGEMENT_MONTHLY_MINUTE: "0"
+      DIGITAL_ENGAGEMENT_FAKE_BATCH_SIZE: "5000"
+      POSTGRES_POOL_MIN_SIZE: "0"
+      POSTGRES_POOL_MAX_SIZE: "2"
+      POSTGRES_POOL_TIMEOUT_SECONDS: "20"
+    healthcheck:
+      test: ["CMD-SHELL", "python -m app.workers.healthcheck digital_engagement"]
+      interval: 10s
+      timeout: 8s
+      retries: 12
+      start_period: 60s
+
+
   marketing_frontend:
     build:
       context: ./campain-app-main

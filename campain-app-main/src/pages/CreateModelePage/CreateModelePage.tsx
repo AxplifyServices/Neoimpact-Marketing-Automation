@@ -16,7 +16,7 @@ import type { CanauxMetadata, CampaignConditionField, EditPayload, DuplicateStat
 import { useBlockManagement } from '@/hooks/useBlockManagement';
 import { getBlockDepth, getBlockDisplayNumber, getOrderedBlocks, getHierarchicalNumber } from '@/lib/block-utils';
 import { buildBlocksPayload } from '@/lib/modele-serialization';
-import { formatFieldLabel, getFieldKind, isSpamSensitiveCanal, normalizeCanal, resolveBlocksFromPayload } from '@/lib/modele-normalization';
+import { formatFieldLabel, getFieldKind, isMessagingCanal, isSpamSensitiveCanal, normalizeCanal, resolveBlocksFromPayload } from '@/lib/modele-normalization';
 
 const areSameIdSets = (left: string[], right: string[]): boolean => {
   if (left.length !== right.length) return false;
@@ -229,6 +229,7 @@ export default function CreateModelePage() {
       delai: sourceBlock.delai,
       objet: sourceBlock.objet,
       contenu: sourceBlock.contenu,
+      creneau: sourceBlock.creneau || 'Indifferent',
       parents: [],
       conditionsByParent: {},
       isObjectif: sourceBlock.isObjectif,
@@ -767,6 +768,21 @@ export default function CreateModelePage() {
                       {canauxData?.canaux.map((canal) => <option key={canal} value={canal}>{canal}</option>)}
                     </select>
                   </div>
+                  {isMessagingCanal(selectedBlock.canal) && (
+                    <div>
+                      <label className="mb-1 block text-xs font-medium text-gray-600">Créneau d'envoi</label>
+                      <select
+                        value={selectedBlock.creneau || 'Indifferent'}
+                        onChange={(e) => bm.handleBlockChange(selectedBlock.id, 'creneau', e.target.value)}
+                        className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
+                      >
+                        <option value="Indifferent">Aucun créneau imposé</option>
+                        <option value="Matin">Matin — 05h à 12h</option>
+                        <option value="Apres-midi">Après-midi — 12h à 18h</option>
+                        <option value="Soir">Soir — 18h à 05h</option>
+                      </select>
+                    </div>
+                  )}
                   {(selectedBlock.canal === 'Mail' || selectedBlock.canal === 'EMAIL') && (
                     <div>
                       <label className="mb-1 block text-xs font-medium text-gray-600">Objet</label>

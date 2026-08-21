@@ -113,6 +113,7 @@ export function buildBlocksPayload(
       blockPayload.Action = canauxData?.actions_by_canal[block.canal] || block.canal;
       blockPayload.Objet = block.canal === 'Mail' || block.canal === 'EMAIL' ? (block.objet || '') : '';
       blockPayload.Contenu = block.contenu || '';
+      blockPayload.Creneau = block.creneau || 'Indifferent';
     }
 
     return blockPayload;

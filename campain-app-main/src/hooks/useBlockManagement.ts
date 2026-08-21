@@ -196,6 +196,7 @@ export function useBlockManagement(canauxData?: CanauxMetadata) {
       id: `block_${Date.now()}`,
       canal: isObjectif ? '' : defaultCanal,
       delai: 0,
+      creneau: 'Indifferent',
       parents,
       conditionsByParent,
       isObjectif,

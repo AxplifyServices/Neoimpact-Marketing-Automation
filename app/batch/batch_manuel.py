@@ -19,6 +19,7 @@ from app.storage.clients_campagnes_store_sqlite import (
 from app.targeting.incremental import sync_target_changes_for_campaign
 from app.targeting.store import prune_processed_changes
 from app.domain.conversion_service import mark_converted, record_objective_entry
+from app.domain.send_time import normalize_creneau
 
 from app.storage.crc_input_store_sqlite import (
     ensure_crc_input_table,
@@ -476,6 +477,7 @@ def _advance_en_attente_rows(
     has_id_action = _cc_has_col(conn, "ID_Action")
     has_canal = _cc_has_col(conn, "Canal")
     has_action = _cc_has_col(conn, "Action")
+    has_creneau = _cc_has_col(conn, "Creneau")
 
     changed = 0
     last_rid = 0
@@ -528,6 +530,7 @@ def _advance_en_attente_rows(
                         (has_id_action and _norm_str(row.get("ID_Action")) != cur_id)
                         or (has_canal and _norm_str(row.get("Canal")) != "Objectif")
                         or (has_action and _norm_str(row.get("Action")) != "Objectif")
+                        or (has_creneau and _norm_str(row.get("Creneau")) != "Indifferent")
                     )
 
                     if must_update:
@@ -541,6 +544,8 @@ def _advance_en_attente_rows(
                             set_parts.append("Canal = 'Objectif'")
                         if has_action:
                             set_parts.append("Action = 'Objectif'")
+                        if has_creneau:
+                            set_parts.append("\"Creneau\" = 'Indifferent'")
 
                         update_sql = (
                             f"UPDATE {CLIENTS_CAMPAGNES_TABLE} SET "
@@ -554,6 +559,8 @@ def _advance_en_attente_rows(
                         row["ID_Action"] = cur_id
                         row["Canal"] = "Objectif"
                         row["Action"] = "Objectif"
+                        if has_creneau:
+                            row["Creneau"] = "Indifferent"
 
                     if has_conversion:
                         branch = objective_branch(current, row)
@@ -597,21 +604,33 @@ def _advance_en_attente_rows(
                     )
                     new_canal = "Objectif"
                     new_action = "Objectif"
+                    new_creneau = "Indifferent"
                 else:
                     new_canal = _norm_str(nxt.get("Canal"))
                     new_action = _norm_str(nxt.get("Action"))
+                    new_creneau = normalize_creneau(nxt.get("Creneau"))
 
                 if not new_id or not new_action:
                     continue
 
-                cur.execute(
-                    f"""
-                    UPDATE {CLIENTS_CAMPAGNES_TABLE}
-                    SET ID_Action = ?, Canal = ?, Action = ?
-                    WHERE rowid = ?
-                    """,
-                    (new_id, new_canal, new_action, rid),
-                )
+                if has_creneau:
+                    cur.execute(
+                        f"""
+                        UPDATE {CLIENTS_CAMPAGNES_TABLE}
+                        SET ID_Action = ?, Canal = ?, Action = ?, "Creneau" = ?
+                        WHERE rowid = ?
+                        """,
+                        (new_id, new_canal, new_action, new_creneau, rid),
+                    )
+                else:
+                    cur.execute(
+                        f"""
+                        UPDATE {CLIENTS_CAMPAGNES_TABLE}
+                        SET ID_Action = ?, Canal = ?, Action = ?
+                        WHERE rowid = ?
+                        """,
+                        (new_id, new_canal, new_action, rid),
+                    )
                 changed += int(cur.rowcount or 0)
 
             # Les objets du lot peuvent être libérés et les opérations

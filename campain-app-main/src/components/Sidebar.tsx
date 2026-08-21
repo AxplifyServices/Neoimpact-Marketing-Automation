@@ -12,6 +12,7 @@ import {
   Phone,
   Target,
   Users,
+  Smartphone,
   X,
 } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -52,8 +53,10 @@ export default function Sidebar() {
 
   const segmentationPath = '/outils-data/segmentation';
   const attritionPath = '/outils-data/attrition';
+  const digitalEngagementPath = '/outils-data/engagement-digital';
   const segmentationActive = location.pathname.startsWith(segmentationPath);
   const attritionActive = location.pathname.startsWith(attritionPath);
+  const digitalEngagementActive = location.pathname.startsWith(digitalEngagementPath);
   const dataToolsActive = location.pathname.startsWith('/outils-data');
 
   return (
@@ -137,6 +140,17 @@ export default function Sidebar() {
                   >
                     <div className="flex items-center gap-2.5"><AlertTriangle size={15} /><span className="font-medium">Attrition</span></div>
                     {attritionActive && <ChevronRight size={14} />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleNavigation(digitalEngagementPath)}
+                    onMouseEnter={() => preloadRoute(digitalEngagementPath)}
+                    onFocus={() => preloadRoute(digitalEngagementPath)}
+                    onPointerDown={() => preloadRoute(digitalEngagementPath)}
+                    className={`mt-1 flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm transition-colors ${digitalEngagementActive ? 'bg-slate-900 text-white' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'}`}
+                  >
+                    <div className="flex items-center gap-2.5"><Smartphone size={15} /><span className="font-medium">Engagement digital</span></div>
+                    {digitalEngagementActive && <ChevronRight size={14} />}
                   </button>
                 </div>
               )}

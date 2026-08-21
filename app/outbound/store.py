@@ -67,6 +67,7 @@ def enqueue_candidates(
                     cc.\"Radical_compte\" AS radical_compte,
                     cc.\"ID_Action\" AS block_id,
                     COALESCE(cc.action_execution_seq, 0) AS occurrence,
+                    COALESCE(cc.\"Creneau\", 'Indifferent') AS creneau,
                     COALESCE(cc.\"ID_Action\", '') || ':' ||
                         COALESCE(cc.action_execution_seq, 0)::text || ':' || ? AS enqueue_key
                 FROM clients_campagnes cc
@@ -93,7 +94,12 @@ def enqueue_candidates(
                 SELECT
                     client_campaign_id, id_campagne, radical_compte, block_id,
                     occurrence, ?, ?, 'pending', 100,
-                    0, 5, NOW(), NOW(), NOW()
+                    0, 5,
+                    CASE
+                        WHEN ? = 'MAIL' THEN marketing_message_available_at(creneau, NOW())
+                        ELSE NOW()
+                    END,
+                    NOW(), NOW()
                 FROM candidates
                 ON CONFLICT (id_campagne, radical_compte, block_id, occurrence, channel)
                 DO NOTHING
@@ -109,7 +115,7 @@ def enqueue_candidates(
         full_params: list[Any] = [channel]
         if campaign:
             full_params.append(campaign)
-        full_params.extend([channel, limit, channel, provider])
+        full_params.extend([channel, limit, channel, provider, channel])
 
         conn = connect_runtime()
         try:
@@ -145,7 +151,8 @@ def enqueue_single(id_campagne: str, radical_compte: str, *, channel: str) -> Di
         cur.execute(
             f"""
             SELECT cc.id, cc.\"ID_Action\" AS block_id,
-                   COALESCE(cc.action_execution_seq,0) AS occurrence
+                   COALESCE(cc.action_execution_seq,0) AS occurrence,
+                   COALESCE(cc.\"Creneau\", 'Indifferent') AS creneau
             FROM clients_campagnes cc
             JOIN campagnes c ON c.id_campagne=cc.\"ID_CAMPAGNE\"
             WHERE cc.\"ID_CAMPAGNE\"=? AND cc.\"Radical_compte\"=?
@@ -168,10 +175,20 @@ def enqueue_single(id_campagne: str, radical_compte: str, *, channel: str) -> Di
             INSERT INTO outbound_dispatches (
                 client_campaign_id,id_campagne,radical_compte,block_id,occurrence,
                 channel,provider,status,priority,attempts,max_attempts,available_at,created_at,updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 50, 0, 5, NOW(), NOW(), NOW())
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, 'pending', 50, 0, 5,
+                CASE
+                    WHEN ? = 'MAIL' THEN marketing_message_available_at(?, NOW())
+                    ELSE NOW()
+                END,
+                NOW(), NOW()
+            )
             ON CONFLICT (id_campagne,radical_compte,block_id,occurrence,channel) DO NOTHING
             """,
-            (int(row["id"]), campaign, radical, block_id, occurrence, channel, provider),
+            (
+                int(row["id"]), campaign, radical, block_id, occurrence, channel, provider,
+                channel, _norm(row.get("creneau")) or "Indifferent",
+            ),
         )
         inserted = int(cur.rowcount or 0)
         cur.execute(
@@ -315,13 +332,23 @@ def mark_failure(dispatch_id: int, error: str) -> str:
             delay = min(900, 2 ** max(0, attempts - 1) * 5)
             cur.execute(
                 """
-                UPDATE outbound_dispatches
+                UPDATE outbound_dispatches d
                 SET status='retry', last_error=?,
-                    available_at=NOW() + (? || ' seconds')::interval,
+                    available_at = CASE
+                        WHEN d.channel = 'MAIL' THEN marketing_message_available_at(
+                            COALESCE((
+                                SELECT cc.\"Creneau\"
+                                FROM clients_campagnes cc
+                                WHERE cc.id = d.client_campaign_id
+                            ), 'Indifferent'),
+                            NOW() + (? || ' seconds')::interval
+                        )
+                        ELSE NOW() + (? || ' seconds')::interval
+                    END,
                     updated_at=NOW()
-                WHERE id=? AND status='processing'
+                WHERE d.id=? AND d.status='processing'
                 """,
-                (_norm(error)[:4000], delay, int(dispatch_id)),
+                (_norm(error)[:4000], delay, delay, int(dispatch_id)),
             )
         conn.commit()
         return status

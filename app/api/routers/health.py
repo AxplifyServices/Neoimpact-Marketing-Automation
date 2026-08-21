@@ -46,6 +46,7 @@ def health():
         batch_worker = worker_group_status("batch")
         segmentation_worker = worker_group_status("segmentation")
         attrition_worker = worker_group_status("attrition")
+        digital_engagement_worker = worker_group_status("digital_engagement")
         return {
             "ok": True,
             "database": {
@@ -64,6 +65,7 @@ def health():
                 "batch": batch_worker,
                 "segmentation": segmentation_worker,
                 "attrition": attrition_worker,
+                "digital_engagement": digital_engagement_worker,
             },
             "orchestration": {
                 "worker": campaign_worker,

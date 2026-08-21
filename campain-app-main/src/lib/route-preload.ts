@@ -14,6 +14,7 @@ export const routeLoaders = {
   dashboard: () => import('@/pages/DashboardPage'),
   segmentation: () => import('@/pages/SegmentationPage'),
   attrition: () => import('@/pages/AttritionPage'),
+  digitalEngagement: () => import('@/pages/DigitalEngagementPage'),
 };
 
 type RouteLoaderKey = keyof typeof routeLoaders;
@@ -37,6 +38,7 @@ const pathToLoader: Array<[RegExp, RouteLoaderKey]> = [
   [/^\/dashboard/, 'dashboard'],
   [/^\/outils-data\/segmentation/, 'segmentation'],
   [/^\/outils-data\/attrition/, 'attrition'],
+  [/^\/outils-data\/engagement-digital/, 'digitalEngagement'],
 ];
 
 const preloaded = new Set<RouteLoaderKey>();

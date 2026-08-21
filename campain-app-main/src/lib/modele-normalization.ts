@@ -20,6 +20,15 @@ export function isSpamSensitiveCanal(canal: string): boolean {
   return normalized === 'sms' || normalized === 'mail' || normalized === 'email';
 }
 
+export function isMessagingCanal(canal: string): boolean {
+  const normalized = normalizeCanal(canal);
+  return normalized === 'sms'
+    || normalized === 'mail'
+    || normalized === 'email'
+    || normalized === 'push notification'
+    || normalized.startsWith('whatsapp');
+}
+
 export function normalizeParentId(value: unknown): string | null {
   if (value === null || value === undefined || value === '') return null;
   if (typeof value === 'string') {
@@ -185,6 +194,7 @@ function convertOldFormatToNew(parsedBlocks: any[]): Block[] {
       parents,
       objet: oldBlock.Objet || '',
       contenu: oldBlock.Contenu || '',
+      creneau: (oldBlock.Creneau || 'Indifferent') as 'Indifferent' | 'Matin' | 'Apres-midi' | 'Soir',
       conditionsByParent,
       isObjectif: Boolean(oldBlock.objectif),
       valideObjectif: (oldBlock.valide_objectif === 'Oui' || oldBlock.valide_objectif === 'Non')
@@ -245,6 +255,7 @@ export function normalizeBlocks(rawBlocks: any[]): Block[] {
       parents,
       objet: block.objet ?? block.Objet ?? '',
       contenu: block.contenu ?? block.Contenu ?? '',
+      creneau: (block.creneau ?? block.Creneau ?? 'Indifferent') as 'Indifferent' | 'Matin' | 'Apres-midi' | 'Soir',
       conditionsByParent,
       isObjectif: Boolean(block.isObjectif ?? block.objectif),
       valideObjectif: (() => {

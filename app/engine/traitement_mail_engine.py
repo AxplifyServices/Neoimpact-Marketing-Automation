@@ -19,6 +19,7 @@ from app.storage.runtime_db import RuntimeConnection, connect_runtime
 from app.storage.postgres_db import get_column_names
 from app.domain.canaux import resultats_for_canal
 from app.domain.conversion_service import mark_converted, record_objective_entry
+from app.domain.send_time import normalize_creneau
 from app.domain.workflow_nav import (
     find_bloc_by_id,
     pick_next_child,
@@ -311,7 +312,7 @@ def _advance_workflow_after_mail_by_rid(
         cur.execute(
             f"""
             UPDATE {CLIENTS_CAMPAGNES_TABLE}
-            SET ID_Action = ?, Canal = 'Objectif', Action = 'Objectif'
+            SET ID_Action = ?, Canal = 'Objectif', Action = 'Objectif', "Creneau" = 'Indifferent'
             WHERE rowid = ?
             """,
             (cur_id, int(rid)),
@@ -358,9 +359,11 @@ def _advance_workflow_after_mail_by_rid(
         )
         new_canal = "Objectif"
         new_action = "Objectif"
+        new_creneau = "Indifferent"
     else:
         new_canal = _norm_str(nxt.get("Canal"))
         new_action = _norm_str(nxt.get("Action"))
+        new_creneau = normalize_creneau(nxt.get("Creneau"))
 
     if not new_id or not new_action:
         if prev_action == "En attente":
@@ -376,10 +379,10 @@ def _advance_workflow_after_mail_by_rid(
     cur.execute(
         f"""
         UPDATE {CLIENTS_CAMPAGNES_TABLE}
-        SET ID_Action = ?, Canal = ?, Action = ?
+        SET ID_Action = ?, Canal = ?, Action = ?, "Creneau" = ?
         WHERE rowid = ?
         """,
-        (new_id, new_canal, new_action, int(rid)),
+        (new_id, new_canal, new_action, new_creneau, int(rid)),
     )
     return True
 

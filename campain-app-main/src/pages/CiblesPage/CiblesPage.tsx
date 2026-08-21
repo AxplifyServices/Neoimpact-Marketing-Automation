@@ -263,6 +263,18 @@ export default function CiblesPage() {
         },
       },
       {
+        accessorKey: 'pct_engagement_digital_eleve',
+        header: ({ column }) => <DataTableColumnHeader column={column} title="Engagement élevé" />,
+        cell: ({ row }) => {
+          const value = row.original.pct_engagement_digital_eleve;
+          return (
+            <span className="text-sm font-medium text-gray-700">
+              {typeof value === 'number' ? `${value.toFixed(1)} %` : '—'}
+            </span>
+          );
+        },
+      },
+      {
         accessorKey: 'locked',
         header: ({ column }) => <DataTableColumnHeader column={column} title="Statut" />,
         cell: ({ row }) => {

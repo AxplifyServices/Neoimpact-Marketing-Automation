@@ -175,17 +175,21 @@ export default function CreateCiblePage() {
       }
       return apiClient.request(ciblesApi.createFromDB(data));
     },
-    onSuccess: () => {
+    onSuccess: (result: any) => {
       queryClient.invalidateQueries({ queryKey: ['cibles'] });
       queryClient.invalidateQueries({ queryKey: ['cible', id] });
       void invalidateCampaignReferenceCaches(queryClient);
+      const pct = result?.engagement_digital?.pct_eleve;
+      const pctText = typeof pct === 'number'
+        ? ` — ${pct.toFixed(1)} % de clients à engagement digital élevé`
+        : '';
       setToast({
         isOpen: true,
         title: 'Succes',
-        message: isEditing ? 'Cible mise a jour avec succes' : 'Cible creee avec succes',
+        message: `${isEditing ? 'Cible mise a jour avec succes' : 'Cible creee avec succes'}${pctText}`,
         type: 'success',
       });
-      setTimeout(() => navigate('/cibles'), 1500);
+      setTimeout(() => navigate('/cibles'), 2200);
     },
     onError: () => {
       setToast({

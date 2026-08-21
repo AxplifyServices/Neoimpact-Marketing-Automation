@@ -26,6 +26,8 @@ from app.domain.ui_facades.cibles_ui_facade import (
     get_cible_filtre_dict_for_ui,
     list_campaigns_for_objective_filter_ui,
 )
+from app.storage.cibles_store_sqlite import build_db_cible_radicals_query
+
 
 router = APIRouter()
 
@@ -67,6 +69,60 @@ def _validate_segment_filter(filtre: Optional[Dict[str, Any]]) -> None:
                 "allowed_values": sorted(SEGMENT_VALUES),
             },
         )
+
+
+
+def _engagement_summary_for_cible(id_cible: str) -> Dict[str, Any]:
+    """Composition courante de la cible sur le score Engagement_digital."""
+    try:
+        built = build_db_cible_radicals_query(
+            id_cible,
+            exclude_rupture_relation=False,
+        )
+        if built is None:
+            return {
+                "supported": False,
+                "total": 0,
+                "eleve": 0,
+                "pct_eleve": None,
+            }
+        radical_query, radical_params = built
+        with connection(dict_rows=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS total,
+                        COUNT(*) FILTER (WHERE c."Engagement_digital" = 'Eleve') AS eleve
+                    FROM ({}) AS q
+                    JOIN clients AS c
+                      ON c.radical_compte = q."Radical_compte"
+                    """.format(radical_query.as_string(conn) if hasattr(radical_query, "as_string") else str(radical_query)),
+                    radical_params,
+                )
+                row = dict(cur.fetchone() or {})
+        total = int(row.get("total") or 0)
+        eleve = int(row.get("eleve") or 0)
+        pct = (eleve / total * 100.0) if total else 0.0
+        with connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE cibles SET pct_engagement_digital_eleve = %s WHERE id_cible = %s",
+                    (pct, id_cible),
+                )
+        return {
+            "supported": True,
+            "total": total,
+            "eleve": eleve,
+            "pct_eleve": pct,
+        }
+    except Exception:
+        return {
+            "supported": False,
+            "total": 0,
+            "eleve": 0,
+            "pct_eleve": None,
+        }
 
 
 # =========================================================
@@ -239,6 +295,7 @@ def list_cibles(
                     c.source,
                     c.filtre,
                     c.chemin,
+                    c.pct_engagement_digital_eleve,
                     {locked_expr} AS locked,
                     lock_camp.nom_campagne AS lock_campaign_name,
                     lock_camp.etat_campagne AS lock_campaign_state
@@ -362,7 +419,11 @@ def get_cible_filtre(id_cible: str):
 def create_cible_db(payload: CibleDbCreateIn):
     _validate_segment_filter(payload.filtre)
     new_id = create_cible_db_for_ui(payload.nom_cible, payload.filtre)
-    return {"ok": True, "id_cible": new_id}
+    return {
+        "ok": True,
+        "id_cible": new_id,
+        "engagement_digital": _engagement_summary_for_cible(new_id),
+    }
 
 
 @router.post("/cibles/file")
@@ -413,7 +474,10 @@ def update_cible(id_cible: str, payload: CibleUpdateIn):
         filtre_dict=payload.filtre,
         chemin=payload.chemin,
     )
-    return {"ok": True}
+    return {
+        "ok": True,
+        "engagement_digital": _engagement_summary_for_cible(id_cible),
+    }
 
 
 @router.delete("/cibles/{id_cible}")
@@ -433,6 +497,12 @@ def delete_cible(id_cible: str):
 
     delete_cible_for_ui(id_cible)
     return {"ok": True}
+
+
+
+@router.get("/cibles/{id_cible}/engagement-summary")
+def cible_engagement_summary(id_cible: str):
+    return _engagement_summary_for_cible(id_cible)
 
 
 @router.get("/cibles/{id_cible}/preview")

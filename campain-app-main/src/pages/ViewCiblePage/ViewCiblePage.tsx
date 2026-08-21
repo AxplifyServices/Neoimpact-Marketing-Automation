@@ -134,6 +134,19 @@ export default function ViewCiblePage() {
     enabled: !!id,
   });
 
+
+  const { data: engagementSummary } = useQuery<{
+    supported: boolean;
+    total: number;
+    eleve: number;
+    pct_eleve: number | null;
+  }>({
+    queryKey: ['cible-engagement-summary', id],
+    queryFn: () => apiClient.request(ciblesApi.engagementSummary(id!)),
+    enabled: !!id && isDbSource,
+    staleTime: 60 * 1000,
+  });
+
   const previewData = previewResponse?.rows || [];
   const totalRows = previewResponse?.total || 0;
 
@@ -206,7 +219,7 @@ export default function ViewCiblePage() {
         </div>
 
         <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6 mb-6">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">ID Cible</label>
               <div className="w-full px-4 py-2 border border-gray-300 rounded-lg bg-gray-50 text-gray-700">
@@ -227,6 +240,15 @@ export default function ViewCiblePage() {
                 {isDbSource ? 'Base de données' : 'Fichier'}
               </div>
             </div>
+
+            {isDbSource && engagementSummary?.supported && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Engagement digital élevé</label>
+                <div className="w-full px-4 py-2 border border-gray-300 rounded-lg bg-gray-50 text-gray-700">
+                  {engagementSummary.pct_eleve == null ? '—' : `${engagementSummary.pct_eleve.toFixed(1)} %`}
+                </div>
+              </div>
+            )}
           </div>
 
           {isDbSource && objectifBlock && (

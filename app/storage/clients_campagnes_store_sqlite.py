@@ -18,6 +18,7 @@ COLUMNS = [
     "ID_Action",
     "Canal",
     "Action",
+    "Creneau",
     "Last_action",
     "Resultat_last_action",
     "Date_last_action",
@@ -72,6 +73,7 @@ def bulk_insert_clients(rows: Iterable[Dict[str, Any]]) -> int:
             row.setdefault("conversion_canal", None)
             row.setdefault("objective_source_id_action", None)
             row.setdefault("objective_source_canal", None)
+            row.setdefault("Creneau", "Indifferent")
             yield tuple(row.get(column) for column in COLUMNS)
 
     query = sql.SQL("INSERT INTO {table} ({columns}) VALUES ({placeholders})").format(
@@ -107,6 +109,7 @@ def bulk_insert_clients_from_radical_select(
     template.setdefault("conversion_canal", None)
     template.setdefault("objective_source_id_action", None)
     template.setdefault("objective_source_canal", None)
+    template.setdefault("Creneau", "Indifferent")
 
     select_exprs = []
     constant_params: List[Any] = []
