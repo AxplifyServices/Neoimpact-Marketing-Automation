@@ -44,14 +44,11 @@ STATUT_CLIENT = ["Actif", "Inactif", "Prospect", "Rupture de relation"]
 QUALITE = ["Femme", "Homme"]
 CANAL_ACQUISITION = ["Agence", "Digital"]
 
-SEGMENT_ACTUEL = [
-    "Affluent",
-    "En stress",
-    "Jeunes",
+FINANCIAL_PROFILE = [
     "Mass Market",
-    "Premium",
     "Medium",
     "Haut de gamme",
+    "Premium",
 ]
 
 ASSURANCE_ACTUELLE = ["Aucune", "Immobilier", "Vie"]
@@ -310,10 +307,12 @@ def build_client(
         [0.68, 0.13, 0.14, 0.05],
     )
 
+    # Profil financier interne uniquement pour corréler la fake data.
+    # Segment_actuel est désormais exclusivement produit par le moteur de segmentation.
     segment = weighted_choice(
         rng,
-        SEGMENT_ACTUEL,
-        [0.11, 0.07, 0.17, 0.31, 0.10, 0.16, 0.08],
+        FINANCIAL_PROFILE,
+        [0.55, 0.27, 0.13, 0.05],
     )
 
     canal = weighted_choice(rng, CANAL_ACQUISITION, [0.57, 0.43])
@@ -345,13 +344,10 @@ def build_client(
     # Revenu / épargne / crédit
     # --------------------------------------------------------
     revenu_probability = {
-        "Affluent": 0.82,
-        "En stress": 0.48,
-        "Jeunes": 0.35,
-        "Mass Market": 0.58,
-        "Premium": 0.88,
+        "Mass Market": 0.52,
         "Medium": 0.68,
-        "Haut de gamme": 0.94,
+        "Haut de gamme": 0.84,
+        "Premium": 0.92,
     }[segment]
     revenu_domicilie = yn(rng, revenu_probability)
 
@@ -359,13 +355,10 @@ def build_client(
     # Le segment influe seulement sur la distribution à l'intérieur de cette borne.
     max_revenu = float(NUMERIC_BOUNDS["montant_revenu"][1])
     segment_income_factor = {
-        "Affluent": 0.80,
-        "En stress": 0.28,
-        "Jeunes": 0.22,
         "Mass Market": 0.38,
-        "Premium": 0.72,
-        "Medium": 0.52,
-        "Haut de gamme": 1.00,
+        "Medium": 0.58,
+        "Haut de gamme": 0.82,
+        "Premium": 1.00,
     }[segment]
     revenu_cap = max(3_000.0, max_revenu * segment_income_factor)
     montant_revenu = round(rng.triangular(0.0, revenu_cap, revenu_cap * 0.42), 2)
@@ -597,7 +590,7 @@ def build_client(
         "Activation_du_compte": activation_compte,
         "Activation_carte": activation_carte,
         "Canal_acquisition": canal,
-        "Segment_actuel": segment,
+        "Segment_actuel": None,
         "Numero_Tel": numero_tel,
         "Mail": email,
         "Epargne": epargne,

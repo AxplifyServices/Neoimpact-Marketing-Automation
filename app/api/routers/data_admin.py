@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 import pandas as pd
@@ -20,7 +20,7 @@ USECASE_COLUMNS = {
         "Age", "Qualite",
         "Region", "Agence", "Gestionnaire",
         "STATUT_CLIENT",
-        "Segment_actuel", "Canal_acquisition",
+        "Canal_acquisition",
         "Epargne",
         "Carte_Actuelle", "Assurance_Actuelle",
         "Nature_carte", "Categorie", "Dossier_Complet", "Validation_KYC", "Activation_du_compte",
@@ -275,13 +275,6 @@ CATEGORICAL_MAPPING: Dict[str, List[str]] = {
 
     # --- Colonnes à modifier ---
     "Epargne": YES_NO,
-
-    "Segment_actuel": [
-        "Affluent", "En stress", "Jeunes", "Mass Market", "Premium", "Medium", "Haut de gamme"
-    ],
-    "Segment Actuel": [
-        "Affluent", "En stress", "Jeunes", "Mass Market", "Premium", "Medium", "Haut de gamme"
-    ],
 
     # Assurance_Actuelle (existant) -> mapping demandé
     "Assurance_Actuelle": ["Aucune", "Immobilier", "Vie"],
@@ -619,6 +612,11 @@ def read_table(payload: ReadTableIn):
 
 @router.post("/data/update-cell")
 def update_cell(payload: UpdateCellIn):
+    if payload.table == "clients" and payload.col == "Segment_actuel":
+        raise HTTPException(
+            status_code=403,
+            detail="Segment_actuel est calculé automatiquement par le moteur de segmentation.",
+        )
     db.update_cell(payload.table, payload.rowid, payload.col, payload.value)
     return {"ok": True}
 

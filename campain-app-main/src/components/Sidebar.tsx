@@ -1,6 +1,20 @@
-import { Megaphone, Phone, History, LayoutDashboard, ChevronRight, Menu, X, FileText, Target, Users } from 'lucide-react';
-import { useNavigate, useLocation } from 'react-router-dom';
-import { useState } from 'react';
+import {
+  BarChart3,
+  ChevronDown,
+  ChevronRight,
+  Database,
+  FileText,
+  History,
+  LayoutDashboard,
+  Megaphone,
+  Menu,
+  Phone,
+  Target,
+  Users,
+  X,
+} from 'lucide-react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { useEffect, useState } from 'react';
 import { preloadRoute } from '@/lib/route-preload';
 
 interface NavItem {
@@ -14,6 +28,11 @@ export default function Sidebar() {
   const navigate = useNavigate();
   const location = useLocation();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [isDataToolsOpen, setIsDataToolsOpen] = useState(location.pathname.startsWith('/outils-data'));
+
+  useEffect(() => {
+    if (location.pathname.startsWith('/outils-data')) setIsDataToolsOpen(true);
+  }, [location.pathname]);
 
   const navItems: NavItem[] = [
     { icon: <Megaphone size={16} />, label: 'Campagnes', path: '/campagnes', primary: true },
@@ -30,77 +49,86 @@ export default function Sidebar() {
     setIsMobileMenuOpen(false);
   };
 
+  const segmentationPath = '/outils-data/segmentation';
+  const segmentationActive = location.pathname.startsWith(segmentationPath);
+  const dataToolsActive = location.pathname.startsWith('/outils-data');
+
   return (
     <>
-      {/* Mobile Menu Button */}
       <button
         type="button"
         onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-        className="lg:hidden fixed top-4 left-4 z-50 p-2 bg-slate-900 text-white rounded-xl shadow-lg hover:bg-slate-800 transition-colors"
+        className="fixed left-4 top-4 z-50 rounded-xl bg-slate-900 p-2 text-white shadow-lg transition-colors hover:bg-slate-800 lg:hidden"
+        aria-label={isMobileMenuOpen ? 'Fermer le menu' : 'Ouvrir le menu'}
       >
         {isMobileMenuOpen ? <X size={24} /> : <Menu size={24} />}
       </button>
 
-      {/* Mobile Overlay */}
       {isMobileMenuOpen && (
-        <div
-          className="lg:hidden fixed inset-0 bg-black bg-opacity-50 z-30"
-          onClick={() => setIsMobileMenuOpen(false)}
-        />
+        <div className="fixed inset-0 z-30 bg-black bg-opacity-50 lg:hidden" onClick={() => setIsMobileMenuOpen(false)} />
       )}
 
-      {/* Sidebar */}
-      <div className={`
-        fixed lg:static inset-y-0 left-0 z-40
-        w-64 h-screen bg-white flex flex-col border-r border-gray-200
-        transform transition-transform duration-300 ease-in-out
-        ${isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
-      `}>
-      {/* Header */}
-      <div className="px-4 pt-6 pb-4">
-        <h1 className="text-2xl font-light mb-1.5">
-          Campaign<span className="text-blue-600 font-medium">Hub</span>
-        </h1>
-        <p className="text-gray-500 text-xs">Manage with ease</p>
-      </div>
+      <div className={`fixed inset-y-0 left-0 z-40 flex h-screen w-64 flex-col border-r border-gray-200 bg-white transform transition-transform duration-300 ease-in-out lg:static ${isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}`}>
+        <div className="px-4 pb-4 pt-6">
+          <h1 className="mb-1.5 text-2xl font-light">Campaign<span className="font-medium text-blue-600">Hub</span></h1>
+          <p className="text-xs text-gray-500">Manage with ease</p>
+        </div>
 
-        {/* Navigation */}
-        <nav className="px-4 flex-1">
+        <nav className="flex-1 overflow-y-auto px-4 pb-4">
           <div className="space-y-2">
-            {navItems.map((item, index) => {
+            {navItems.map((item) => {
               const isActive = location.pathname === item.path;
               return (
                 <button
-                  key={index}
+                  key={item.path}
                   type="button"
                   onClick={() => handleNavigation(item.path)}
                   onMouseEnter={() => preloadRoute(item.path)}
                   onFocus={() => preloadRoute(item.path)}
                   onPointerDown={() => preloadRoute(item.path)}
-                  className={`
-                    w-full flex items-center justify-between
-                    px-3 py-2 rounded-xl
-                    transition-all duration-200
-                    ${
-                      isActive
-                        ? 'bg-slate-900 text-white hover:bg-slate-800 shadow-lg'
-                        : 'text-gray-700 hover:bg-gray-100'
-                    }
-                  `}
+                  className={`flex w-full items-center justify-between rounded-xl px-3 py-2 transition-all duration-200 ${isActive ? 'bg-slate-900 text-white shadow-lg hover:bg-slate-800' : 'text-gray-700 hover:bg-gray-100'}`}
                 >
                   <div className="flex items-center gap-3">
-                    <div className="w-4 h-4 flex items-center justify-center">
-                      {item.icon}
-                    </div>
+                    <div className="flex h-4 w-4 items-center justify-center">{item.icon}</div>
                     <span className="text-sm font-medium">{item.label}</span>
                   </div>
                   {isActive && <ChevronRight size={16} />}
                 </button>
               );
             })}
+
+            <div className="pt-1">
+              <button
+                type="button"
+                onClick={() => setIsDataToolsOpen((open) => !open)}
+                className={`flex w-full items-center justify-between rounded-xl px-3 py-2 transition-all duration-200 ${dataToolsActive ? 'bg-slate-100 text-slate-900' : 'text-gray-700 hover:bg-gray-100'}`}
+                aria-expanded={isDataToolsOpen}
+              >
+                <div className="flex items-center gap-3">
+                  <div className="flex h-4 w-4 items-center justify-center"><Database size={16} /></div>
+                  <span className="text-sm font-medium">Outils data</span>
+                </div>
+                <ChevronDown size={16} className={`transition-transform ${isDataToolsOpen ? 'rotate-180' : ''}`} />
+              </button>
+
+              {isDataToolsOpen && (
+                <div className="ml-4 mt-1 border-l border-gray-200 pl-3">
+                  <button
+                    type="button"
+                    onClick={() => handleNavigation(segmentationPath)}
+                    onMouseEnter={() => preloadRoute(segmentationPath)}
+                    onFocus={() => preloadRoute(segmentationPath)}
+                    onPointerDown={() => preloadRoute(segmentationPath)}
+                    className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm transition-colors ${segmentationActive ? 'bg-slate-900 text-white' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'}`}
+                  >
+                    <div className="flex items-center gap-2.5"><BarChart3 size={15} /><span className="font-medium">Segmentation</span></div>
+                    {segmentationActive && <ChevronRight size={14} />}
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </nav>
-
       </div>
     </>
   );

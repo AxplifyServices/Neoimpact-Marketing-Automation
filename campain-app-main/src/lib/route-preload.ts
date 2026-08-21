@@ -12,6 +12,7 @@ export const routeLoaders = {
   crc: () => import('@/pages/CRCPage'),
   historique: () => import('@/pages/HistoriquePage'),
   dashboard: () => import('@/pages/DashboardPage'),
+  segmentation: () => import('@/pages/SegmentationPage'),
 };
 
 type RouteLoaderKey = keyof typeof routeLoaders;
@@ -33,6 +34,7 @@ const pathToLoader: Array<[RegExp, RouteLoaderKey]> = [
   [/^\/crc/, 'crc'],
   [/^\/historique/, 'historique'],
   [/^\/dashboard/, 'dashboard'],
+  [/^\/outils-data\/segmentation/, 'segmentation'],
 ];
 
 const preloaded = new Set<RouteLoaderKey>();

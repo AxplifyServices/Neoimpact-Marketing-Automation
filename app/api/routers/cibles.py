@@ -32,6 +32,41 @@ router = APIRouter()
 # Colonnes indispensables (STRICT) — alignées DB
 STRICT_REQUIRED_COLS = ["ID_Client", "Numero_Tel", "Mail"]
 
+SEGMENT_VALUES = {
+    "Mass Market",
+    "Medium",
+    "Haut de gamme",
+    "Premium",
+    "Banque privée",
+}
+
+
+def _validate_segment_filter(filtre: Optional[Dict[str, Any]]) -> None:
+    if not filtre or "Segment_actuel" not in filtre:
+        return
+
+    raw = filtre.get("Segment_actuel")
+    if isinstance(raw, dict):
+        raw = raw.get("values")
+
+    if not isinstance(raw, list):
+        raise HTTPException(
+            status_code=400,
+            detail="Le filtre Segment_actuel doit contenir une liste de segments.",
+        )
+
+    invalid = sorted({str(value) for value in raw if str(value) not in SEGMENT_VALUES})
+    if invalid:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "INVALID_SEGMENT_FILTER",
+                "message": "Certaines valeurs de segmentation ne sont plus disponibles.",
+                "invalid_values": invalid,
+                "allowed_values": sorted(SEGMENT_VALUES),
+            },
+        )
+
 
 # =========================================================
 # Helpers: erreurs 400 structurées (schema strict)
@@ -324,6 +359,7 @@ def get_cible_filtre(id_cible: str):
 
 @router.post("/cibles/db")
 def create_cible_db(payload: CibleDbCreateIn):
+    _validate_segment_filter(payload.filtre)
     new_id = create_cible_db_for_ui(payload.nom_cible, payload.filtre)
     return {"ok": True, "id_cible": new_id}
 
@@ -367,6 +403,7 @@ async def create_cible_file(
 
 @router.put("/cibles/{id_cible}")
 def update_cible(id_cible: str, payload: CibleUpdateIn):
+    _validate_segment_filter(payload.filtre)
     update_cible_for_ui(
         id_cible=id_cible,
         nom_cible=payload.nom_cible,

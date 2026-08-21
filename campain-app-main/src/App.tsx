@@ -17,6 +17,7 @@ const ViewClientPage = lazy(routeLoaders.viewClient);
 const CRCPage = lazy(routeLoaders.crc);
 const HistoriquePage = lazy(routeLoaders.historique);
 const DashboardPage = lazy(routeLoaders.dashboard);
+const SegmentationPage = lazy(routeLoaders.segmentation);
 
 function RouteFallback() {
   return (
@@ -51,6 +52,7 @@ function App() {
               <Route path="/crc" element={<CRCPage />} />
               <Route path="/historique" element={<HistoriquePage />} />
               <Route path="/dashboard" element={<DashboardPage />} />
+              <Route path="/outils-data/segmentation" element={<SegmentationPage />} />
               <Route path="/terrain" element={<Navigate to="/campagnes" replace />} />
               <Route path="/support" element={<Navigate to="/campagnes" replace />} />
             </Routes>

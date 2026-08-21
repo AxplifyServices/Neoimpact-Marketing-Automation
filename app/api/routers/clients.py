@@ -39,6 +39,9 @@ def create_client(payload: ClientCreateIn):
     data.pop("Radical_compte", None)
     data.pop("RADICAL_COMPTE", None)
 
+    # Segment_actuel est une donnée calculée : elle n'est jamais saisie manuellement.
+    data.pop("Segment_actuel", None)
+
     # 3) Garder UNIQUEMENT les colonnes existantes dans la table clients
     cols = db.get_table_columns("clients")  # [(name, type), ...]
     allowed_cols = set(str(c) for c, _ in cols)

@@ -134,6 +134,15 @@ export default function CreateCiblePage() {
 
   const getFieldKind = (field: string): FilterKind => numFields.includes(field) ? 'numeric' : 'categorical';
 
+  const sanitizeCategoricalValues = (column: string, values: unknown[]): string[] => {
+    const normalized = values.map(String);
+    if (column !== 'Segment_actuel') return normalized;
+
+    const allowed = valuesByField.Segment_actuel ?? [];
+    if (allowed.length === 0) return [];
+    return normalized.filter((value) => allowed.includes(value));
+  };
+
   // Fetch existing cible data if editing or duplicating
   const { data: cibleData, isLoading: cibleLoading } = useQuery<CibleDetail>({
     queryKey: ['cible', sourceId],
@@ -251,7 +260,7 @@ export default function CreateCiblePage() {
             nextFilters.push({
               id: Date.now().toString() + Math.random(),
               column,
-              values: value.map((item) => String(item)),
+              values: sanitizeCategoricalValues(column, value),
             });
             return;
           }
@@ -261,7 +270,7 @@ export default function CreateCiblePage() {
               nextFilters.push({
                 id: Date.now().toString() + Math.random(),
                 column,
-                values: value.values.map((item: unknown) => String(item)),
+                values: sanitizeCategoricalValues(column, value.values),
               });
               return;
             }
@@ -282,7 +291,7 @@ export default function CreateCiblePage() {
         console.error('Error parsing filters:', error);
       }
     }
-  }, [isEditing, isDuplicating, cibleData, filterData]);
+  }, [isEditing, isDuplicating, cibleData, filterData, valuesByField]);
 
   const addFilter = () => {
     const defaultColumn = allFields[0] || '';
