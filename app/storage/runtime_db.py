@@ -27,6 +27,7 @@ _LEGACY_QUOTED_IDENTIFIERS = (
     "Validation_KYC",
     "Dotation_touristique",
     "Segment_actuel",
+    "Risque_attrition",
     "Dossier_Complet",
     "Canal_acquisition",
     "Assurance_Actuelle",

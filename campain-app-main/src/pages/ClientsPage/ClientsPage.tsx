@@ -19,6 +19,8 @@ interface EditingCell {
   value: string | number;
 }
 
+const CLIENT_READ_ONLY_COLUMNS = new Set(['Segment_actuel', 'Risque_attrition']);
+
 const CLIENT_PRIMARY_COLUMNS = [
   'ID_Client',
   'Nom',
@@ -29,6 +31,7 @@ const CLIENT_PRIMARY_COLUMNS = [
   'Agence',
   'Gestionnaire',
   'Segment_actuel',
+  'Risque_attrition',
   'STATUT_CLIENT',
 ];
 
@@ -103,6 +106,7 @@ export default function ClientsPage() {
   });
 
   const handleCellEdit = (rowid: number, col: string, currentValue: any) => {
+    if (CLIENT_READ_ONLY_COLUMNS.has(col)) return;
     setEditingCell({ rowid, col, value: currentValue });
   };
 
@@ -278,7 +282,7 @@ export default function ClientsPage() {
                                 </div>
                               ) : (
                                 <div
-                                  className="cursor-pointer hover:bg-blue-50 px-2 py-1 rounded"
+                                  className={`${CLIENT_READ_ONLY_COLUMNS.has(column.name) ? 'cursor-default' : 'cursor-pointer hover:bg-blue-50'} px-2 py-1 rounded`}
                                   onClick={() => handleCellEdit(Number(row.__rowid__ ?? row.rowid), column.name, row[column.name])}
                                 >
                                   {row[column.name] !== null && row[column.name] !== undefined

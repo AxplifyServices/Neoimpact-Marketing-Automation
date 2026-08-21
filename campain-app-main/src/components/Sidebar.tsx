@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   BarChart3,
   ChevronDown,
   ChevronRight,
@@ -50,7 +51,9 @@ export default function Sidebar() {
   };
 
   const segmentationPath = '/outils-data/segmentation';
+  const attritionPath = '/outils-data/attrition';
   const segmentationActive = location.pathname.startsWith(segmentationPath);
+  const attritionActive = location.pathname.startsWith(attritionPath);
   const dataToolsActive = location.pathname.startsWith('/outils-data');
 
   return (
@@ -123,6 +126,17 @@ export default function Sidebar() {
                   >
                     <div className="flex items-center gap-2.5"><BarChart3 size={15} /><span className="font-medium">Segmentation</span></div>
                     {segmentationActive && <ChevronRight size={14} />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleNavigation(attritionPath)}
+                    onMouseEnter={() => preloadRoute(attritionPath)}
+                    onFocus={() => preloadRoute(attritionPath)}
+                    onPointerDown={() => preloadRoute(attritionPath)}
+                    className={`mt-1 flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm transition-colors ${attritionActive ? 'bg-slate-900 text-white' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'}`}
+                  >
+                    <div className="flex items-center gap-2.5"><AlertTriangle size={15} /><span className="font-medium">Attrition</span></div>
+                    {attritionActive && <ChevronRight size={14} />}
                   </button>
                 </div>
               )}

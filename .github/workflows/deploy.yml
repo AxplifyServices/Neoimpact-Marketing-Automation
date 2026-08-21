@@ -110,7 +110,8 @@ jobs:
               marketing_outbound_worker \
               marketing_inbound_worker \
               marketing_batch_worker \
-              marketing_segmentation_worker
+              marketing_segmentation_worker \
+              marketing_attrition_worker
 
             wait_worker() {
               service="$1"
@@ -139,6 +140,7 @@ jobs:
             wait_worker marketing_inbound_worker inbound
             wait_worker marketing_batch_worker batch
             wait_worker marketing_segmentation_worker segmentation
+            wait_worker marketing_attrition_worker attrition
 
             # Le frontend n'est remplacé qu'une fois l'API ET les moteurs prêts.
             echo "Starting frontend..."
@@ -183,7 +185,8 @@ jobs:
               marketing_outbound_worker \
               marketing_inbound_worker \
               marketing_batch_worker \
-              marketing_segmentation_worker
+              marketing_segmentation_worker \
+              marketing_attrition_worker
 
             echo "Frontend logs:"
             docker logs marketing_frontend --tail 50

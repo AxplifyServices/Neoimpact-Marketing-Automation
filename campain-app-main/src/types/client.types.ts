@@ -15,6 +15,7 @@ export interface Client {
   STATUT_CLIENT?: string;
   Canal_acquisition?: string;
   Segment_actuel?: string;
+  Risque_attrition?: string;
   Carte_Actuelle?: string;
   Assurance_Actuelle?: string;
 
