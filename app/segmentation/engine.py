@@ -56,7 +56,12 @@ def _check_period_readiness(conn, annee_mois: int) -> PeriodReadiness:
         cur.execute("SELECT COUNT(*) FROM clients")
         client_count = int((cur.fetchone() or [0])[0] or 0)
         cur.execute(
-            "SELECT COUNT(*) FROM dm_segmentation_variables WHERE annee_mois = %s",
+            """
+            SELECT COUNT(*)
+            FROM dm_segmentation_variables AS v
+            JOIN clients AS c USING (radical_compte)
+            WHERE v.annee_mois = %s
+            """,
             (annee_mois,),
         )
         variable_count = int((cur.fetchone() or [0])[0] or 0)

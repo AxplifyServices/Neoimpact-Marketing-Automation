@@ -7,6 +7,10 @@ from datetime import datetime, time, timedelta
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from app.segmentation.datamart import (
+    SegmentationDatamartAlreadyRunningError,
+    ensure_segmentation_datamart_current,
+)
 from app.segmentation.engine import (
     SegmentationAlreadyRunningError,
     SegmentationDataNotReadyError,
@@ -79,17 +83,23 @@ def _next_daily_run(now: datetime, *, timezone: ZoneInfo, hour: int, minute: int
 def _run_once(trigger: str) -> None:
     global _LAST_RUN, _LAST_ERROR
     try:
+        # Le datamart est entretenu avant chaque tentative de segmentation.
+        # Pendant le même mois, cette étape devient un simple contrôle rapide.
+        # Au changement de mois elle ajoute le nouveau mois, rattrape les clients
+        # absents et supprime automatiquement le 16e mois des clients touchés.
+        datamart = ensure_segmentation_datamart_current()
         result = run_segmentation_cycle()
         result["trigger"] = trigger
+        result["datamart"] = datamart
         with _STATUS_LOCK:
             _LAST_RUN = result
             _LAST_ERROR = None
         logger.info("Segmentation terminée (%s): %s", trigger, result)
+    except SegmentationDatamartAlreadyRunningError as exc:
+        logger.warning("Alimentation datamart ignorée (%s): %s", trigger, exc)
     except SegmentationAlreadyRunningError as exc:
         logger.warning("Segmentation ignorée (%s): %s", trigger, exc)
     except SegmentationDataNotReadyError as exc:
-        # Le worker reste vivant : lorsque le datamart mensuel sera alimenté,
-        # le prochain passage quotidien pourra reprendre automatiquement.
         with _STATUS_LOCK:
             _LAST_ERROR = str(exc)
         logger.error("Segmentation non exécutée (%s): %s", trigger, exc)

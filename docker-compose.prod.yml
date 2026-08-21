@@ -156,7 +156,7 @@ services:
       <<: *backend-environment
       APP_PROCESS_ROLE: segmentation_worker
       SEGMENTATION_WORKER_ENABLED: "true"
-      SEGMENTATION_RUN_ON_START: "false"
+      SEGMENTATION_RUN_ON_START: "true"
       SEGMENTATION_TIMEZONE: "Africa/Casablanca"
       SEGMENTATION_DAILY_HOUR: "5"
       SEGMENTATION_DAILY_MINUTE: "0"
