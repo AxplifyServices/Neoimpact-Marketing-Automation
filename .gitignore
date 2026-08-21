@@ -37,3 +37,6 @@ database.db
 *.pfx
 cle_git
 cle_git.*
+
+# Runtime ML artifacts (persisted in Docker volume)
+data/models/
