@@ -110,8 +110,10 @@ def _create_due_base(conn, *, annee_mois: int, run_date: date) -> int:
               ON ls.radical_compte = v.radical_compte
             WHERE v.annee_mois = %s
               AND v.anciennete_mois >= 3
+              AND LOWER(BTRIM(COALESCE(c."STATUT_CLIENT", ''))) = LOWER('Actif')
               AND (
-                    ls.last_segmentation_date IS NULL
+                    c."Segment_actuel" IS NULL
+                    OR ls.last_segmentation_date IS NULL
                     OR ls.last_segmentation_date <= (%s::date - INTERVAL '3 months')::date
               )
             """,
@@ -212,6 +214,7 @@ def _create_current_features(conn, *, annee_mois: int, due_only: bool) -> int:
               ON c.radical_compte = v.radical_compte
             {scope_join}
             WHERE v.annee_mois = %s
+              AND LOWER(BTRIM(COALESCE(c."STATUT_CLIENT", ''))) = LOWER('Actif')
         ), history_ranked AS (
             SELECT
                 cr.radical_compte,
@@ -483,6 +486,45 @@ def _create_due_results(conn, *, annee_mois: int) -> Dict[str, int]:
         return {str(segment): int(count) for segment, count in cur.fetchall()}
 
 
+
+def _clear_inactive_current_segments(conn, *, dry_run: bool) -> Dict[str, int]:
+    """Retire le segment courant de tout client qui n'est pas actuellement actif.
+
+    L'historique de segmentation reste intact dans dm_segmentation_resultats.
+    Lorsqu'un client redevient Actif, Segment_actuel étant NULL, il redevient
+    immédiatement éligible au prochain passage quotidien, sans attendre
+    l'échéance trimestrielle de son ancien résultat.
+    """
+    with conn.cursor() as cur:
+        if dry_run:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM clients
+                WHERE LOWER(BTRIM(COALESCE("STATUT_CLIENT", ''))) <> LOWER('Actif')
+                  AND "Segment_actuel" IS NOT NULL
+                """
+            )
+            would_clear = int((cur.fetchone() or [0])[0] or 0)
+            return {
+                "cleared_inactive_clients": 0,
+                "would_clear_inactive_clients": would_clear,
+            }
+
+        cur.execute(
+            """
+            UPDATE clients
+            SET "Segment_actuel" = NULL
+            WHERE LOWER(BTRIM(COALESCE("STATUT_CLIENT", ''))) <> LOWER('Actif')
+              AND "Segment_actuel" IS NOT NULL
+            """
+        )
+        return {
+            "cleared_inactive_clients": max(0, int(cur.rowcount or 0)),
+            "would_clear_inactive_clients": 0,
+        }
+
+
 def _persist_results(conn, *, annee_mois: int, run_date: date, dry_run: bool) -> Dict[str, int]:
     if dry_run:
         with conn.cursor() as cur:
@@ -635,6 +677,11 @@ def run_segmentation_cycle(
                 "Le scoring est volontairement bloqué pour éviter un résultat partiel."
             )
 
+        inactive_cleanup = _clear_inactive_current_segments(
+            conn,
+            dry_run=dry_run,
+        )
+
         due_count = _create_due_base(
             conn,
             annee_mois=target_month,
@@ -658,6 +705,7 @@ def run_segmentation_cycle(
                 "inserted_results": 0,
                 "updated_clients": 0,
                 "cleared_unsegmented_clients": 0,
+                **inactive_cleanup,
             }
 
         cached = _cached_medians_cover_due_groups(conn, annee_mois=target_month)
@@ -697,6 +745,7 @@ def run_segmentation_cycle(
             "reference_groups": median_groups,
             "segments": distribution,
             **persisted,
+            **inactive_cleanup,
         }
 
         if dry_run:
