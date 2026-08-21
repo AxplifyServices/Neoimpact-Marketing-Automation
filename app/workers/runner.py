@@ -75,12 +75,27 @@ def _batch_spec() -> Tuple[Callable[[], Any], Callable[[], None], Callable[[], D
     )
 
 
+
+def _segmentation_spec() -> Tuple[Callable[[], Any], Callable[[], None], Callable[[], Dict[str, Any]], Callable[[Dict[str, Any]], bool]]:
+    from app.segmentation.worker import (
+        segmentation_worker_status,
+        start_segmentation_worker,
+        stop_segmentation_worker,
+    )
+    return (
+        start_segmentation_worker,
+        stop_segmentation_worker,
+        segmentation_worker_status,
+        lambda status: not bool(status.get("enabled")) or bool(status.get("running")),
+    )
+
 def _spec(role: str):
     specs = {
         "campaign": _campaign_spec,
         "outbound": _outbound_spec,
         "inbound": _inbound_spec,
         "batch": _batch_spec,
+        "segmentation": _segmentation_spec,
     }
     factory = specs.get(role)
     if factory is None:
@@ -91,7 +106,7 @@ def _spec(role: str):
 def main() -> int:
     role = str(sys.argv[1] if len(sys.argv) > 1 else os.getenv("WORKER_ROLE") or "").strip().lower()
     if not role:
-        print("usage: python -m app.workers.runner <campaign|outbound|inbound|batch>", file=sys.stderr)
+        print("usage: python -m app.workers.runner <campaign|outbound|inbound|batch|segmentation>", file=sys.stderr)
         return 2
 
     signal.signal(signal.SIGTERM, _signal_handler)

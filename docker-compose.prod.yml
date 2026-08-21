@@ -147,6 +147,29 @@ services:
       retries: 6
       start_period: 15s
 
+
+  marketing_segmentation_worker:
+    <<: *backend-runtime
+    command: ["python", "-m", "app.workers.runner", "segmentation"]
+    cpu_shares: 256
+    environment:
+      <<: *backend-environment
+      APP_PROCESS_ROLE: segmentation_worker
+      SEGMENTATION_WORKER_ENABLED: "true"
+      SEGMENTATION_RUN_ON_START: "false"
+      SEGMENTATION_TIMEZONE: "Africa/Casablanca"
+      SEGMENTATION_DAILY_HOUR: "5"
+      SEGMENTATION_DAILY_MINUTE: "0"
+      POSTGRES_POOL_MIN_SIZE: "0"
+      POSTGRES_POOL_MAX_SIZE: "2"
+      POSTGRES_POOL_TIMEOUT_SECONDS: "15"
+    healthcheck:
+      test: ["CMD-SHELL", "python -m app.workers.healthcheck segmentation"]
+      interval: 10s
+      timeout: 8s
+      retries: 6
+      start_period: 30s
+
   marketing_frontend:
     build:
       context: ./campain-app-main

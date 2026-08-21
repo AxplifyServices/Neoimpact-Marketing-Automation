@@ -32,3 +32,6 @@ git commit -m "message clair"
 git push origin main
 
 
+** Serveur : 
+
+cd /opt/apps/marketing-automation/repo 

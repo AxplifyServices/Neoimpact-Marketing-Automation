@@ -44,6 +44,7 @@ def health():
         outbound_worker = worker_group_status("outbound")
         inbound_worker = worker_group_status("inbound")
         batch_worker = worker_group_status("batch")
+        segmentation_worker = worker_group_status("segmentation")
         return {
             "ok": True,
             "database": {
@@ -60,6 +61,7 @@ def health():
                 "outbound": outbound_worker,
                 "inbound": inbound_worker,
                 "batch": batch_worker,
+                "segmentation": segmentation_worker,
             },
             "orchestration": {
                 "worker": campaign_worker,
