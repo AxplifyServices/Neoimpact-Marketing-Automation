@@ -68,9 +68,24 @@ jobs:
               exit 1
             fi
 
+            # Les migrations DDL (ALTER TABLE / CREATE INDEX) peuvent nécessiter
+            # des verrous exclusifs. L'ancien backend et les workers gardent des
+            # connexions PostgreSQL actives et peuvent provoquer un deadlock
+            # pendant ces migrations. Les images ont déjà été construites :
+            # on arrête donc uniquement les processus qui utilisent la base juste
+            # avant la migration, puis ils seront recréés plus bas comme avant.
+            echo "Stopping database clients before schema migrations..."
+            for service in               marketing_app               marketing_campaign_worker               marketing_outbound_worker               marketing_inbound_worker               marketing_batch_worker               marketing_segmentation_worker               marketing_attrition_worker               marketing_digital_engagement_worker; do
+              container_id="$(docker compose -f "$COMPOSE_FILE" ps -q "$service" 2>/dev/null || true)"
+              if [ -n "$container_id" ]; then
+                echo "Stopping $service..."
+                docker compose -f "$COMPOSE_FILE" stop -t 30 "$service"
+              fi
+            done
+
             # IMPORTANT : le schéma est mis à niveau avant le nouveau backend.
             # Ainsi /api/health et les workers peuvent utiliser immédiatement les
-            # tables/colonnes du commit en cours (ex. orchestration_jobs de 009).
+            # tables/colonnes du commit en cours.
             COMPOSE_FILE="$COMPOSE_FILE" bash deploy/apply_migrations.sh
 
             echo "Starting backend..."
