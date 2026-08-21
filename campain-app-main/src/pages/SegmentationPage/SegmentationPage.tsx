@@ -240,7 +240,7 @@ export default function SegmentationPage() {
                   <div className="h-44">
                     <ResponsiveContainer width="100%" height="100%">
                       <PieChart>
-                        <Pie data={segmentData} dataKey="clients" nameKey="segment" innerRadius={44} outerRadius={70} paddingAngle={2} strokeWidth={0}>
+                        <Pie data={segmentData.map((item) => ({ ...item }))} dataKey="clients" nameKey="segment" innerRadius={44} outerRadius={70} paddingAngle={2} strokeWidth={0}>
                           {segmentData.map((item) => (
                             <Cell key={item.segment} fill={SEGMENT_COLORS[item.segment] ?? '#94a3b8'} />
                           ))}
