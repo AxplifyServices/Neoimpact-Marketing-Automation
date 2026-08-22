@@ -157,6 +157,13 @@ def train_model(conn) -> Dict[str, Any]:
         "nthread": max(1, int(os.getenv("BEST_CHANNEL_XGBOOST_THREADS", "2") or "2")),
     }
     evals_result: Dict[str, Any] = {}
+    logger.info(
+        "Entraînement Best Channel démarré: rows=%s positives=%s regions=%s channels=%s",
+        len(rows),
+        int(y.sum()),
+        len(categories.get("regions") or []),
+        len(categories.get("channels") or []),
+    )
     booster = xgb.train(
         params,
         dtrain,

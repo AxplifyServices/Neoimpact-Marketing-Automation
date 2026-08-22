@@ -10,6 +10,7 @@ import {
   Megaphone,
   Menu,
   Phone,
+  RadioTower,
   Target,
   Users,
   Smartphone,
@@ -54,9 +55,11 @@ export default function Sidebar() {
   const segmentationPath = '/outils-data/segmentation';
   const attritionPath = '/outils-data/attrition';
   const digitalEngagementPath = '/outils-data/engagement-digital';
+  const bestChannelPath = '/outils-data/best-channel';
   const segmentationActive = location.pathname.startsWith(segmentationPath);
   const attritionActive = location.pathname.startsWith(attritionPath);
   const digitalEngagementActive = location.pathname.startsWith(digitalEngagementPath);
+  const bestChannelActive = location.pathname.startsWith(bestChannelPath);
   const dataToolsActive = location.pathname.startsWith('/outils-data');
 
   return (
@@ -151,6 +154,17 @@ export default function Sidebar() {
                   >
                     <div className="flex items-center gap-2.5"><Smartphone size={15} /><span className="font-medium">Engagement digital</span></div>
                     {digitalEngagementActive && <ChevronRight size={14} />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleNavigation(bestChannelPath)}
+                    onMouseEnter={() => preloadRoute(bestChannelPath)}
+                    onFocus={() => preloadRoute(bestChannelPath)}
+                    onPointerDown={() => preloadRoute(bestChannelPath)}
+                    className={`mt-1 flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm transition-colors ${bestChannelActive ? 'bg-slate-900 text-white' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'}`}
+                  >
+                    <div className="flex items-center gap-2.5"><RadioTower size={15} /><span className="font-medium">Best canal</span></div>
+                    {bestChannelActive && <ChevronRight size={14} />}
                   </button>
                 </div>
               )}

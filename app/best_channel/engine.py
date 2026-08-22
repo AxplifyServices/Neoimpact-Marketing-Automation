@@ -118,6 +118,11 @@ def run_best_channel_cycle(*, run_date: date | None = None, trigger: str = "manu
             scored = 0
             after: str | None = None
             top1_counts: Dict[str, int] = {}
+            logger.info(
+                "Scoring Best Channel démarré: run_date=%s batch_size=%s",
+                run_date.isoformat(),
+                batch_size,
+            )
             while True:
                 clients = _fetch_due_clients(conn, run_date, limit=batch_size, after_radical=after)
                 if not clients:
@@ -174,6 +179,11 @@ def run_best_channel_cycle(*, run_date: date | None = None, trigger: str = "manu
                 conn.commit()
                 scored += len(clients)
                 after = str(clients[-1].get("radical_compte") or "")
+                logger.info(
+                    "Scoring Best Channel progression: clients_scores=%s dernier_radical=%s",
+                    scored,
+                    after,
+                )
                 if len(clients) < batch_size:
                     break
 
