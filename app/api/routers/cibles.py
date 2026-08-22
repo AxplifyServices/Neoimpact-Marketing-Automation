@@ -27,6 +27,7 @@ from app.domain.ui_facades.cibles_ui_facade import (
     list_campaigns_for_objective_filter_ui,
 )
 from app.storage.cibles_store_sqlite import build_db_cible_radicals_query
+from app.commercial_pressure.service import pressure_summary_for_cible
 
 
 router = APIRouter()
@@ -546,6 +547,13 @@ def cible_engagement_summary(id_cible: str):
 @router.get("/cibles/{id_cible}/best-channel-summary")
 def cible_best_channel_summary(id_cible: str):
     return _best_channel_summary_for_cible(id_cible)
+
+
+@router.get("/cibles/{id_cible}/commercial-pressure-summary")
+def cible_commercial_pressure_summary(id_cible: str):
+    # Calcul dynamique sur clients : le résultat reflète automatiquement
+    # chaque nouveau batch de pression commerciale sans recréer la cible.
+    return pressure_summary_for_cible(id_cible, exclude_rupture_relation=False)
 
 
 @router.get("/cibles/{id_cible}/preview")

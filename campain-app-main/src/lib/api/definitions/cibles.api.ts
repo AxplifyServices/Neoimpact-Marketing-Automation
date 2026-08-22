@@ -87,6 +87,12 @@ export const ciblesApi = {
     method: 'GET',
   }),
 
+  // Répartition dynamique de la pression commerciale dans la cible
+  commercialPressureSummary: (id: string): ApiRequest => ({
+    url: `/cibles/${id}/commercial-pressure-summary`,
+    method: 'GET',
+  }),
+
   // Preview cible data
   preview: (id: string, limit: number = 200): ApiRequest => ({
     url: `/cibles/${id}/preview`,

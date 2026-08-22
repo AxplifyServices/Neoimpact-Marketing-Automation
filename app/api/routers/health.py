@@ -48,6 +48,7 @@ def health():
         attrition_worker = worker_group_status("attrition")
         digital_engagement_worker = worker_group_status("digital_engagement")
         best_channel_worker = worker_group_status("best_channel")
+        commercial_pressure_worker = worker_group_status("commercial_pressure")
         return {
             "ok": True,
             "database": {
@@ -68,6 +69,7 @@ def health():
                 "attrition": attrition_worker,
                 "digital_engagement": digital_engagement_worker,
                 "best_channel": best_channel_worker,
+                "commercial_pressure": commercial_pressure_worker,
             },
             "orchestration": {
                 "worker": campaign_worker,

@@ -29,6 +29,7 @@ from app.domain.campagne_service import (
 from app.domain.terrain_visit_webhook import dispatch_pending_visits_for_campaign, get_terrain_dispatch_status
 from app.orchestration.job_store import get_campaign_job_status, orchestration_stats
 from app.targeting.store import get_campaign_state as get_targeting_sync_state
+from app.commercial_pressure.service import pressure_summary_for_cible, pressure_summary_for_campaign
 
 logger = logging.getLogger(__name__)
 
@@ -308,6 +309,21 @@ def list_campagnes(
         "page_start": page_start,
         "next_page_start": page_start + nb_pages if consumed < total else None,
     }
+
+
+@router.get("/campagnes/pressure-preview")
+def campagne_pressure_preview(id_cible: str = Query(..., min_length=1, max_length=100)):
+    """Prévisualise la pression de la population réellement éligible d'une cible.
+
+    Utilisé par la modale de création avant d'engager une campagne.
+    """
+    return pressure_summary_for_cible(id_cible, exclude_rupture_relation=True)
+
+
+@router.get("/campagnes/{id_campagne}/pressure-summary")
+def campagne_pressure_summary(id_campagne: str):
+    """Pression courante des clients déjà attribués à une campagne."""
+    return pressure_summary_for_campaign(id_campagne)
 
 
 @router.post("/campagnes")

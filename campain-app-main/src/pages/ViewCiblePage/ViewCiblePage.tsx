@@ -11,6 +11,7 @@ import { DataTableColumnHeader } from '@/components/data-table/column-header';
 import { DataTablePagination } from '@/components/data-table/pagination';
 import { Label } from '@/components/ui/label';
 import type { CibleData } from '../CiblesPage/useCiblesData';
+import type { CibleCommercialPressureSummary } from '@/types/commercial-pressure.types';
 import { OBJECTIF_KEY, objectifModeLabel, objectifModeReadOnlyClasses } from '@/lib/cible-filters';
 
 type ViewFilter = {
@@ -144,7 +145,9 @@ export default function ViewCiblePage() {
     queryKey: ['cible-engagement-summary', id],
     queryFn: () => apiClient.request(ciblesApi.engagementSummary(id!)),
     enabled: !!id && isDbSource,
-    staleTime: 60 * 1000,
+    staleTime: 0,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
   });
 
   const { data: bestChannelSummary } = useQuery<{
@@ -155,7 +158,18 @@ export default function ViewCiblePage() {
     queryKey: ['cible-best-channel-summary', id],
     queryFn: () => apiClient.request(ciblesApi.bestChannelSummary(id!)),
     enabled: !!id && isDbSource,
-    staleTime: 60 * 1000,
+    staleTime: 0,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
+  });
+
+  const { data: commercialPressureSummary } = useQuery<CibleCommercialPressureSummary>({
+    queryKey: ['cible-commercial-pressure-summary', id],
+    queryFn: () => apiClient.request(ciblesApi.commercialPressureSummary(id!)),
+    enabled: !!id && isDbSource,
+    staleTime: 0,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
   });
 
   const previewData = previewResponse?.rows || [];
@@ -283,6 +297,38 @@ export default function ViewCiblePage() {
               ) : (
                 <p className="text-sm text-gray-500">Aucun score Best Channel disponible.</p>
               )}
+            </div>
+          )}
+
+          {isDbSource && commercialPressureSummary?.supported && (
+            <div className="border-t pt-6 mb-6">
+              <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                <h3 className="text-lg font-semibold">Répartition de la pression commerciale</h3>
+                <span className={`text-sm font-semibold ${commercialPressureSummary.warning ? 'text-amber-700' : 'text-gray-600'}`}>
+                  {commercialPressureSummary.pct_eleve.toFixed(1)} % en pression élevée
+                </span>
+              </div>
+              {commercialPressureSummary.distribution.length > 0 ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+                  {commercialPressureSummary.distribution.map((item) => (
+                    <div key={item.niveau} className="rounded-lg border bg-gray-50 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm font-medium text-gray-800">{item.niveau}</span>
+                        <span className="text-sm font-semibold text-gray-900">{item.pct.toFixed(1)} %</span>
+                      </div>
+                      <div className="mt-2 h-2 overflow-hidden rounded-full bg-gray-200">
+                        <div className="h-full rounded-full bg-gray-800" style={{ width: `${Math.min(100, item.pct)}%` }} />
+                      </div>
+                      <p className="mt-1 text-xs text-gray-500">{item.clients.toLocaleString('fr-FR')} clients</p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-gray-500">Aucun score de pression commerciale disponible.</p>
+              )}
+              <p className="mt-3 text-xs text-gray-500">
+                Cette répartition est calculée à la lecture à partir du score courant des clients : elle reflète automatiquement le dernier batch mensuel.
+              </p>
             </div>
           )}
 

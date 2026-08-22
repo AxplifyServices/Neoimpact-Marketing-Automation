@@ -1,11 +1,13 @@
 import { useState, useEffect } from 'react';
-import { X } from 'lucide-react';
+import { AlertTriangle, X } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { campaignsApi } from '@/lib/api/definitions/campaigns.api';
 import { getApiClient } from '@/lib/api/api-client';
 import { invalidateCampaignCaches } from '@/lib/api/cache-invalidation';
 import type { TypeCampagne, VisitMode, VisitPurpose } from '@/types/campaign.types';
 import LoadingSpinner from '../LoadingSpinner';
+import ConfirmDialog from '../ConfirmDialog';
+import type { CibleCommercialPressureSummary } from '@/types/commercial-pressure.types';
 
 const TYPE_CAMPAGNE_OPTIONS: ReadonlyArray<{ value: TypeCampagne; label: string; hint: string }> = [
   { value: 'sans_action_terrain', label: 'Sans action terrain', hint: 'CRC, DA, CC — traitement à distance' },
@@ -86,6 +88,8 @@ export default function CreateCampaignModal({ isOpen, onClose, onSuccess, duplic
   });
 
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [pressureConfirmOpen, setPressureConfirmOpen] = useState(false);
+  const [pressureWarning, setPressureWarning] = useState<CibleCommercialPressureSummary | null>(null);
 
   // Une seule requête légère pour les deux sélecteurs de la modale.
   const { data: createOptions, isLoading: createOptionsLoading } = useQuery<CampaignCreateOptionsResponse>({
@@ -99,6 +103,15 @@ export default function CreateCampaignModal({ isOpen, onClose, onSuccess, duplic
   const cibles = createOptions?.cibles ?? [];
   const modelesLoading = createOptionsLoading;
   const ciblesLoading = createOptionsLoading;
+
+
+  const pressurePreviewQuery = useQuery<CibleCommercialPressureSummary>({
+    queryKey: ['campaign-pressure-preview', formData.id_cible],
+    queryFn: () => apiClient.request<CibleCommercialPressureSummary>(campaignsApi.pressurePreview(formData.id_cible)),
+    enabled: false,
+    staleTime: 30 * 1000,
+    retry: 1,
+  });
 
   // Le backend renvoie déjà les options de la plus récente à la plus ancienne.
   useEffect(() => {
@@ -173,6 +186,8 @@ export default function CreateCampaignModal({ isOpen, onClose, onSuccess, duplic
       visitPurpose: '',
     });
     setErrors({});
+    setPressureConfirmOpen(false);
+    setPressureWarning(null);
   };
 
   const handleClose = () => {
@@ -221,11 +236,26 @@ export default function CreateCampaignModal({ isOpen, onClose, onSuccess, duplic
       return;
     }
 
-    createMutation.mutate(formData);
+    void (async () => {
+      try {
+        const refreshed = await pressurePreviewQuery.refetch();
+        if (refreshed.error) throw refreshed.error;
+        const pressure = refreshed.data;
+        if (pressure?.supported && pressure.warning) {
+          setPressureWarning(pressure);
+          setPressureConfirmOpen(true);
+          return;
+        }
+        createMutation.mutate(formData);
+      } catch (error) {
+        console.error('Error checking commercial pressure:', error);
+        setErrors((prev) => ({ ...prev, submit: 'Impossible de vérifier la pression commerciale de la cible.' }));
+      }
+    })();
   };
 
   const handleEscape = (e: KeyboardEvent) => {
-    if (e.key === 'Escape' && isOpen) {
+    if (e.key === 'Escape' && isOpen && !pressureConfirmOpen) {
       handleClose();
     }
   };
@@ -235,7 +265,7 @@ export default function CreateCampaignModal({ isOpen, onClose, onSuccess, duplic
       document.addEventListener('keydown', handleEscape);
       return () => document.removeEventListener('keydown', handleEscape);
     }
-  }, [isOpen]);
+  }, [isOpen, pressureConfirmOpen]);
 
   if (!isOpen) return null;
 
@@ -422,6 +452,19 @@ export default function CreateCampaignModal({ isOpen, onClose, onSuccess, duplic
             </div>
           </div>
 
+          {pressurePreviewQuery.data?.supported && pressurePreviewQuery.data.warning && (
+            <div className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-900">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <div>
+                <p className="text-sm font-semibold">Pression commerciale élevée dans cette cible</p>
+                <p className="mt-1 text-xs">
+                  {pressurePreviewQuery.data.pct_eleve.toFixed(1)} % des clients éligibles sont actuellement en pression élevée.
+                  Une confirmation sera demandée avant la création si ce taux reste supérieur à {pressurePreviewQuery.data.warning_threshold_pct.toFixed(0)} %.
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* Campaign Type */}
           <div>
             <label className="block text-xs font-medium text-gray-700 mb-1.5">
@@ -554,14 +597,33 @@ export default function CreateCampaignModal({ isOpen, onClose, onSuccess, duplic
             </button>
             <button
               type="submit"
-              disabled={createMutation.isPending}
+              disabled={createMutation.isPending || pressurePreviewQuery.isFetching}
               className="px-4 py-2 bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-colors font-medium text-sm disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
-              {createMutation.isPending && <LoadingSpinner size="sm" />}
-              {createMutation.isPending ? 'Création...' : (duplicateData ? 'Dupliquer' : 'Créer la campagne')}
+              {(createMutation.isPending || pressurePreviewQuery.isFetching) && <LoadingSpinner size="sm" />}
+              {createMutation.isPending
+                ? 'Création...'
+                : pressurePreviewQuery.isFetching
+                  ? 'Vérification...'
+                  : (duplicateData ? 'Dupliquer' : 'Créer la campagne')}
             </button>
           </div>
         </form>
+      </div>
+
+      <div onClick={(e) => e.stopPropagation()}>
+        <ConfirmDialog
+          isOpen={pressureConfirmOpen}
+          onClose={() => setPressureConfirmOpen(false)}
+          onConfirm={() => createMutation.mutate(formData)}
+          title="Confirmer la campagne"
+          message={pressureWarning
+            ? `${pressureWarning.pct_eleve.toFixed(1)} % des clients de cette campagne sont en pression commerciale élevée. Êtes-vous certain de vouloir poursuivre ?`
+            : 'Cette campagne contient une part importante de clients en pression commerciale élevée. Êtes-vous certain de vouloir poursuivre ?'}
+          confirmText="Créer quand même"
+          cancelText="Revoir la campagne"
+          type="warning"
+        />
       </div>
     </div>
   );

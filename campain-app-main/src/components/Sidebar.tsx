@@ -14,6 +14,7 @@ import {
   Target,
   Users,
   Smartphone,
+  Gauge,
   X,
 } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -56,10 +57,12 @@ export default function Sidebar() {
   const attritionPath = '/outils-data/attrition';
   const digitalEngagementPath = '/outils-data/engagement-digital';
   const bestChannelPath = '/outils-data/best-channel';
+  const commercialPressurePath = '/outils-data/pression-commerciale';
   const segmentationActive = location.pathname.startsWith(segmentationPath);
   const attritionActive = location.pathname.startsWith(attritionPath);
   const digitalEngagementActive = location.pathname.startsWith(digitalEngagementPath);
   const bestChannelActive = location.pathname.startsWith(bestChannelPath);
+  const commercialPressureActive = location.pathname.startsWith(commercialPressurePath);
   const dataToolsActive = location.pathname.startsWith('/outils-data');
 
   return (
@@ -165,6 +168,17 @@ export default function Sidebar() {
                   >
                     <div className="flex items-center gap-2.5"><RadioTower size={15} /><span className="font-medium">Best canal</span></div>
                     {bestChannelActive && <ChevronRight size={14} />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleNavigation(commercialPressurePath)}
+                    onMouseEnter={() => preloadRoute(commercialPressurePath)}
+                    onFocus={() => preloadRoute(commercialPressurePath)}
+                    onPointerDown={() => preloadRoute(commercialPressurePath)}
+                    className={`mt-1 flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm transition-colors ${commercialPressureActive ? 'bg-slate-900 text-white' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'}`}
+                  >
+                    <div className="flex items-center gap-2.5"><Gauge size={15} /><span className="font-medium">Pression commerciale</span></div>
+                    {commercialPressureActive && <ChevronRight size={14} />}
                   </button>
                 </div>
               )}

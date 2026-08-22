@@ -16,6 +16,7 @@ export const routeLoaders = {
   attrition: () => import('@/pages/AttritionPage'),
   digitalEngagement: () => import('@/pages/DigitalEngagementPage'),
   bestChannel: () => import('@/pages/BestChannelPage'),
+  commercialPressure: () => import('@/pages/CommercialPressurePage'),
 };
 
 type RouteLoaderKey = keyof typeof routeLoaders;
@@ -41,6 +42,7 @@ const pathToLoader: Array<[RegExp, RouteLoaderKey]> = [
   [/^\/outils-data\/attrition/, 'attrition'],
   [/^\/outils-data\/engagement-digital/, 'digitalEngagement'],
   [/^\/outils-data\/best-channel/, 'bestChannel'],
+  [/^\/outils-data\/pression-commerciale/, 'commercialPressure'],
 ];
 
 const preloaded = new Set<RouteLoaderKey>();

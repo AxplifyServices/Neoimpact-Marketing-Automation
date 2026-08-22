@@ -18,6 +18,7 @@ from app.api.routers.segmentation_dashboard import router as segmentation_dashbo
 from app.api.routers.attrition_dashboard import router as attrition_dashboard_router
 from app.api.routers.digital_engagement_dashboard import router as digital_engagement_dashboard_router
 from app.api.routers.best_channel_dashboard import router as best_channel_dashboard_router
+from app.api.routers.commercial_pressure_dashboard import router as commercial_pressure_dashboard_router
 from app.api.routers.data_admin import router as data_admin_router
 from app.api.routers.health import router as health_router
 from app.api.routers.modeles import router as modeles_router
@@ -80,6 +81,7 @@ app.include_router(segmentation_dashboard_router, prefix=API_PREFIX, tags=["Data
 app.include_router(attrition_dashboard_router, prefix=API_PREFIX, tags=["Data tools - Attrition"])
 app.include_router(digital_engagement_dashboard_router, prefix=API_PREFIX, tags=["Data tools - Engagement digital"])
 app.include_router(best_channel_dashboard_router, prefix=API_PREFIX, tags=["Data tools - Best channel"])
+app.include_router(commercial_pressure_dashboard_router, prefix=API_PREFIX, tags=["Data tools - Pression commerciale"])
 app.include_router(clients_router, prefix=API_PREFIX, tags=["Clients"])
 app.include_router(
     terrain_queues_router,

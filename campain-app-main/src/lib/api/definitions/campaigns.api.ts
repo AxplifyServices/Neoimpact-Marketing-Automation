@@ -40,6 +40,19 @@ export const campaignsApi = {
     method: 'GET',
   }),
 
+  // Commercial-pressure preflight before campaign creation
+  pressurePreview: (idCible: string): ApiRequest => ({
+    url: '/campagnes/pressure-preview',
+    method: 'GET',
+    params: { id_cible: idCible },
+  }),
+
+  // Current commercial-pressure composition of an existing campaign
+  pressureSummary: (id: string): ApiRequest => ({
+    url: `/campagnes/${id}/pressure-summary`,
+    method: 'GET',
+  }),
+
   // Create new campaign
   create: (data: {
     nom_campagne: string;

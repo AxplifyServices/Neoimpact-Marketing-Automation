@@ -74,7 +74,7 @@ USECASE_COLUMNS = {
         "Age", "Qualite",
         "Region", "Agence", "Gestionnaire",
         "STATUT_CLIENT",
-        "Segment_actuel", "Risque_attrition", "Engagement_digital", "Creneau_connexion", "Canal_top1", "Canal_top2", "Canal_top3", "Canal_acquisition",
+        "Segment_actuel", "Risque_attrition", "Engagement_digital", "Creneau_connexion", "Canal_top1", "Canal_top2", "Canal_top3", "Pression_commerciale", "Canal_acquisition",
         "Epargne",
         "Carte_Actuelle", "Assurance_Actuelle",
         "Nature_carte", "Categorie", "Dossier_Complet", "Validation_KYC", "Activation_du_compte",
@@ -312,6 +312,7 @@ CATEGORICAL_MAPPING: Dict[str, List[str]] = {
     "Canal_top1": ["Appel", "SMS", "Mail", "Whatsapp", "Directeur d'agence", "Conseiller client", "Push notification", "non_score"],
     "Canal_top2": ["Appel", "SMS", "Mail", "Whatsapp", "Directeur d'agence", "Conseiller client", "Push notification", "non_score"],
     "Canal_top3": ["Appel", "SMS", "Mail", "Whatsapp", "Directeur d'agence", "Conseiller client", "Push notification", "non_score"],
+    "Pression_commerciale": ["Faible", "Modere", "Eleve", "non_score"],
 
     "Carte_Actuelle": ["Aucune", "Black", "Classic", "Code 212", "Code 30", "Gold", "Silver", "Standard"],
 
@@ -628,6 +629,7 @@ def update_cell(payload: UpdateCellIn):
         "Canal_top1",
         "Canal_top2",
         "Canal_top3",
+        "Pression_commerciale",
     }
     if payload.table == "clients" and payload.col in calculated_client_fields:
         raise HTTPException(

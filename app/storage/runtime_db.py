@@ -33,6 +33,7 @@ _LEGACY_QUOTED_IDENTIFIERS = (
     "Canal_top1",
     "Canal_top2",
     "Canal_top3",
+    "Pression_commerciale",
     "Creneau",
     "Dossier_Complet",
     "Canal_acquisition",

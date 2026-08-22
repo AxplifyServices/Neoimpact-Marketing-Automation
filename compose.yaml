@@ -230,6 +230,32 @@ services:
       start_period: 60s
 
 
+  marketing_commercial_pressure_worker:
+    <<: *backend-runtime
+    command: ["python", "-m", "app.workers.runner", "commercial_pressure"]
+    cpu_shares: 256
+    environment:
+      <<: *backend-environment
+      APP_PROCESS_ROLE: commercial_pressure_worker
+      COMMERCIAL_PRESSURE_WORKER_ENABLED: "true"
+      COMMERCIAL_PRESSURE_RUN_ON_START: "true"
+      COMMERCIAL_PRESSURE_TIMEZONE: "Africa/Casablanca"
+      COMMERCIAL_PRESSURE_MONTHLY_DAY: "1"
+      COMMERCIAL_PRESSURE_MONTHLY_HOUR: "2"
+      COMMERCIAL_PRESSURE_MONTHLY_MINUTE: "0"
+      COMMERCIAL_PRESSURE_BATCH_SIZE: "20000"
+      COMMERCIAL_PRESSURE_FAKE_BATCH_SIZE: "5000"
+      POSTGRES_POOL_MIN_SIZE: "0"
+      POSTGRES_POOL_MAX_SIZE: "2"
+      POSTGRES_POOL_TIMEOUT_SECONDS: "20"
+    healthcheck:
+      test: ["CMD-SHELL", "python -m app.workers.healthcheck commercial_pressure"]
+      interval: 10s
+      timeout: 8s
+      retries: 12
+      start_period: 60s
+
+
   marketing_frontend:
     build:
       context: ./campain-app-main

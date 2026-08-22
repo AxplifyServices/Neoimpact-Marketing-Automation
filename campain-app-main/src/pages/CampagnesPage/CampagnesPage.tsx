@@ -16,6 +16,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Button } from '@/components/ui/button';
 import { useDebouncedValue } from '@/hooks/use-debounced-value';
+import type { CibleCommercialPressureSummary } from '@/types/commercial-pressure.types';
 
 const CreateCampaignModal = lazy(() => import('../../components/custom/CreateCampaignModal'));
 const WorkflowModal = lazy(() => import('../../components/custom/WorkflowModal'));
@@ -54,6 +55,12 @@ export default function CampagnesPage() {
   const [cancelDialog, setCancelDialog] = useState<{ isOpen: boolean; campaignId?: string; campaignTitle?: string }>({
     isOpen: false,
   });
+  const [activationPressureDialog, setActivationPressureDialog] = useState<{
+    isOpen: boolean;
+    campaignId?: string;
+    campaignTitle?: string;
+    pctEleve?: number;
+  }>({ isOpen: false });
   const [workflowModal, setWorkflowModal] = useState<{
     isOpen: boolean;
     modelId?: string;
@@ -212,9 +219,35 @@ export default function CampagnesPage() {
 
   const hasActiveFilters = Boolean(searchQuery || selectedStatuses.length > 0 || dateMin || dateMax);
 
-  const handleActivateCampaign = (campaignId: string) => {
+  const handleActivateCampaign = async (campaignId: string, campaignTitle: string) => {
     setOpenMenuId(null);
-    activateCampaignMutation.mutate(campaignId);
+    try {
+      const pressure = await apiClient.request<CibleCommercialPressureSummary>(campaignsApi.pressureSummary(campaignId));
+      if (pressure.supported && pressure.warning) {
+        setActivationPressureDialog({
+          isOpen: true,
+          campaignId,
+          campaignTitle,
+          pctEleve: pressure.pct_eleve,
+        });
+        return;
+      }
+      activateCampaignMutation.mutate(campaignId);
+    } catch (error) {
+      console.error('Error checking commercial pressure:', error);
+      setToast({
+        isOpen: true,
+        title: 'Vérification impossible',
+        message: "La pression commerciale de la campagne n'a pas pu être vérifiée.",
+        type: 'error',
+      });
+    }
+  };
+
+  const confirmActivationDespitePressure = () => {
+    if (activationPressureDialog.campaignId) {
+      activateCampaignMutation.mutate(activationPressureDialog.campaignId);
+    }
   };
 
   const handlePauseCampaign = (campaignId: string) => {
@@ -308,6 +341,17 @@ export default function CampagnesPage() {
         confirmText="Annuler la campagne"
         cancelText="Retour"
         type="danger"
+      />
+
+      <ConfirmDialog
+        isOpen={activationPressureDialog.isOpen}
+        onClose={() => setActivationPressureDialog({ isOpen: false })}
+        onConfirm={confirmActivationDespitePressure}
+        title="Pression commerciale élevée"
+        message={`${Number(activationPressureDialog.pctEleve ?? 0).toFixed(1)} % des clients de la campagne "${activationPressureDialog.campaignTitle ?? ''}" sont actuellement en pression élevée. Êtes-vous certain de vouloir l'activer ?`}
+        confirmText="Activer quand même"
+        cancelText="Revoir la campagne"
+        type="warning"
       />
 
       {workflowModal.isOpen && (
@@ -544,7 +588,7 @@ export default function CampagnesPage() {
                         ) : campaign.status === 'En pause' ? (
                           <button
                             type="button"
-                            onClick={() => handleActivateCampaign(campaign.id)}
+                            onClick={() => void handleActivateCampaign(campaign.id, campaign.title)}
                             className="w-full px-4 py-2 text-left text-sm text-green-600 hover:bg-green-50 flex items-center gap-2"
                           >
                             <Play className="w-4 h-4" />
