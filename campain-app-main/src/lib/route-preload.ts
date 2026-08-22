@@ -17,6 +17,7 @@ export const routeLoaders = {
   digitalEngagement: () => import('@/pages/DigitalEngagementPage'),
   bestChannel: () => import('@/pages/BestChannelPage'),
   commercialPressure: () => import('@/pages/CommercialPressurePage'),
+  productScoring: () => import('@/pages/ProductScoringPage'),
 };
 
 type RouteLoaderKey = keyof typeof routeLoaders;
@@ -43,6 +44,7 @@ const pathToLoader: Array<[RegExp, RouteLoaderKey]> = [
   [/^\/outils-data\/engagement-digital/, 'digitalEngagement'],
   [/^\/outils-data\/best-channel/, 'bestChannel'],
   [/^\/outils-data\/pression-commerciale/, 'commercialPressure'],
+  [/^\/outils-data\/appetences-produits/, 'productScoring'],
 ];
 
 const preloaded = new Set<RouteLoaderKey>();

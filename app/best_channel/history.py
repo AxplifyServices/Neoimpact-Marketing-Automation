@@ -187,6 +187,11 @@ def record_block_result_by_rid(
             observed, event_key,
         ),
     )
+    try:
+        from app.product_scoring.feedback import mark_campaign_contacted
+        mark_campaign_contacted(conn, int(rid), contacted_at=observed)
+    except Exception:
+        logger.debug("Impossible de marquer le contact produit rid=%s", rid, exc_info=True)
     return True
 
 

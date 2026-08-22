@@ -103,4 +103,11 @@ def mark_converted(
             objective_validated=1,
             objective_id_action=_norm_str(objective_id_action),
         )
+        try:
+            from app.product_scoring.feedback import record_objective_feedback
+            record_objective_feedback(
+                conn, int(rid), objective_id_action=_norm_str(objective_id_action), achieved=1
+            )
+        except Exception:
+            pass
     return converted_now

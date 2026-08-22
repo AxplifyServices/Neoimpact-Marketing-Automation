@@ -340,6 +340,11 @@ def _advance_workflow_after_mail_by_rid(
                     objective_validated=0,
                     objective_id_action=cur_id,
                 )
+                try:
+                    from app.product_scoring.feedback import record_objective_feedback
+                    record_objective_feedback(conn, int(rid), objective_id_action=cur_id, achieved=0)
+                except Exception:
+                    pass
             if branch == "Oui":
                 mark_converted(
                     conn,

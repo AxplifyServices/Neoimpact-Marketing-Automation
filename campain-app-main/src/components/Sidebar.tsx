@@ -15,6 +15,7 @@ import {
   Users,
   Smartphone,
   Gauge,
+  ShoppingBag,
   X,
 } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -58,11 +59,13 @@ export default function Sidebar() {
   const digitalEngagementPath = '/outils-data/engagement-digital';
   const bestChannelPath = '/outils-data/best-channel';
   const commercialPressurePath = '/outils-data/pression-commerciale';
+  const productScoringPath = '/outils-data/appetences-produits';
   const segmentationActive = location.pathname.startsWith(segmentationPath);
   const attritionActive = location.pathname.startsWith(attritionPath);
   const digitalEngagementActive = location.pathname.startsWith(digitalEngagementPath);
   const bestChannelActive = location.pathname.startsWith(bestChannelPath);
   const commercialPressureActive = location.pathname.startsWith(commercialPressurePath);
+  const productScoringActive = location.pathname.startsWith(productScoringPath);
   const dataToolsActive = location.pathname.startsWith('/outils-data');
 
   return (
@@ -179,6 +182,17 @@ export default function Sidebar() {
                   >
                     <div className="flex items-center gap-2.5"><Gauge size={15} /><span className="font-medium">Pression commerciale</span></div>
                     {commercialPressureActive && <ChevronRight size={14} />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleNavigation(productScoringPath)}
+                    onMouseEnter={() => preloadRoute(productScoringPath)}
+                    onFocus={() => preloadRoute(productScoringPath)}
+                    onPointerDown={() => preloadRoute(productScoringPath)}
+                    className={`mt-1 flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm transition-colors ${productScoringActive ? 'bg-slate-900 text-white' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'}`}
+                  >
+                    <div className="flex items-center gap-2.5"><ShoppingBag size={15} /><span className="font-medium">Appétences produits</span></div>
+                    {productScoringActive && <ChevronRight size={14} />}
                   </button>
                 </div>
               )}

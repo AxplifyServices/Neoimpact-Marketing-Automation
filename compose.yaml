@@ -15,6 +15,7 @@ x-backend-runtime: &backend-runtime
   volumes:
     - attrition_model_data:/app/data/models/attrition
     - best_channel_model_data:/app/data/models/best_channel
+    - product_scoring_model_data:/app/data/models/product_scoring
 
 services:
   postgres:
@@ -256,6 +257,36 @@ services:
       start_period: 60s
 
 
+  marketing_product_scoring_worker:
+    <<: *backend-runtime
+    command: ["python", "-m", "app.workers.runner", "product_scoring"]
+    cpu_shares: 512
+    environment:
+      <<: *backend-environment
+      APP_PROCESS_ROLE: product_scoring_worker
+      PRODUCT_SCORING_WORKER_ENABLED: "true"
+      PRODUCT_SCORING_RUN_ON_START: "true"
+      PRODUCT_SCORING_TIMEZONE: "Africa/Casablanca"
+      PRODUCT_SCORING_MONTHLY_DAY: "1"
+      PRODUCT_SCORING_MONTHLY_HOUR: "7"
+      PRODUCT_SCORING_MONTHLY_MINUTE: "0"
+      PRODUCT_SCORING_SCORE_BATCH_SIZE: "20000"
+      PRODUCT_SCORING_FAKE_CLIENTS: "80000"
+      PRODUCT_SCORING_FAKE_BATCH_SIZE: "5000"
+      PRODUCT_SCORING_TRAIN_MAX_ROWS: "220000"
+      PRODUCT_SCORING_XGBOOST_THREADS: "2"
+      PRODUCT_SCORING_MODEL_DIR: "/app/data/models/product_scoring"
+      POSTGRES_POOL_MIN_SIZE: "0"
+      POSTGRES_POOL_MAX_SIZE: "2"
+      POSTGRES_POOL_TIMEOUT_SECONDS: "20"
+    healthcheck:
+      test: ["CMD-SHELL", "python -m app.workers.healthcheck product_scoring"]
+      interval: 10s
+      timeout: 8s
+      retries: 12
+      start_period: 60s
+
+
   marketing_frontend:
     build:
       context: ./campain-app-main
@@ -274,3 +305,4 @@ volumes:
   neoimpact_postgres_data:
   attrition_model_data:
   best_channel_model_data:
+  product_scoring_model_data:

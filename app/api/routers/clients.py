@@ -48,6 +48,13 @@ def create_client(payload: ClientCreateIn):
     data.pop("Canal_top2", None)
     data.pop("Canal_top3", None)
     data.pop("Pression_commerciale", None)
+    data.pop("Appetence_carte", None)
+    data.pop("Appetence_conso", None)
+    data.pop("Appetence_immo", None)
+    data.pop("Appetence_epargne", None)
+    data.pop("Next_best_product", None)
+    data.pop("Next_best_product_score", None)
+    data.pop("Carte_recommandee", None)
 
     # 3) Garder UNIQUEMENT les colonnes existantes dans la table clients
     cols = db.get_table_columns("clients")  # [(name, type), ...]

@@ -85,7 +85,8 @@ jobs:
               marketing_attrition_worker \
               marketing_digital_engagement_worker \
               marketing_best_channel_worker \
-              marketing_commercial_pressure_worker; do
+              marketing_commercial_pressure_worker \
+              marketing_product_scoring_worker; do
               container_id="$(docker compose -f "$COMPOSE_FILE" ps -q "$service" 2>/dev/null || true)"
               if [ -n "$container_id" ]; then
                 echo "Stopping $service..."
@@ -139,7 +140,8 @@ jobs:
               marketing_attrition_worker \
               marketing_digital_engagement_worker \
               marketing_best_channel_worker \
-              marketing_commercial_pressure_worker
+              marketing_commercial_pressure_worker \
+              marketing_product_scoring_worker
 
             wait_worker() {
               service="$1"
@@ -172,6 +174,7 @@ jobs:
             wait_worker marketing_digital_engagement_worker digital_engagement
             wait_worker marketing_best_channel_worker best_channel
             wait_worker marketing_commercial_pressure_worker commercial_pressure
+            wait_worker marketing_product_scoring_worker product_scoring
 
             # Le frontend n'est remplacé qu'une fois l'API ET les moteurs prêts.
             echo "Starting frontend..."
@@ -220,7 +223,8 @@ jobs:
               marketing_attrition_worker \
               marketing_digital_engagement_worker \
               marketing_best_channel_worker \
-              marketing_commercial_pressure_worker
+              marketing_commercial_pressure_worker \
+              marketing_product_scoring_worker
 
             echo "Frontend logs:"
             docker logs marketing_frontend --tail 50

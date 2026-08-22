@@ -22,6 +22,7 @@ const AttritionPage = lazy(routeLoaders.attrition);
 const DigitalEngagementPage = lazy(routeLoaders.digitalEngagement);
 const BestChannelPage = lazy(routeLoaders.bestChannel);
 const CommercialPressurePage = lazy(routeLoaders.commercialPressure);
+const ProductScoringPage = lazy(routeLoaders.productScoring);
 
 function RouteFallback() {
   return (
@@ -61,6 +62,7 @@ function App() {
               <Route path="/outils-data/engagement-digital" element={<DigitalEngagementPage />} />
               <Route path="/outils-data/best-channel" element={<BestChannelPage />} />
               <Route path="/outils-data/pression-commerciale" element={<CommercialPressurePage />} />
+              <Route path="/outils-data/appetences-produits" element={<ProductScoringPage />} />
               <Route path="/terrain" element={<Navigate to="/campagnes" replace />} />
               <Route path="/support" element={<Navigate to="/campagnes" replace />} />
             </Routes>

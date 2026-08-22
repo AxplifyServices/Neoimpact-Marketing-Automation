@@ -408,6 +408,11 @@ def _update_campaigns_status_from_dates(
         # Planifiée mais toute la fenêtre est déjà passée.
         if etat == "Planifiée" and date_fin < today:
             update_etat(id_campagne, "Terminée")
+            try:
+                from app.product_scoring.feedback import finalize_campaign_feedback
+                finalize_campaign_feedback(id_campagne)
+            except Exception:
+                pass
 
             try:
                 _delete_outputs_for_campagne(id_campagne)
@@ -439,6 +444,11 @@ def _update_campaigns_status_from_dates(
                 pass
 
             update_etat(id_campagne, "Terminée")
+            try:
+                from app.product_scoring.feedback import finalize_campaign_feedback
+                finalize_campaign_feedback(id_campagne)
+            except Exception:
+                pass
 
             try:
                 _delete_outputs_for_campagne(id_campagne)
@@ -572,6 +582,11 @@ def _advance_en_attente_rows(
                                 objective_validated=0,
                                 objective_id_action=cur_id,
                             )
+                            try:
+                                from app.product_scoring.feedback import record_objective_feedback
+                                record_objective_feedback(conn, rid, objective_id_action=cur_id, achieved=0)
+                            except Exception:
+                                pass
 
                         if branch == "Oui":
                             try:

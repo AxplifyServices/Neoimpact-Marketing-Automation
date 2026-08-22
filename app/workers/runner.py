@@ -148,6 +148,20 @@ def _commercial_pressure_spec() -> Tuple[Callable[[], Any], Callable[[], None], 
         lambda status: not bool(status.get("enabled")) or bool(status.get("running")),
     )
 
+
+def _product_scoring_spec() -> Tuple[Callable[[], Any], Callable[[], None], Callable[[], Dict[str, Any]], Callable[[Dict[str, Any]], bool]]:
+    from app.product_scoring.worker import (
+        product_scoring_worker_status,
+        start_product_scoring_worker,
+        stop_product_scoring_worker,
+    )
+    return (
+        start_product_scoring_worker,
+        stop_product_scoring_worker,
+        product_scoring_worker_status,
+        lambda status: not bool(status.get("enabled")) or bool(status.get("running")),
+    )
+
 def _spec(role: str):
     specs = {
         "campaign": _campaign_spec,
@@ -159,6 +173,7 @@ def _spec(role: str):
         "digital_engagement": _digital_engagement_spec,
         "best_channel": _best_channel_spec,
         "commercial_pressure": _commercial_pressure_spec,
+        "product_scoring": _product_scoring_spec,
     }
     factory = specs.get(role)
     if factory is None:
@@ -169,7 +184,7 @@ def _spec(role: str):
 def main() -> int:
     role = str(sys.argv[1] if len(sys.argv) > 1 else os.getenv("WORKER_ROLE") or "").strip().lower()
     if not role:
-        print("usage: python -m app.workers.runner <campaign|outbound|inbound|batch|segmentation|attrition|digital_engagement|best_channel|commercial_pressure>", file=sys.stderr)
+        print("usage: python -m app.workers.runner <campaign|outbound|inbound|batch|segmentation|attrition|digital_engagement|best_channel|commercial_pressure|product_scoring>", file=sys.stderr)
         return 2
 
     signal.signal(signal.SIGTERM, _signal_handler)

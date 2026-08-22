@@ -483,6 +483,11 @@ def prepare_campagne_execution(
     set_execution_status(id_campagne, "processing", population_count=nb_apres)
     initialize_campaign_state(id_campagne, target_sync_start_seq)
     _progress(2, "Population préparée")
+    try:
+        from app.product_scoring.feedback import register_campaign_population
+        register_campaign_population(id_campagne, _norm_str(campagne.get("id_modele")))
+    except Exception:
+        logger.exception("Impossible d'enregistrer le feedback produit au lancement de %s", id_campagne)
 
     # Si pause/annulation a eu lieu pendant l'INSERT massif, l'état maître de
     # ``campagnes`` suffit immédiatement : aucune réécriture de la population.
@@ -1011,6 +1016,12 @@ def sync_new_clients_from_cible_for_campaign(
         only_new=True,
     )
     update_cible_volume_if_column_exists(id_cible)
+    if int(inserted or 0) > 0:
+        try:
+            from app.product_scoring.feedback import register_campaign_population
+            register_campaign_population(id_campagne, id_modele)
+        except Exception:
+            logger.exception("Impossible d'enregistrer le feedback produit incrémental de %s", id_campagne)
     return {
         "ok": True,
         "new_cible_members": int(new_cible),

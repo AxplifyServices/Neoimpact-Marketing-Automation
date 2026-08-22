@@ -8,6 +8,8 @@ import { Button } from '@/components/ui/button';
 import Toast from '@/components/Toast';
 import type { ClientAPIResponse } from '@/types/client.types';
 
+const formatAppetence = (value?: number | null) => value == null ? 'Non scoré' : `${(Number(value) * 100).toFixed(1)} %`;
+
 export default function ViewClientPage() {
   const navigate = useNavigate();
   const { id } = useParams<{ id: string }>();
@@ -258,6 +260,40 @@ export default function ViewClientPage() {
                     <p className="text-sm font-medium text-gray-900">{client.revenu_domicilie}</p>
                   </div>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* Product propensities */}
+          {(client.Appetence_carte != null || client.Appetence_conso != null || client.Appetence_immo != null || client.Appetence_epargne != null || client.Next_best_product) && (
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+              <h3 className="font-semibold text-gray-900 mb-1">Appétences produits</h3>
+              <p className="text-xs text-gray-500 mb-4">Scores mensuels calculés pour les produits auxquels le client est éligible.</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+                <div>
+                  <p className="text-xs text-gray-500 mb-1">Carte</p>
+                  <p className="text-sm font-medium text-gray-900">{formatAppetence(client.Appetence_carte)}</p>
+                  {client.Carte_recommandee && client.Carte_recommandee !== 'non_score' && <p className="mt-1 text-xs text-gray-500">Recommandée : {client.Carte_recommandee}</p>}
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500 mb-1">Crédit conso</p>
+                  <p className="text-sm font-medium text-gray-900">{formatAppetence(client.Appetence_conso)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500 mb-1">Crédit immo</p>
+                  <p className="text-sm font-medium text-gray-900">{formatAppetence(client.Appetence_immo)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500 mb-1">Épargne</p>
+                  <p className="text-sm font-medium text-gray-900">{formatAppetence(client.Appetence_epargne)}</p>
+                </div>
+              </div>
+              <div className="mt-5 rounded-lg border border-slate-200 bg-slate-50 p-4">
+                <p className="text-xs text-gray-500">Next Best Product</p>
+                <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                  <p className="text-base font-semibold text-gray-900">{client.Next_best_product && client.Next_best_product !== 'non_score' ? client.Next_best_product : 'Non scoré'}</p>
+                  {client.Next_best_product_score != null && <p className="text-sm text-gray-600">Score {formatAppetence(client.Next_best_product_score)}</p>}
+                </div>
               </div>
             </div>
           )}

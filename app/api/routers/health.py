@@ -49,6 +49,7 @@ def health():
         digital_engagement_worker = worker_group_status("digital_engagement")
         best_channel_worker = worker_group_status("best_channel")
         commercial_pressure_worker = worker_group_status("commercial_pressure")
+        product_scoring_worker = worker_group_status("product_scoring")
         return {
             "ok": True,
             "database": {
@@ -70,6 +71,7 @@ def health():
                 "digital_engagement": digital_engagement_worker,
                 "best_channel": best_channel_worker,
                 "commercial_pressure": commercial_pressure_worker,
+                "product_scoring": product_scoring_worker,
             },
             "orchestration": {
                 "worker": campaign_worker,

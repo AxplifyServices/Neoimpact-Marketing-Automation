@@ -19,7 +19,7 @@ interface EditingCell {
   value: string | number;
 }
 
-const CLIENT_READ_ONLY_COLUMNS = new Set(['Segment_actuel', 'Risque_attrition']);
+const CLIENT_READ_ONLY_COLUMNS = new Set(['Segment_actuel', 'Risque_attrition', 'Engagement_digital', 'Creneau_connexion', 'Canal_top1', 'Canal_top2', 'Canal_top3', 'Pression_commerciale', 'Appetence_carte', 'Appetence_conso', 'Appetence_immo', 'Appetence_epargne', 'Carte_recommandee', 'Next_best_product', 'Next_best_product_score']);
 
 const CLIENT_PRIMARY_COLUMNS = [
   'ID_Client',

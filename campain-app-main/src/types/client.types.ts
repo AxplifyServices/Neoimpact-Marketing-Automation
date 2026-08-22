@@ -16,6 +16,8 @@ export interface Client {
   Canal_acquisition?: string;
   Segment_actuel?: string;
   Risque_attrition?: string;
+  Carte_recommandee?: string;
+  Next_best_product?: string;
   Carte_Actuelle?: string;
   Assurance_Actuelle?: string;
 
@@ -44,6 +46,11 @@ export interface Client {
   encours_conso?: number;
   encours_immo?: number;
   montant_revenu?: number;
+  Appetence_carte?: number;
+  Appetence_conso?: number;
+  Appetence_immo?: number;
+  Appetence_epargne?: number;
+  Next_best_product_score?: number;
 }
 
 // Form state type - all fields as strings for controlled inputs
