@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any, Dict
 
 from app.storage.runtime_db import RuntimeConnection
+from app.best_channel.history import finalize_current_sequence
 
 CLIENTS_CAMPAGNES_TABLE = "clients_campagnes"
 
@@ -94,4 +95,12 @@ def mark_converted(
             int(rid),
         ),
     )
-    return int(cur.rowcount or 0) > 0
+    converted_now = int(cur.rowcount or 0) > 0
+    if converted_now:
+        finalize_current_sequence(
+            conn,
+            int(rid),
+            objective_validated=1,
+            objective_id_action=_norm_str(objective_id_action),
+        )
+    return converted_now

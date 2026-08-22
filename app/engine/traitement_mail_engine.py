@@ -19,6 +19,7 @@ from app.storage.runtime_db import RuntimeConnection, connect_runtime
 from app.storage.postgres_db import get_column_names
 from app.domain.canaux import resultats_for_canal
 from app.domain.conversion_service import mark_converted, record_objective_entry
+from app.best_channel.history import finalize_current_sequence, record_block_result_by_rid
 from app.domain.send_time import normalize_creneau
 from app.domain.workflow_nav import (
     find_bloc_by_id,
@@ -270,6 +271,12 @@ def _update_after_mail_by_rid(conn: RuntimeConnection, rid: int, resultat: str, 
         """,
         ("Mail", resultat, now_iso, int(incr_mail), int(rid)),
     )
+    record_block_result_by_rid(
+        conn,
+        int(rid),
+        resultat=resultat,
+        observed_at=now_iso,
+    )
 
 
 # =========================================================
@@ -325,7 +332,15 @@ def _advance_workflow_after_mail_by_rid(
             cols = set()
 
         if "conversion" in cols:
-            if objective_branch(current_bloc, row_after) == "Oui":
+            branch = objective_branch(current_bloc, row_after)
+            if branch == "Non":
+                finalize_current_sequence(
+                    conn,
+                    int(rid),
+                    objective_validated=0,
+                    objective_id_action=cur_id,
+                )
+            if branch == "Oui":
                 mark_converted(
                     conn,
                     int(rid),

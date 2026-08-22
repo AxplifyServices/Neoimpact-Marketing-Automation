@@ -44,6 +44,9 @@ def create_client(payload: ClientCreateIn):
     data.pop("Risque_attrition", None)
     data.pop("Engagement_digital", None)
     data.pop("Creneau_connexion", None)
+    data.pop("Canal_top1", None)
+    data.pop("Canal_top2", None)
+    data.pop("Canal_top3", None)
 
     # 3) Garder UNIQUEMENT les colonnes existantes dans la table clients
     cols = db.get_table_columns("clients")  # [(name, type), ...]

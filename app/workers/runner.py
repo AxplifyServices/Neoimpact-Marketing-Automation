@@ -120,6 +120,20 @@ def _digital_engagement_spec() -> Tuple[Callable[[], Any], Callable[[], None], C
     )
 
 
+
+def _best_channel_spec() -> Tuple[Callable[[], Any], Callable[[], None], Callable[[], Dict[str, Any]], Callable[[Dict[str, Any]], bool]]:
+    from app.best_channel.worker import (
+        best_channel_worker_status,
+        start_best_channel_worker,
+        stop_best_channel_worker,
+    )
+    return (
+        start_best_channel_worker,
+        stop_best_channel_worker,
+        best_channel_worker_status,
+        lambda status: not bool(status.get("enabled")) or bool(status.get("running")),
+    )
+
 def _spec(role: str):
     specs = {
         "campaign": _campaign_spec,
@@ -129,6 +143,7 @@ def _spec(role: str):
         "segmentation": _segmentation_spec,
         "attrition": _attrition_spec,
         "digital_engagement": _digital_engagement_spec,
+        "best_channel": _best_channel_spec,
     }
     factory = specs.get(role)
     if factory is None:
@@ -139,7 +154,7 @@ def _spec(role: str):
 def main() -> int:
     role = str(sys.argv[1] if len(sys.argv) > 1 else os.getenv("WORKER_ROLE") or "").strip().lower()
     if not role:
-        print("usage: python -m app.workers.runner <campaign|outbound|inbound|batch|segmentation|attrition|digital_engagement>", file=sys.stderr)
+        print("usage: python -m app.workers.runner <campaign|outbound|inbound|batch|segmentation|attrition|digital_engagement|best_channel>", file=sys.stderr)
         return 2
 
     signal.signal(signal.SIGTERM, _signal_handler)

@@ -125,6 +125,44 @@ def _engagement_summary_for_cible(id_cible: str) -> Dict[str, Any]:
         }
 
 
+def _best_channel_summary_for_cible(id_cible: str) -> Dict[str, Any]:
+    """Répartition courante du Top 1 canal sur les membres d'une cible DB."""
+    try:
+        built = build_db_cible_radicals_query(
+            id_cible,
+            exclude_rupture_relation=False,
+        )
+        if built is None:
+            return {"supported": False, "total": 0, "distribution": []}
+        radical_query, radical_params = built
+        with connection(dict_rows=True) as conn:
+            query_sql = radical_query.as_string(conn) if hasattr(radical_query, "as_string") else str(radical_query)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COALESCE(c."Canal_top1", 'non_score') AS canal, COUNT(*) AS clients
+                    FROM ({}) AS q
+                    JOIN clients AS c ON c.radical_compte = q."Radical_compte"
+                    GROUP BY COALESCE(c."Canal_top1", 'non_score')
+                    ORDER BY COUNT(*) DESC, canal ASC
+                    """.format(query_sql),
+                    radical_params,
+                )
+                rows = [dict(row) for row in cur.fetchall()]
+        total = sum(int(row.get("clients") or 0) for row in rows)
+        distribution = [
+            {
+                "canal": str(row.get("canal") or "non_score"),
+                "clients": int(row.get("clients") or 0),
+                "pct": (int(row.get("clients") or 0) / total * 100.0) if total else 0.0,
+            }
+            for row in rows
+        ]
+        return {"supported": True, "total": total, "distribution": distribution}
+    except Exception:
+        return {"supported": False, "total": 0, "distribution": []}
+
+
 # =========================================================
 # Helpers: erreurs 400 structurées (schema strict)
 # =========================================================
@@ -503,6 +541,11 @@ def delete_cible(id_cible: str):
 @router.get("/cibles/{id_cible}/engagement-summary")
 def cible_engagement_summary(id_cible: str):
     return _engagement_summary_for_cible(id_cible)
+
+
+@router.get("/cibles/{id_cible}/best-channel-summary")
+def cible_best_channel_summary(id_cible: str):
+    return _best_channel_summary_for_cible(id_cible)
 
 
 @router.get("/cibles/{id_cible}/preview")

@@ -19,6 +19,7 @@ from app.storage.clients_campagnes_store_sqlite import (
 from app.targeting.incremental import sync_target_changes_for_campaign
 from app.targeting.store import prune_processed_changes
 from app.domain.conversion_service import mark_converted, record_objective_entry
+from app.best_channel.history import finalize_current_sequence
 from app.domain.send_time import normalize_creneau
 
 from app.storage.crc_input_store_sqlite import (
@@ -564,6 +565,14 @@ def _advance_en_attente_rows(
 
                     if has_conversion:
                         branch = objective_branch(current, row)
+                        if branch == "Non":
+                            finalize_current_sequence(
+                                conn,
+                                rid,
+                                objective_validated=0,
+                                objective_id_action=cur_id,
+                            )
+
                         if branch == "Oui":
                             try:
                                 conv_val = int(row.get("conversion") or 0)

@@ -11,6 +11,7 @@ from app.storage.runtime_db import RuntimeConnection, connect_runtime
 from app.storage.postgres_db import get_column_names, table_exists
 from app.domain.canaux import compteur_for_canal
 from app.domain.conversion_service import record_objective_entry
+from app.best_channel.history import record_block_result_by_rid
 from app.domain.send_time import normalize_creneau
 
 from app.domain.workflow_nav import (
@@ -318,6 +319,7 @@ def _send_mail_for_one_client_and_advance(id_campagne: str, radical_compte: str,
                 """,
                 ("Mail", resultat, now, 1 if ok else 0, rid),
             )
+            record_block_result_by_rid(conn, rid, resultat=resultat, observed_at=now)
             conn.commit()
 
             summary["steps"] += 1
@@ -520,6 +522,7 @@ def apply_result_from_queue(row: Dict[str, Any], resultat_label: str, queue_tabl
             """,
             (resultat_label, action_actuelle, now, rid),
         )
+        record_block_result_by_rid(conn, rid, resultat=resultat_label, observed_at=now)
 
         id_modele = _get_id_modele_for_campagne(conn, id_campagne) or ""
         liste_action = _get_liste_action_for_modele(conn, id_modele) if id_modele else []

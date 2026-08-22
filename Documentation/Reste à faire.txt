@@ -26,12 +26,8 @@ Liste des ajouts marketing automation :
 |                      | Propension Crédit Immo          | Probabilité de souscrire un crédit immobilier                   |           P1 |
 |                      | Propension Épargne              | Probabilité d'ouvrir/souscrire un produit d'épargne             |           P1 |
 | **Décision produit** | Next Best Product               | Comparer les scores produits et déterminer le meilleur produit  |           P1 |
+
+
 | **Canal**            | Channel Affinity / Best Channel | Déterminer le canal le plus susceptible de générer une réaction |           P1 |
-
-| **Timing**           | Send Time Optimization          | Déterminer meilleur jour + meilleur créneau                     |           P1 |
-
-| **Auxiliaire**       | Score d'attrition               | Identifier désengagement/risque de départ                       |           P2 |
-
-| **Auxiliaire**       | Engagement digital              | Quantifier l'affinité digitale du client                        |           P2 |
 
 | **Auxiliaire**       | Pression / fatigue marketing    | Quantifier la sollicitation récente                             |        P2/P3 |

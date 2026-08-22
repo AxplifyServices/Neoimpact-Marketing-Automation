@@ -147,6 +147,17 @@ export default function ViewCiblePage() {
     staleTime: 60 * 1000,
   });
 
+  const { data: bestChannelSummary } = useQuery<{
+    supported: boolean;
+    total: number;
+    distribution: Array<{ canal: string; clients: number; pct: number }>;
+  }>({
+    queryKey: ['cible-best-channel-summary', id],
+    queryFn: () => apiClient.request(ciblesApi.bestChannelSummary(id!)),
+    enabled: !!id && isDbSource,
+    staleTime: 60 * 1000,
+  });
+
   const previewData = previewResponse?.rows || [];
   const totalRows = previewResponse?.total || 0;
 
@@ -250,6 +261,30 @@ export default function ViewCiblePage() {
               </div>
             )}
           </div>
+
+          {isDbSource && bestChannelSummary?.supported && (
+            <div className="border-t pt-6 mb-6">
+              <h3 className="text-lg font-semibold mb-3">Répartition du canal Top 1</h3>
+              {bestChannelSummary.distribution.length > 0 ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                  {bestChannelSummary.distribution.map((item) => (
+                    <div key={item.canal} className="rounded-lg border bg-gray-50 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm font-medium text-gray-800">{item.canal}</span>
+                        <span className="text-sm font-semibold text-gray-900">{item.pct.toFixed(1)} %</span>
+                      </div>
+                      <div className="mt-2 h-2 overflow-hidden rounded-full bg-gray-200">
+                        <div className="h-full rounded-full bg-gray-800" style={{ width: `${Math.min(100, item.pct)}%` }} />
+                      </div>
+                      <p className="mt-1 text-xs text-gray-500">{item.clients.toLocaleString('fr-FR')} clients</p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-gray-500">Aucun score Best Channel disponible.</p>
+              )}
+            </div>
+          )}
 
           {isDbSource && objectifBlock && (
             <div className="border-t pt-6">

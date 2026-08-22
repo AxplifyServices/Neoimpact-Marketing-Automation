@@ -14,6 +14,7 @@ x-backend-runtime: &backend-runtime
   stop_grace_period: 30s
   volumes:
     - attrition_model_data:/app/data/models/attrition
+    - best_channel_model_data:/app/data/models/best_channel
 
 services:
   postgres:
@@ -202,6 +203,33 @@ services:
       start_period: 60s
 
 
+  marketing_best_channel_worker:
+    <<: *backend-runtime
+    command: ["python", "-m", "app.workers.runner", "best_channel"]
+    cpu_shares: 384
+    environment:
+      <<: *backend-environment
+      APP_PROCESS_ROLE: best_channel_worker
+      BEST_CHANNEL_WORKER_ENABLED: "true"
+      BEST_CHANNEL_RUN_ON_START: "true"
+      BEST_CHANNEL_TIMEZONE: "Africa/Casablanca"
+      BEST_CHANNEL_DAILY_HOUR: "3"
+      BEST_CHANNEL_DAILY_MINUTE: "0"
+      BEST_CHANNEL_SCORE_BATCH_SIZE: "20000"
+      BEST_CHANNEL_FAKE_BATCH_SIZE: "5000"
+      BEST_CHANNEL_XGBOOST_THREADS: "2"
+      BEST_CHANNEL_MODEL_DIR: "/app/data/models/best_channel"
+      POSTGRES_POOL_MIN_SIZE: "0"
+      POSTGRES_POOL_MAX_SIZE: "2"
+      POSTGRES_POOL_TIMEOUT_SECONDS: "20"
+    healthcheck:
+      test: ["CMD-SHELL", "python -m app.workers.healthcheck best_channel"]
+      interval: 10s
+      timeout: 8s
+      retries: 12
+      start_period: 60s
+
+
   marketing_frontend:
     build:
       context: ./campain-app-main
@@ -219,3 +247,4 @@ services:
 volumes:
   neoimpact_postgres_data:
   attrition_model_data:
+  best_channel_model_data:
