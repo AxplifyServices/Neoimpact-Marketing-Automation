@@ -52,16 +52,27 @@ def _good_result_index(canal: str, values: Sequence[str]) -> int:
     return 0
 
 
-def _client_preference(age_group: str, region: str) -> str:
-    """Préférence latente déterministe utilisée uniquement pour rendre le fake data apprenable."""
-    key = zlib.crc32(f"{age_group}|{region}".encode("utf-8")) % 100
+def _profile_channel_ranking(age_group: str, region: str) -> List[str]:
+    """Classement latent déterministe âge × région utilisé uniquement pour le bootstrap fake."""
     if age_group in {"0-17", "18-24", "25-34"}:
         ordered = ["Push notification", "Whatsapp", "SMS", "Mail", "Appel", "Conseiller client", "Directeur d'agence"]
     elif age_group in {"50-59", "60+"}:
         ordered = ["Appel", "Conseiller client", "Directeur d'agence", "SMS", "Mail", "Whatsapp", "Push notification"]
     else:
         ordered = ["Mail", "Whatsapp", "Appel", "SMS", "Push notification", "Conseiller client", "Directeur d'agence"]
-    return ordered[key % len(ordered)]
+    offset = zlib.crc32(f"{age_group}|{region}".encode("utf-8")) % len(ordered)
+    return ordered[offset:] + ordered[:offset]
+
+
+def _channel_fit(age_group: str, region: str, canal: str) -> float:
+    ranking = _profile_channel_ranking(age_group, region)
+    try:
+        rank = ranking.index(canal)
+    except ValueError:
+        return 0.20
+    # L'écart reste volontairement progressif : le fake data ne doit pas créer
+    # un modèle artificiellement parfait, seulement un signal exploitable.
+    return [1.00, 0.82, 0.68, 0.54, 0.42, 0.32, 0.24][rank]
 
 
 def _message(fake: Faker, canal: str) -> str:
@@ -95,7 +106,9 @@ def _iter_fake_rows(clients: Sequence[Dict[str, Any]], run_date: date) -> Iterab
         fake.seed_instance(seed)
 
         sequences = 1 + (1 if rng.random() < 0.22 else 0)
-        preferred = _client_preference(tranche, region)
+        profile_ranking = _profile_channel_ranking(tranche, region)
+        preferred = profile_ranking[0]
+        second_preferred = profile_ranking[1]
 
         for seq_index in range(1, sequences + 1):
             month_offset = rng.randint(0, 11)
@@ -105,34 +118,48 @@ def _iter_fake_rows(clients: Sequence[Dict[str, Any]], run_date: date) -> Iterab
             campaign = FAKE_CAMPAIGNS[rng.randrange(len(FAKE_CAMPAIGNS))]
             block_count = rng.randint(2, 4)
             channels = rng.sample(CANONICAL_CHANNELS, k=min(block_count, len(CANONICAL_CHANNELS)))
-            if preferred not in channels and rng.random() < 0.55:
+            # Le canal latent n'est pas injecté systématiquement : certaines campagnes
+            # passent naturellement par des canaux moins adaptés au profil.
+            if preferred not in channels and rng.random() < 0.10:
                 channels[-1] = preferred
 
             staged = []
-            sequence_strength = 0.0
+            qualities: Dict[str, float] = {}
             for block_order, canal in enumerate(channels, start=1):
                 values = _canonical_results(canal)
                 good_idx = _good_result_index(canal, values)
-                good_probability = 0.58 + (0.10 if canal == preferred else 0.0)
+                fit = _channel_fit(tranche, region, canal)
+                # Un canal mieux adapté a davantage de chances d'obtenir un bon
+                # résultat intermédiaire, sans rendre l'issue déterministe.
+                good_probability = 0.26 + (0.60 * fit)
                 if rng.random() < good_probability:
                     result = values[good_idx]
                 else:
                     alternatives = [v for i, v in enumerate(values) if i != good_idx] or values
                     result = alternatives[rng.randrange(len(alternatives))]
                 quality = result_quality(result)
-                sequence_strength = max(sequence_strength, quality + (0.18 if canal == preferred else 0.0))
+                qualities[canal] = quality
                 observed = datetime.combine(event_day, time(hour=rng.randint(8, 19), minute=rng.randint(0, 59)), tzinfo=timezone.utc)
                 block_id = f"B{block_order}"
-                event_key = f"fake:{campaign}:{radical}:{seq_index}:{block_order}:{int(observed.timestamp())}"
+                event_key = f"fake:v2:{campaign}:{radical}:{seq_index}:{block_order}:{int(observed.timestamp())}"
                 staged.append((
                     "fake", campaign, radical, seq_index, block_id, block_order, block_order - 1,
                     canal, _message(fake, canal), result, quality,
                     tranche, region, observed, event_key,
                 ))
 
-            # Taux de conversion volontairement bas (~4-8 %), légèrement amélioré par un bon canal/résultat.
-            probability = 0.025 + (0.022 if preferred in channels else 0.0) + max(0.0, sequence_strength - 0.75) * 0.07
-            probability = min(0.085, max(0.02, probability))
+            # Environ 5 % de conversions au global. Le meilleur canal du profil
+            # influence nettement l'objectif seulement lorsqu'il produit aussi un
+            # bon résultat intermédiaire. Le second canal garde un effet plus faible.
+            if preferred in qualities:
+                probability = 0.100 if qualities[preferred] >= 0.80 else 0.012
+            elif second_preferred in qualities:
+                probability = 0.025 if qualities[second_preferred] >= 0.80 else 0.008
+            else:
+                probability = 0.005
+            if sum(1 for q in qualities.values() if q >= 0.80) >= 2:
+                probability += 0.003
+            probability = min(0.13, probability)
             objective = 1 if rng.random() < probability else 0
             objective_id = f"OBJ{seq_index}"
             finalized = max(row[13] for row in staged) + timedelta(minutes=3)

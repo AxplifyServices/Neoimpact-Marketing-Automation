@@ -229,7 +229,10 @@ def finalize_current_sequence(
         (target, str(objective_id_action or ""), campaign, radical, sequence_no),
     )
     updated = int(cur.rowcount or 0)
-    if target == 0 and updated > 0:
+    # Un bloc Objectif ferme toujours la séquence courante. Si le workflow
+    # poursuit ensuite son chemin, le bloc suivant appartient donc à une nouvelle
+    # séquence, que l'objectif ait été validé ou non.
+    if updated > 0:
         cur.execute(
             """
             UPDATE clients_campagnes

@@ -13,7 +13,7 @@ streamlit run app/streamlit/Consolide_int.py
 serv :ssh ubuntu@51.75.252.139
 Code serveur : zitanezac
 
-cd /opt/apps
+cd /opt/apps/marketing-automation/repo
 
 Liens : 
 

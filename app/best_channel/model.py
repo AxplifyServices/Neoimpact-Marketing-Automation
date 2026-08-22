@@ -14,7 +14,7 @@ import numpy as np
 from app.best_channel.history import CANONICAL_CHANNELS, age_band, training_weight
 
 logger = logging.getLogger(__name__)
-MODEL_CODE = "best_channel_xgboost_v1"
+MODEL_CODE = "best_channel_xgboost_v2"
 AGE_BANDS = ["0-17", "18-24", "25-34", "35-49", "50-59", "60+", "Inconnu"]
 
 
@@ -96,7 +96,7 @@ def train_model(conn) -> Dict[str, Any]:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT radical_compte, tranche_age, COALESCE(region,'Inconnue'), canal,
+            SELECT radical_compte, tranche_age, COALESCE(region,'Inconnue') AS region, canal,
                    resultat_bloc, objectif_valide
             FROM dm_best_channel_interactions
             WHERE finalized_at IS NOT NULL
@@ -197,9 +197,26 @@ def train_model(conn) -> Dict[str, Any]:
     return metadata
 
 
+def _model_is_stale(metadata: Dict[str, Any], *, max_age_days: int = 183) -> bool:
+    raw = str(metadata.get("trained_at") or "").strip()
+    if not raw:
+        return True
+    try:
+        trained_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if trained_at.tzinfo is None:
+            trained_at = trained_at.replace(tzinfo=timezone.utc)
+    except Exception:
+        return True
+    age = datetime.now(timezone.utc) - trained_at.astimezone(timezone.utc)
+    return age.days >= max_age_days
+
+
 def get_or_train_model(conn):
     if model_exists():
-        return load_model(), load_metadata(), False
+        metadata = load_metadata()
+        if metadata and not _model_is_stale(metadata):
+            return load_model(), metadata, False
+        logger.info("Modèle Best Channel absent ou âgé de plus de 6 mois: réentraînement.")
     metadata = train_model(conn)
     return load_model(), metadata, True
 
