@@ -212,7 +212,12 @@ def _score_clients(run_date: date) -> Dict[str, Any]:
 
 def run_product_scoring_cycle(*, trigger: str = "manual", run_date: date | None = None) -> Dict[str, Any]:
     day = run_date or date.today()
-    with connection() as lock_conn:
+    # Le verrou d'orchestration vit pendant tout le cycle (bootstrap + 11 modèles + scoring).
+    # Il ne doit donc jamais occuper une connexion du petit pool partagé du worker :
+    # sinon le heartbeat et les autres opérations DB peuvent s'affamer mutuellement.
+    # autocommit=True ouvre ici une connexion dédiée, hors pool, et le verrou de
+    # session reste valide jusqu'à la fermeture de cette connexion.
+    with connection(autocommit=True) as lock_conn:
         with lock_conn.cursor() as cur:
             cur.execute("SELECT pg_try_advisory_lock(%s)", (ADVISORY_LOCK_KEY,))
             if not bool((cur.fetchone() or [False])[0]):

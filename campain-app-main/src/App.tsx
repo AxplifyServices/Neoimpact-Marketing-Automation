@@ -1,8 +1,9 @@
 import { lazy, Suspense } from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import LoadingSpinner from './components/LoadingSpinner';
 import { routeLoaders } from './lib/route-preload';
+import RouteErrorBoundary from './components/RouteErrorBoundary';
 
 const CampagnesPage = lazy(routeLoaders.campagnes);
 const ModelesPage = lazy(routeLoaders.modeles);
@@ -32,12 +33,14 @@ function RouteFallback() {
   );
 }
 
-function App() {
+function AppShell() {
+  const location = useLocation();
+
   return (
-    <BrowserRouter>
-      <div className="flex h-screen overflow-hidden">
-        <Sidebar />
-        <main className="flex-1 overflow-x-hidden overflow-y-auto lg:ml-0">
+    <div className="flex h-screen overflow-hidden">
+      <Sidebar />
+      <main className="flex-1 overflow-x-hidden overflow-y-auto lg:ml-0">
+        <RouteErrorBoundary resetKey={location.pathname}>
           <Suspense fallback={<RouteFallback />}>
             <Routes>
               <Route path="/" element={<Navigate to="/campagnes" replace />} />
@@ -67,8 +70,16 @@ function App() {
               <Route path="/support" element={<Navigate to="/campagnes" replace />} />
             </Routes>
           </Suspense>
-        </main>
-      </div>
+        </RouteErrorBoundary>
+      </main>
+    </div>
+  );
+}
+
+function App() {
+  return (
+    <BrowserRouter>
+      <AppShell />
     </BrowserRouter>
   );
 }

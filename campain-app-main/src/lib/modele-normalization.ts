@@ -93,6 +93,28 @@ function parseBackendCondition(oldCond: any, blockId: string | number, idx: numb
   return condition;
 }
 
+function normalizeConditionsByParent(
+  value: unknown,
+  parents: string[],
+  blockId: string,
+): Record<string, BlockCondition[]> {
+  const result: Record<string, BlockCondition[]> = {};
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    for (const [rawParentId, rawConditions] of Object.entries(value as Record<string, unknown>)) {
+      const parentId = normalizeParentId(rawParentId);
+      if (!parentId) continue;
+      result[parentId] = normalizeConditions(
+        Array.isArray(rawConditions) ? rawConditions : [],
+        `${blockId}_${parentId}`,
+      );
+    }
+  }
+  for (const parentId of parents) {
+    if (!Array.isArray(result[parentId])) result[parentId] = [];
+  }
+  return result;
+}
+
 function normalizeConditions(conditions: any[], blockId: string): BlockCondition[] {
   if (!Array.isArray(conditions)) return [];
   return conditions.map((cond, idx) => {
@@ -161,16 +183,9 @@ function convertOldFormatToNew(parsedBlocks: any[]): Block[] {
       oldBlock['Bloc_mère'] ?? oldBlock['Bloc_mere']
     );
 
-    const conditionsByParent: Record<string, BlockCondition[]> = {};
+    let conditionsByParent: Record<string, BlockCondition[]> = {};
     if (oldBlock.ConditionsByParent && typeof oldBlock.ConditionsByParent === 'object') {
-      for (const [parentId, conds] of Object.entries(oldBlock.ConditionsByParent)) {
-        const normalizedPid = normalizeParentId(parentId);
-        if (normalizedPid) {
-          conditionsByParent[normalizedPid] = (conds as any[] || []).map((c: any, idx: number) =>
-            parseBackendCondition(c, blockId, idx)
-          );
-        }
-      }
+      conditionsByParent = normalizeConditionsByParent(oldBlock.ConditionsByParent, parents, id);
     } else {
       const flatConds = (oldBlock.Conditions || []).map((c: any, idx: number) =>
         parseBackendCondition(c, blockId, idx)
@@ -183,9 +198,9 @@ function convertOldFormatToNew(parsedBlocks: any[]): Block[] {
       }
     }
 
-    const objectiveConditions = (oldBlock.ObjectiveConditions || []).map((c: any, idx: number) =>
-      parseBackendCondition(c, `${blockId}_obj`, idx)
-    );
+    const objectiveConditions = Array.isArray(oldBlock.ObjectiveConditions)
+      ? oldBlock.ObjectiveConditions.map((c: any, idx: number) => parseBackendCondition(c, `${blockId}_obj`, idx))
+      : [];
 
     return {
       id,
@@ -231,7 +246,7 @@ export function normalizeBlocks(rawBlocks: any[]): Block[] {
 
     let conditionsByParent: Record<string, BlockCondition[]> = {};
     if (block.conditionsByParent && typeof block.conditionsByParent === 'object') {
-      conditionsByParent = block.conditionsByParent;
+      conditionsByParent = normalizeConditionsByParent(block.conditionsByParent, parents, id);
     } else {
       const flatConds = normalizeConditions(block.conditions ?? block.Conditions ?? [], id);
       if (parents.length > 0 && flatConds.length > 0) {
@@ -243,10 +258,10 @@ export function normalizeBlocks(rawBlocks: any[]): Block[] {
     }
 
     const objectiveConditions = Array.isArray(block.objectiveConditions)
-      ? block.objectiveConditions
-      : (block.ObjectiveConditions || []).map((c: any, idx: number) =>
-          parseBackendCondition(c, `${id}_obj`, idx)
-        );
+      ? normalizeConditions(block.objectiveConditions, `${id}_obj`)
+      : Array.isArray(block.ObjectiveConditions)
+        ? block.ObjectiveConditions.map((c: any, idx: number) => parseBackendCondition(c, `${id}_obj`, idx))
+        : [];
 
     return {
       id,

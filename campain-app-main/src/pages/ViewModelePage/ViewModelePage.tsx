@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback, useEffect } from 'react';
+import { lazy, Suspense, useMemo, useState, useCallback, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, GitBranch, Eye, Code2, X } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -10,7 +10,7 @@ import { getBlockDepth, getBlockDisplayNumber, getHierarchicalNumber, getOrdered
 import { isMessagingCanal, normalizeBlocks } from '@/lib/modele-normalization';
 import type { Block, BlockCondition, CanauxMetadata, WorkflowLayout } from '@/types/modele.types';
 import LoadingSpinner from '../../components/LoadingSpinner';
-import WorkflowPreview from '../../components/custom/WorkflowPreview';
+const WorkflowPreview = lazy(() => import('../../components/custom/WorkflowPreview'));
 
 interface ModeleDetail {
   id_modele: string;
@@ -33,6 +33,7 @@ function parseArrayJson(value: string): any[] | null {
 function resolveBlocksForView(modele: ModeleDetail | undefined): Block[] {
   if (!modele) return [];
 
+  try {
   if (Array.isArray(modele.blocks)) {
     return normalizeBlocks(modele.blocks);
   }
@@ -48,6 +49,10 @@ function resolveBlocksForView(modele: ModeleDetail | undefined): Block[] {
   }
 
   return [];
+  } catch (error) {
+    console.error('[ViewModelePage] Impossible de normaliser les blocs du modèle', error);
+    return [];
+  }
 }
 
 function formatConditionLabel(condition: BlockCondition, parentCanal?: string, canauxData?: CanauxMetadata): string {
@@ -191,7 +196,13 @@ export default function ViewModelePage() {
   const [activeBlockId, setActiveBlockId] = useState<string | null>(null);
   const [isBlockModalOpen, setIsBlockModalOpen] = useState(false);
 
-  const { data: modele, isLoading: modeleLoading } = useQuery<ModeleDetail>({
+  const {
+    data: modele,
+    isLoading: modeleLoading,
+    isError: modeleError,
+    error: modeleQueryError,
+    refetch: refetchModele,
+  } = useQuery<ModeleDetail>({
     queryKey: ['modele', id],
     queryFn: () => apiClient.request<ModeleDetail>(modelesApi.findById(id!)),
     enabled: !!id,
@@ -209,13 +220,18 @@ export default function ViewModelePage() {
     } catch { return null; }
   }, [modele?.ui_positions]);
 
-  const { data: canauxData, isLoading: canauxLoading } = useQuery<CanauxMetadata>({
+  const {
+    data: canauxData,
+    isLoading: canauxLoading,
+    isError: canauxError,
+    refetch: refetchCanaux,
+  } = useQuery<CanauxMetadata>({
     queryKey: ['meta-canaux'],
     queryFn: () => apiClient.request<CanauxMetadata>(metaApi.getCanaux()),
     staleTime: 5 * 60_000,
   });
 
-  const isLoading = modeleLoading || canauxLoading;
+  const isLoading = modeleLoading;
 
   const selectedBlock = useMemo(
     () => (activeBlockId ? blocks.find((block) => block.id === activeBlockId) || null : null),
@@ -252,6 +268,34 @@ export default function ViewModelePage() {
     );
   }
 
+  if (modeleError) {
+    return (
+      <div className="min-h-screen bg-gray-50 p-4 sm:p-6 lg:p-8 pt-20 lg:pt-8">
+        <div className="mx-auto max-w-3xl rounded-2xl border border-red-200 bg-white p-6 shadow-sm">
+          <button
+            type="button"
+            onClick={() => navigate('/modeles')}
+            className="mb-5 flex items-center gap-2 text-gray-600 transition-colors hover:text-gray-900"
+          >
+            <ArrowLeft className="h-5 w-5" />
+            <span>Retour aux modèles</span>
+          </button>
+          <h2 className="text-lg font-semibold text-gray-900">Impossible de charger le modèle</h2>
+          <p className="mt-2 text-sm text-gray-600">
+            {modeleQueryError instanceof Error ? modeleQueryError.message : 'Une erreur réseau ou serveur est survenue.'}
+          </p>
+          <button
+            type="button"
+            onClick={() => void refetchModele()}
+            className="mt-5 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+          >
+            Réessayer
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   if (!modele) {
     return (
       <div className="min-h-screen bg-gray-50 p-4 sm:p-6 lg:p-8 pt-20 lg:pt-8">
@@ -283,6 +327,16 @@ export default function ViewModelePage() {
         </button>
         <h1 className="text-3xl sm:text-4xl font-bold text-gray-900">{modele.nom_modele}</h1>
         <p className="text-gray-600 mt-2">Mode lecture seule</p>
+        {canauxLoading && <p className="mt-2 text-xs text-gray-500">Chargement des métadonnées canaux…</p>}
+        {canauxError && (
+          <button
+            type="button"
+            onClick={() => void refetchCanaux()}
+            className="mt-2 text-xs font-medium text-amber-700 hover:text-amber-800"
+          >
+            Métadonnées canaux indisponibles — réessayer
+          </button>
+        )}
       </div>
 
       <div className="max-w-7xl mx-auto">
@@ -316,17 +370,27 @@ export default function ViewModelePage() {
                   <p className="text-gray-500">Aucune action ajoutee.</p>
                 </div>
               ) : (
-                <WorkflowPreview
-                  blocks={blocks}
-                  getBlockDisplayNumber={(blockId) => getBlockDisplayNumber(blocks, blockId)}
-                  onSelectBlock={openBlockModal}
-                  selectedBlockIds={activeBlockId ? [activeBlockId] : []}
-                  layout={layout}
-                  showHeader={false}
-                  showFrame={false}
-                  height="calc(100vh - 280px)"
-                  containerClassName="rounded-lg border border-gray-200"
-                />
+                <Suspense
+                  fallback={(
+                    <div className="flex h-[420px] items-center justify-center rounded-lg border border-gray-200 bg-white">
+                      <LoadingSpinner size="lg" />
+                    </div>
+                  )}
+                >
+                  <WorkflowPreview
+                    blocks={blocks}
+                    getBlockDisplayNumber={(blockId) => getBlockDisplayNumber(blocks, blockId)}
+                    onSelectBlock={openBlockModal}
+                    selectedBlockIds={activeBlockId ? [activeBlockId] : []}
+                    layout={layout}
+                    loadAnalytics={false}
+                    autoLayoutEngine="simple"
+                    showHeader={false}
+                    showFrame={false}
+                    height="calc(100vh - 280px)"
+                    containerClassName="rounded-lg border border-gray-200"
+                  />
+                </Suspense>
               )}
             </TabsContent>
 
@@ -342,7 +406,10 @@ export default function ViewModelePage() {
                     const depth = getBlockDepth(blocks, block.id);
                     const hierarchicalNumber = getHierarchicalNumber(blocks, block.id);
                     const isChildBlock = block.parents.length > 0;
-                    const totalConditionCount = Object.values(block.conditionsByParent).reduce((sum, conditions) => sum + conditions.length, 0);
+                    const totalConditionCount = Object.values(block.conditionsByParent || {}).reduce(
+                      (sum, conditions) => sum + (Array.isArray(conditions) ? conditions.length : 0),
+                      0,
+                    );
                     const conditionLabel = totalConditionCount === 1 ? 'condition' : 'conditions';
 
                     return (
